@@ -208,20 +208,7 @@ export default function AudioList() {
     document.addEventListener('mouseup', onUp)
   }, [computedLanes, updateSubtitle])
 
-  if (withAudio.length === 0) {
-    return (
-      <>
-        <div onMouseDown={onResizeDown}
-          className="border-t border-zinc-700 bg-zinc-800/50 flex-shrink-0 cursor-row-resize flex items-center justify-center hover:bg-blue-900/30 transition-colors"
-          style={{ height: RESIZE_H }}>
-          <div className="flex gap-1">{[0,1,2,3].map(i => <div key={i} className="w-4 h-px bg-zinc-600"/>)}</div>
-        </div>
-        <div className="bg-[#0F172A] flex-shrink-0 flex items-center justify-center" style={{ height }}>
-          <span className="text-[11px] text-zinc-500">Chưa có audio — bấm TTS để tạo</span>
-        </div>
-      </>
-    )
-  }
+  // Không return early — luôn render timeline với hàng phụ đề
 
   const tickInterval = pxPerSec >= 60 ? 1 : pxPerSec >= 20 ? 5 : 10
   const ticks = Array.from({ length: Math.ceil(totalDur / tickInterval) + 1 }, (_, i) => i * tickInterval)
@@ -344,6 +331,14 @@ export default function AudioList() {
               <div className="absolute w-0 h-0 border-l-[4px] border-r-[4px] border-t-[6px] border-l-transparent border-r-transparent border-t-red-500"
                 style={{ top: 0, left: -3.5 }}/>
             </div>
+
+            {/* ── Empty state ── */}
+            {withAudio.length === 0 && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                style={{ top: audioTopOffset }}>
+                <span className="text-[11px] text-zinc-600">Chưa có audio — bấm TTS để tạo</span>
+              </div>
+            )}
 
             {/* ── Audio blocks ── */}
             {withDur.map(s => {

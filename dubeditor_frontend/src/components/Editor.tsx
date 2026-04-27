@@ -24,6 +24,32 @@ export default function Editor({ projectId, onBack }: Props) {
   const [swapTo, setSwapTo]               = useState<number | null>(null)
   const [swapping, setSwapping]           = useState(false)
   const [showAutoAssign, setShowAutoAssign] = useState(false)
+  const [modelStatus, setModelStatus] = useState<'unknown'|'loaded'|'loading'|'unloaded'>('unknown')
+
+  // Poll model status
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const res = await fetch('/api/model/status')
+        const d = await res.json()
+        setModelStatus(d.loading ? 'loading' : d.loaded ? 'loaded' : 'unloaded')
+      } catch { setModelStatus('unknown') }
+    }
+    check()
+    const id = setInterval(check, 5000)
+    return () => clearInterval(id)
+  }, [])
+
+  const toggleModel = async () => {
+    if (modelStatus === 'loading') return
+    if (modelStatus === 'loaded') {
+      await fetch('/api/model/unload', { method: 'POST' })
+      setModelStatus('unloaded')
+    } else {
+      setModelStatus('loading')
+      await fetch('/api/model/load', { method: 'POST' })
+    }
+  }
 
   const [overlapMinCount, setOverlapMinCount] = useState(2)
   const [overlapMinSec, setOverlapMinSec] = useState(0.01)
@@ -281,6 +307,20 @@ export default function Editor({ projectId, onBack }: Props) {
           SRT
           <input type="file" accept=".srt,.SRT" onChange={importSRT} className="hidden" />
         </label>
+        {/* Model load/unload */}
+        <button onClick={toggleModel} disabled={modelStatus==='loading'}
+          title={modelStatus==='loaded' ? 'Click để Unload Model (giải phóng VRAM)' : 'Click để Load Model (cần để dùng TTS)'}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0 disabled:opacity-60
+            ${modelStatus==='loaded'
+              ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 hover:bg-red-50 hover:border-red-300 hover:text-red-500'
+              : modelStatus==='loading'
+              ? 'border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-600'
+              : 'border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-500 hover:bg-emerald-50 hover:border-emerald-300 hover:text-emerald-600'
+            }`}>
+          {modelStatus==='loaded' && <><span className="w-1.5 h-1.5 rounded-full bg-emerald-500"/>Model ON</>}
+          {modelStatus==='loading' && <><div className="w-3 h-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin"/>Loading...</>}
+          {(modelStatus==='unloaded'||modelStatus==='unknown') && <><span className="w-1.5 h-1.5 rounded-full bg-zinc-400"/>Model OFF</>}
+        </button>
         <button onClick={() => setShowAutoAssign(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-purple-300 dark:border-purple-800 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-400 text-[12px] font-medium hover:bg-purple-100 dark:hover:bg-purple-950 transition-colors flex-shrink-0">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">

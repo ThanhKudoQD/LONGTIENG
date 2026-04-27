@@ -19,11 +19,11 @@ def main():
     if torch.cuda.is_available():
         pipeline = pipeline.to(torch.device("cuda"))
 
-    diarization = pipeline(
-        vocals_path,
-        min_speakers=min_speakers,
-        max_speakers=max_speakers,
-    )
+    # Để Pyannote tự detect số speaker — chính xác hơn
+    kwargs = {}
+    if min_speakers > 1: kwargs["min_speakers"] = min_speakers
+    if max_speakers < 20: kwargs["max_speakers"] = max_speakers
+    diarization = pipeline(vocals_path, **kwargs)
 
     segments = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):

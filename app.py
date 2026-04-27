@@ -347,6 +347,20 @@ def _save_generated(wav: np.ndarray, sr: int = 48000) -> str:
     sf.write(str(fpath), wav, sr)
     return f"/uploads/generated/{fname}"
 
+# ─── Model API ──────────────────────────────────────────────────────────────
+_model_loading = False
+
+def _do_load():
+    global _model_loading, _nano_error
+    _model_loading = True
+    try:
+        _nano_ready.clear()
+        _nano_error = None
+        _start_nano()
+        _preload_all_loras()
+    finally:
+        _model_loading = False
+
 # ─── FastAPI App ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -354,12 +368,6 @@ async def lifespan(app: FastAPI):
     from dubeditor.database import init_db as dub_init_db
     dub_init_db()
     seed_admin()
-    def _start_and_preload():
-        _start_nano()
-        _preload_all_loras()
-
-    t = threading.Thread(target=_start_and_preload, daemon=True)
-    t.start()
     logger.info(f"✅ Server: http://{HOST}:{PORT}")
     yield
 
@@ -767,6 +775,44 @@ def main():
         _nano_ready.set()
 
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+
+
+# ─── Model load/unload endpoints ─────────────────────────────────────────────
+@app.get("/api/model/status")
+def model_status():
+    return {
+        "loaded": _nano_server is not None,
+        "loading": _model_loading,
+        "error": str(_nano_error) if _nano_error else None,
+    }
+
+@app.post("/api/model/load")
+def model_load():
+    global _model_loading
+    if _nano_server is not None:
+        return {"ok": True, "msg": "Model đã load rồi"}
+    if _model_loading:
+        return {"ok": False, "msg": "Đang load..."}
+    t = threading.Thread(target=_do_load, daemon=True)
+    t.start()
+    return {"ok": True, "msg": "Bắt đầu load model..."}
+
+@app.post("/api/model/unload")
+def model_unload():
+    global _nano_server, _nano_error
+    import gc, torch
+    if _nano_server is None:
+        return {"ok": True, "msg": "Model chưa load"}
+    try:
+        _nano_server.stop()
+    except: pass
+    _nano_server = None
+    _nano_error  = None
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    logger.info("[Model] Unloaded ✅")
+    return {"ok": True, "msg": "Model đã unload"}
 
 if __name__ == "__main__":
     main()
