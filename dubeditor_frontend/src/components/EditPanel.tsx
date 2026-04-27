@@ -89,33 +89,7 @@ export default function EditPanel() {
         </div>
       ) : (
         <>
-          {/* Row 1: index + timing + char + xóa */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] text-zinc-400 font-mono flex-shrink-0">#{sub.index}</span>
-
-            {/* Time inputs — rộng hơn để hiện đủ HH:MM:SS,mmm */}
-            <input value={start} onChange={e => setStart(e.target.value)}
-              className="input text-[12px] font-mono flex-shrink-0"
-              style={{ width: 110 }} />
-            <span className="text-zinc-300 flex-shrink-0">→</span>
-            <input value={end} onChange={e => setEnd(e.target.value)}
-              className="input text-[12px] font-mono flex-shrink-0"
-              style={{ width: 110 }} />
-
-            <select value={charId} onChange={e => setCharId(e.target.value)}
-              className="input text-[12px] flex-1 min-w-0">
-              <option value="">— nhân vật —</option>
-              {characters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-            <button onClick={() => setConfirmDelete(true)} title="Xóa (Delete)"
-              className="flex-shrink-0 w-8 h-8 rounded-lg border border-red-200 dark:border-red-900 text-red-400 hover:bg-red-500 hover:text-white hover:border-red-500 flex items-center justify-center transition-all duration-150">
-              <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                <path d="M2 3h9M5 3V2h3v1M4 3l.5 7.5h4L9 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-            </button>
-          </div>
-
-          {/* Row 2: textarea + nút Lưu */}
+          {/* textarea + nút Lưu */}
           <div className="flex gap-2 items-stretch">
             <textarea
               value={text}

@@ -32,7 +32,7 @@ export default function Editor({ projectId, onBack }: Props) {
   const [uploadMsg, setUploadMsg] = useState('')
   const [uploadPct, setUploadPct] = useState(-1)
 
-  const [col2Width, setCol2Width] = useState(400)
+  const [col2Width, setCol2Width] = useState(1000)
   const hDragRef = useRef<{ startX: number; startW: number } | null>(null)
   const [videoHeight, setVideoHeight] = useState<number | null>(null)
   const vDragRef = useRef<{ startY: number; startH: number } | null>(null)
@@ -88,7 +88,7 @@ export default function Editor({ projectId, onBack }: Props) {
     hDragRef.current = { startX: e.clientX, startW: col2Width }
     const onMove = (ev: MouseEvent) => {
       if (!hDragRef.current) return
-      setCol2Width(Math.max(280, Math.min(800, hDragRef.current.startW + ev.clientX - hDragRef.current.startX)))
+      setCol2Width(Math.max(280, Math.min(1400, hDragRef.current.startW + ev.clientX - hDragRef.current.startX)))
     }
     const onUp = () => { hDragRef.current = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp) }
     document.addEventListener('mousemove', onMove)
