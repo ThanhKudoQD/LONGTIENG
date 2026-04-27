@@ -135,6 +135,7 @@ async def do_generate(subtitle_id: int, db: Session):
         loop = asyncio.get_event_loop()
         wav  = await loop.run_in_executor(None, _run_tts, s.text.strip(), role_id)
 
+        wav = _trim_silence(wav, threshold_db=-35, sr=48000)
         sf.write(str(out_path), wav, 48000)
         wav_dur = len(wav) / 48000
         logger.info(f"[DubTTS] DONE → {filename} ({wav_dur:.2f}s)")
@@ -265,7 +266,8 @@ async def trim_bulk(data: TrimBulkRequest, db: Session = Depends(get_db)):
             trimmed = _trim_silence(wav, threshold_db=data.threshold_db, sr=sr)
             sf.write(str(audio_dir / filename), trimmed, sr)
             audio_url = f"/dub/projects/{s.project_id}/audio/{filename}"
-            s.audio_path = audio_url
+            s.audio_path   = audio_url
+            s.wav_duration = len(trimmed) / sr
             trimmed_count += 1
         except Exception as e:
             logger.error(f"Trim error sub {s.id}: {e}")
