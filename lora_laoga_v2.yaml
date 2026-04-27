@@ -1,0 +1,35 @@
+pretrained_path: /home/dmin/nano/VoxCPM2/
+train_manifest: /home/dmin/nano/dataset/nhan_vat_gia/train.jsonl
+val_manifest: null
+sample_rate: 16000
+out_sample_rate: 48000
+
+batch_size: 4
+grad_accum_steps: 1
+num_workers: 2
+
+num_iters: 27
+log_interval: 3
+valid_interval: 999
+save_interval: 9
+learning_rate: 0.0001
+weight_decay: 0.01
+warmup_steps: 5
+max_steps: 27
+max_batch_tokens: 8192
+max_grad_norm: 1.0
+
+save_path: /home/dmin/nano/checkpoints/lao_gia_v2
+tensorboard: /home/dmin/nano/logs/lao_gia_v2
+
+lambdas:
+  loss/diff: 1.0
+  loss/stop: 1.0
+
+lora:
+  enable_lm: true
+  enable_dit: true
+  enable_proj: false
+  r: 32
+  alpha: 32
+  dropout: 0.0

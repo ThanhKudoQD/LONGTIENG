@@ -1,0 +1,77 @@
+{
+  "Thành": {
+    "name": "Thành",
+    "description": "Nam 30 tuổi - giọng hơi trầm - men",
+    "audio_path": "/home/dmin/nano/voices/Thành.WAV",
+    "control_instruction": "",
+    "transcript": "ai cũng lên giường với cô được phải không cô giả vờ gì chứ cô muốn lắm còn gì",
+    "cloning_mode": "ultimate"
+  },
+  "Đông": {
+    "name": "Đông",
+    "description": "Nam 30 tuổi - giọng ấm, thanh bay sáng",
+    "audio_path": "/home/dmin/nano/voices/Đông.wav",
+    "control_instruction": "",
+    "transcript": "lấy cờ bạc làm kế sinh nhai",
+    "cloning_mode": "ultimate"
+  },
+  "Chú_Trung": {
+    "name": "Chú Trung",
+    "description": "Nam 45 tuổi - giọng ấm - hơi khàn ( phù hợp vai ác )",
+    "audio_path": "/home/dmin/nano/voices/Chú_Trung.wav",
+    "control_instruction": "",
+    "transcript": "vừa xóc mà đã ra nhất tuyến thiên lại vẫn kiểm soát được điểm của từng viên xúc xắc",
+    "cloning_mode": "ultimate"
+  },
+  "Thương": {
+    "name": "Thương",
+    "description": "nữ ngạc nhiên",
+    "audio_path": "/home/dmin/nano/voices/Thương.WAV",
+    "control_instruction": "",
+    "transcript": "hớ, trời đất ơi, hơ, chuyện đó có thật hả con",
+    "cloning_mode": "ultimate"
+  },
+  "lão_gia": {
+    "name": "lão gia",
+    "description": "lão gia nhiều tuổi",
+    "audio_path": "/home/dmin/nano/voices/lão_gia.wav",
+    "control_instruction": "",
+    "transcript": "ngày mai hai đứa bây đi tìm thằng nhóc đó đòi lại tiền cho tao",
+    "cloning_mode": "ultimate"
+  },
+  "1": {
+    "name": "1",
+    "description": "",
+    "audio_path": "/home/dmin/nano/voices/1.wav",
+    "control_instruction": "",
+    "transcript": "chưa chết thì hai đứa mày sợ cái quái gì hả, chưa chết thì nó phải trả tiền cho tao",
+    "cloning_mode": "ultimate"
+  },
+  "Lora_lao_gia": {
+    "name": "Lora lao gia",
+    "description": "",
+    "audio_path": "",
+    "control_instruction": "",
+    "transcript": "",
+    "cloning_mode": "controllable",
+    "lora_path": "/home/dmin/nano/checkpoints/nhan_vat_gia/latest"
+  },
+  "Lora1": {
+    "name": "Lora1",
+    "description": "",
+    "audio_path": "/home/dmin/nano/voices/Lora1.wav",
+    "control_instruction": "",
+    "transcript": "",
+    "cloning_mode": "controllable",
+    "lora_path": "/home/dmin/nano/checkpoints/nhan_vat_gia/latest"
+  },
+  "lora___ultimate": {
+    "name": "lora + ultimate",
+    "description": "",
+    "audio_path": "/home/dmin/nano/voices/lora___ultimate.wav",
+    "control_instruction": "",
+    "transcript": "chưa chết thì hai đứa mày sợ cái quái gì hả, chưa chết thì nó phải trả tiền cho tao",
+    "cloning_mode": "ultimate",
+    "lora_path": "/home/dmin/nano/checkpoints/nhan_vat_gia/latest"
+  }
+}

@@ -1,0 +1,77 @@
+# Python cache
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+
+venv/
+.env/
+.venv/
+env/
+ENV/
+
+# Node.js
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+
+dist/
+build/
+
+# Test / coverage
+logs
+TEST
+.coverage
+.coverage.*
+.cache
+pytest_cache/
+htmlcov/
+
+# IDE
+
+.vscode/
+.idea/
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# dotenv
+
+.env
+.env.*
+
+# Logs
+
+*.log
+
+# Database
+
+*.sqlite3
+
+# Temporary files
+
+*.swp
+*.swo
+*~
+VoxCPM
+VoxCPM2
+TEST
+yes
+
+dataset/
+checkpoints/
+Miniconda3-latest-Linux-x86_64.sh
+TEST.zip
+
+public
+dubeditor_frontend/node_modules/
+data
