@@ -145,7 +145,7 @@ async def do_generate(subtitle_id: int, db: Session):
         s.wav_duration = wav_dur
         db.commit()
 
-        await broadcast(s.project_id, {"type": "tts_done", "subtitle_id": s.id, "audio_path": audio_url})
+        await broadcast(s.project_id, {"type": "tts_done", "subtitle_id": s.id, "audio_path": audio_url, "wav_duration": wav_dur})
 
     except Exception as e:
         logger.error(f"[DubTTS] ERROR subtitle={s.id}: {e}", exc_info=True)
@@ -273,6 +273,9 @@ async def trim_bulk(data: TrimBulkRequest, db: Session = Depends(get_db)):
             logger.error(f"Trim error sub {s.id}: {e}")
 
     db.commit()
+    for s in subs:
+        if s.audio_path and s.wav_duration:
+            await broadcast(s.project_id, {"type": "tts_done", "subtitle_id": s.id, "audio_path": s.audio_path, "wav_duration": s.wav_duration})
     return {"trimmed": trimmed_count, "total": len(subs)}
 
 

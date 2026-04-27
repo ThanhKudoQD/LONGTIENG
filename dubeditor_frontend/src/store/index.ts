@@ -22,7 +22,7 @@ interface EditorStore {
   updateSubtitle: (id: number, patch: Partial<Subtitle>) => void
   deleteSubtitle: (id: number) => void
   deleteAudio: (ids: number[]) => void
-  markTTSDone: (id: number, audioPath: string) => void
+  markTTSDone: (id: number, audioPath: string, wavDuration?: number) => void
   loadProject: (projectId: number) => Promise<void>
 
   seekRequest: { time: number; id: number } | null
@@ -128,9 +128,9 @@ const useStore = create<EditorStore>((set, get) => ({
     }))
   },
 
-  markTTSDone: (id, audioPath) => {
+  markTTSDone: (id, audioPath, wavDuration) => {
     set(state => ({
-      subtitles: state.subtitles.map(s => s.id === id ? { ...s, tts_done: true, audio_path: audioPath } : s)
+      subtitles: state.subtitles.map(s => s.id === id ? { ...s, tts_done: true, audio_path: audioPath, ...(wavDuration !== undefined ? { wav_duration: wavDuration } : {}) } : s)
     }))
   },
 

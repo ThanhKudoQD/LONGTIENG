@@ -14,7 +14,7 @@ export function useProjectWS(projectId: number | null) {
     ws.current.onmessage = (e) => {
       const msg = JSON.parse(e.data)
       if (msg.type === 'tts_done') {
-        markTTSDone(msg.subtitle_id, msg.audio_path)
+        markTTSDone(msg.subtitle_id, msg.audio_path, msg.wav_duration)
       }
       if (msg.type === 'video_upload') {
         window.dispatchEvent(new CustomEvent('video_upload', { detail: msg }))
