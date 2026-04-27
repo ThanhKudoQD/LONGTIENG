@@ -149,13 +149,14 @@ export default function AudioList() {
     })
   }, [])
 
-  // Auto scroll theo activeSubId
+  // Auto scroll theo activeSubId — dùng subtitles để tìm kể cả sub chưa có audio
   useEffect(() => {
     if (!activeSubId || isDraggingRef.current) return
-    const sub = withAudio.find(s => s.id === activeSubId); if (!sub) return
+    const sub = subtitles.find(s => s.id === activeSubId); if (!sub) return
     setTimeout(() => {
       const el = scrollRef.current; if (!el) return
-      const px = (sub.start_time + (sub.audio_offset||0)) * pxPerSec
+      const offset = (sub as any).audio_offset || 0
+      const px = (sub.start_time + offset) * pxPerSec
       if (px < el.scrollLeft + 20 || px > el.scrollLeft + el.clientWidth - 80)
         el.scrollTo({ left: Math.max(0, px - el.clientWidth / 3), behavior: 'smooth' })
     }, 60)
