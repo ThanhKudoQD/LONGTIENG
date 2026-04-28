@@ -2,13 +2,27 @@ import { create } from 'zustand'
 import { Project, Subtitle, Character } from '../types'
 import api from '../api'
 
+/**
+ * PERF NOTES — quan trọng khi sửa code:
+ *
+ * 1) Components KHÔNG được destructure useStore() — phải dùng selector cho từng field:
+ *    ❌ const { subtitles, activeSubId } = useStore()
+ *    ✅ const subtitles = useStore(s => s.subtitles)
+ *    Lý do: destructure subscribe vào toàn bộ store → mọi state change đều re-render.
+ *
+ * 2) playTime tách thành store riêng (usePlayTimeStore) để 60 tick/giây từ video
+ *    không trigger re-render SubtitleList/CharSidebar/AudioList.
+ *    Chỉ component cần playTime (Playhead) subscribe usePlayTimeStore.
+ *
+ * 3) updateSubtitle/markTTSDone dùng slice + index thay vì map() toàn bộ array.
+ */
+
 interface EditorStore {
   project: Project | null
   subtitles: Subtitle[]
   characters: Character[]
   activeSubId: number | null
   selectedIds: Set<number>
-  playTime: number
 
   setProject: (p: Project) => void
   setSubtitles: (s: Subtitle[]) => void
@@ -16,7 +30,11 @@ interface EditorStore {
   setActiveSubId: (id: number | null) => void
   setActiveSubIdFromVideo: (id: number | null) => void
   toggleSelect: (id: number, multi?: boolean, range?: boolean, visibleIds?: number[]) => void
+
+  // Compat shim — VideoPlayer cũ gọi useStore.getState().setPlayTime
+  // Forward sang usePlayTimeStore.
   setPlayTime: (t: number) => void
+  playTime: number  // luôn đọc từ usePlayTimeStore qua getter, KHÔNG dùng làm dep
 
   lastTtsAt: number
   updateSubtitle: (id: number, patch: Partial<Subtitle>) => void
@@ -29,8 +47,6 @@ interface EditorStore {
   clearSeekRequest: () => void
 }
 
-// Timestamp đến khi setPlayTime không được override activeSubId
-// (user vừa click sub hoặc bấm ↑↓)
 let userSelectedUntil = 0
 
 const useStore = create<EditorStore>((set, get) => ({
@@ -39,17 +55,20 @@ const useStore = create<EditorStore>((set, get) => ({
   characters: [],
   activeSubId: null,
   selectedIds: new Set(),
-  playTime: 0,
   seekRequest: null,
+  lastTtsAt: 0,
+
+  // Stub — thực tế đọc/ghi qua usePlayTimeStore. Setter forward bên dưới.
+  playTime: 0,
+  setPlayTime: (t: number) => usePlayTimeStore.getState().setPlayTime(t),
 
   setProject: (p) => set({ project: p }),
   setSubtitles: (s) => set({ subtitles: s }),
   setCharacters: (c) => set({ characters: c }),
 
-  // User chủ động chọn sub → seek video + lock setPlayTime 1 giây
   setActiveSubId: (id) => {
     const sub = get().subtitles.find(s => s.id === id)
-    userSelectedUntil = Date.now() + 1000  // lock 1 giây
+    userSelectedUntil = Date.now() + 1000
     set({
       activeSubId: id,
       selectedIds: new Set(id ? [id] : []),
@@ -57,20 +76,18 @@ const useStore = create<EditorStore>((set, get) => ({
     })
   },
 
-  // Từ video timeupdate → chỉ update highlight
   setActiveSubIdFromVideo: (id) => {
+    if (get().activeSubId === id) return
     set({ activeSubId: id })
   },
 
   toggleSelect: (id, multi = false, range = false, visibleIds?) => {
     const { selectedIds, subtitles, activeSubId } = get()
-    // Dùng visibleIds nếu có (filter đang active), không thì dùng tất cả
     const pool = visibleIds ?? subtitles.map(s => s.id)
     if (range && activeSubId) {
-      const ids = pool
-      const a = ids.indexOf(activeSubId), b = ids.indexOf(id)
+      const a = pool.indexOf(activeSubId), b = pool.indexOf(id)
       const lo = Math.min(a, b), hi = Math.max(a, b)
-      set({ selectedIds: new Set(ids.slice(lo, hi + 1)), activeSubId: id })
+      set({ selectedIds: new Set(pool.slice(lo, hi + 1)), activeSubId: id })
     } else if (multi) {
       const newSel = new Set(selectedIds)
       newSel.has(id) ? newSel.delete(id) : newSel.add(id)
@@ -86,52 +103,55 @@ const useStore = create<EditorStore>((set, get) => ({
     }
   },
 
-  setPlayTime: (t) => {
-    set({ playTime: t })
-
-    // Nếu user vừa chọn sub thủ công → không override activeSubId
-    if (Date.now() < userSelectedUntil) return
-
-    const { subtitles } = get()
-    if (!subtitles.length) return
-
-    const started = subtitles.filter(s => s.start_time <= t)
-    if (started.length > 0) {
-      const active = started[started.length - 1]
-      set({ activeSubId: active.id })
-    } else {
-      set({ activeSubId: null })
-    }
-  },
-
   clearSeekRequest: () => set({ seekRequest: null }),
 
-  lastTtsAt: 0,
+  // OPTIMIZED: dùng index + slice thay vì map() toàn bộ → giữ tham chiếu các phần tử khác
   updateSubtitle: (id, patch) => {
-    set(state => ({
-      subtitles: state.subtitles.map(s => s.id === id ? { ...s, ...patch } : s),
-      lastTtsAt: (patch.tts_done || patch.audio_path) ? Date.now() : state.lastTtsAt
-    }))
+    set(state => {
+      const idx = state.subtitles.findIndex(s => s.id === id)
+      if (idx < 0) return state
+      const next = state.subtitles.slice()
+      next[idx] = { ...next[idx], ...patch }
+      return {
+        subtitles: next,
+        lastTtsAt: (patch.tts_done || patch.audio_path) ? Date.now() : state.lastTtsAt,
+      }
+    })
   },
 
   deleteAudio: (ids) => {
+    const idSet = new Set(ids)
     set(state => ({
       subtitles: state.subtitles.map(s =>
-        ids.includes(s.id) ? { ...s, tts_done: false, audio_path: null, wav_duration: null } : s
-      )
-    }))
-  },
-  deleteSubtitle: (id) => {
-    set(state => ({
-      subtitles: state.subtitles.filter(s => s.id !== id),
-      selectedIds: new Set([...state.selectedIds].filter(sid => sid !== id)),
+        idSet.has(s.id) ? { ...s, tts_done: false, audio_path: null, wav_duration: null } : s
+      ),
     }))
   },
 
+  deleteSubtitle: (id) => {
+    set(state => {
+      const newSel = new Set(state.selectedIds)
+      newSel.delete(id)
+      return {
+        subtitles: state.subtitles.filter(s => s.id !== id),
+        selectedIds: newSel,
+      }
+    })
+  },
+
   markTTSDone: (id, audioPath, wavDuration) => {
-    set(state => ({
-      subtitles: state.subtitles.map(s => s.id === id ? { ...s, tts_done: true, audio_path: audioPath, ...(wavDuration !== undefined ? { wav_duration: wavDuration } : {}) } : s)
-    }))
+    set(state => {
+      const idx = state.subtitles.findIndex(s => s.id === id)
+      if (idx < 0) return state
+      const next = state.subtitles.slice()
+      next[idx] = {
+        ...next[idx],
+        tts_done: true,
+        audio_path: audioPath,
+        ...(wavDuration !== undefined ? { wav_duration: wavDuration } : {}),
+      }
+      return { subtitles: next, lastTtsAt: Date.now() }
+    })
   },
 
   loadProject: async (projectId) => {
@@ -147,7 +167,37 @@ const useStore = create<EditorStore>((set, get) => ({
       activeSubId: null,
       selectedIds: new Set(),
     })
-  }
+  },
+}))
+
+// ─── PlayTime Store riêng ──────────────────────────────────────────────────
+interface PlayTimeStore {
+  playTime: number
+  setPlayTime: (t: number) => void
+}
+
+export const usePlayTimeStore = create<PlayTimeStore>((set) => ({
+  playTime: 0,
+  setPlayTime: (t) => {
+    set({ playTime: t })
+
+    if (Date.now() < userSelectedUntil) return
+
+    const subs = useStore.getState().subtitles
+    if (!subs.length) return
+
+    // Binary search — subtitles đã sort theo start_time (từ backend ORDER BY index)
+    let lo = 0, hi = subs.length - 1, idx = -1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      if (subs[mid].start_time <= t) { idx = mid; lo = mid + 1 }
+      else hi = mid - 1
+    }
+    const newActive = idx >= 0 ? subs[idx].id : null
+    if (useStore.getState().activeSubId !== newActive) {
+      useStore.getState().setActiveSubIdFromVideo(newActive)
+    }
+  },
 }))
 
 export default useStore

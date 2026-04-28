@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
-import useStore from '../store'
+import useStore, { usePlayTimeStore } from '../store'
 
 // wav_duration lấy từ subtitle.wav_duration (backend)
 
@@ -16,21 +16,39 @@ class TTSEngine {
   setPlaying(p: boolean) { this.playing = p; if (!p) this.stopAll() }
   bumpVersion() { this.version++; this.stopAll() }
 
+  // PERF: với 6000 subs, duyệt full mỗi 100ms = 60k ops/giây. Dùng binary search
+  // để giới hạn duyệt trong cửa sổ ~30s quanh currentTime (subs đã sort theo start_time).
   tick(currentTime: number, subtitles: any[]) {
     if (!this.enabled || !this.playing) return
     const ver = this.version
+    const n = subtitles.length
+    if (!n) return
 
-    for (const s of subtitles) {
-      if (!s.tts_done || !s.audio_path) continue
+    // Tìm index của sub đầu tiên có start_time >= currentTime - WINDOW
+    // WINDOW = max wav duration possible (~30s là rộng rãi cho dubbing)
+    const WINDOW_BACK = 30
+    const target = currentTime - WINDOW_BACK
+    let lo = 0, hi = n - 1, startIdx = n
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      const t = subtitles[mid].start_time + (subtitles[mid].audio_offset || 0)
+      if (t >= target) { startIdx = mid; hi = mid - 1 }
+      else lo = mid + 1
+    }
+
+    // Duyệt từ startIdx, dừng khi start > currentTime + 0.5s (xa quá phía sau)
+    for (let i = startIdx; i < n; i++) {
+      const s = subtitles[i]
       const offset  = s.audio_offset || 0
       const start   = s.start_time + offset
-      const wavDur  = s.wav_duration ?? (s.end_time - s.start_time)
+      if (start > currentTime + 0.5) break  // mọi sub sau nữa đều xa hơn
 
-      const end     = start + wavDur
+      if (!s.tts_done || !s.audio_path) continue
+
+      const wavDur  = s.wav_duration ?? (s.end_time - s.start_time)
+      const realEnd = start + wavDur
       const playing = this.slots.get(s.id)
 
-      // Dùng wavDur thực tế để tính end, nhưng không cắt audio theo end
-      const realEnd = start + wavDur
       if (currentTime >= start && currentTime < realEnd) {
         if (!playing) {
           const seekTo = currentTime - start
@@ -39,7 +57,6 @@ class TTSEngine {
           const el = new Audio(url)
           el.volume = this.volume
           el.preload = 'auto'
-          // Play ngay khi có đủ data, không đợi loadedmetadata
           el.addEventListener('canplay', () => {
             if (seekTo > 0.15) {
               el.currentTime = seekTo
@@ -52,12 +69,10 @@ class TTSEngine {
         }
       } else {
         if (playing) {
-          // Chỉ dừng khi seek về trước start — audio tự dừng khi phát xong (onended)
           if (currentTime < start - 0.5) {
             playing.pause()
             this.slots.delete(s.id)
           }
-          // Không dừng khi qua end — để audio phát hết tự nhiên
         }
       }
     }
@@ -88,7 +103,13 @@ export default function VideoPlayer() {
   const [ttsEnabled, setTtsEnabled]   = useState(true)
   const [draggingUI, setDraggingUI]   = useState(false)
 
-  const { project, subtitles, activeSubId, seekRequest, clearSeekRequest, lastTtsAt } = useStore()
+  // PERF: selectors riêng — KHÔNG destructure useStore()
+  const project = useStore(s => s.project)
+  const subtitles = useStore(s => s.subtitles)
+  const activeSubId = useStore(s => s.activeSubId)
+  const seekRequest = useStore(s => s.seekRequest)
+  const clearSeekRequest = useStore(s => s.clearSeekRequest)
+  const lastTtsAt = useStore(s => s.lastTtsAt)
 
   // Khi gen lại audio → bump version → engine dùng URL mới
   useEffect(() => {
@@ -114,7 +135,7 @@ export default function VideoPlayer() {
     const v = videoRef.current
     if (!v || !project?.video_path) return
     const syncDur = () => { if (v.duration && isFinite(v.duration)) { durationRef.current = v.duration; setDuration(v.duration) } }
-    const onTime  = () => { if (!draggingRef.current) { setCurrentTime(v.currentTime); useStore.getState().setPlayTime(v.currentTime) } }
+    const onTime  = () => { if (!draggingRef.current) { setCurrentTime(v.currentTime); usePlayTimeStore.getState().setPlayTime(v.currentTime) } }
     const onPlay  = () => { setPlaying(true);  isPlayingRef.current = true;  ttsEngine.setPlaying(true) }
     const onPause = () => { setPlaying(false); isPlayingRef.current = false; ttsEngine.setPlaying(false) }
     const onEnded = () => { setPlaying(false); isPlayingRef.current = false; ttsEngine.setPlaying(false) }

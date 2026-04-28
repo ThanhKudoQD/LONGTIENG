@@ -4,7 +4,13 @@ import api from '../api'
 import { secToSrt, srtToSec } from '../types'
 
 export default function EditPanel() {
-  const { subtitles, characters, activeSubId, updateSubtitle, deleteSubtitle, setActiveSubId } = useStore()
+  // PERF: selectors riêng — KHÔNG destructure
+  const subtitles = useStore(s => s.subtitles)
+  const characters = useStore(s => s.characters)
+  const activeSubId = useStore(s => s.activeSubId)
+  const updateSubtitle = useStore(s => s.updateSubtitle)
+  const deleteSubtitle = useStore(s => s.deleteSubtitle)
+  const setActiveSubId = useStore(s => s.setActiveSubId)
 
   const activeSub = subtitles.find(s => s.id === activeSubId) ?? null
   const lastSubRef = useRef<typeof activeSub>(null)

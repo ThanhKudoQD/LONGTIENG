@@ -13,7 +13,14 @@ import AutoAssignPanel from './AutoAssignPanel'
 interface Props { projectId: number; onBack: () => void }
 
 export default function Editor({ projectId, onBack }: Props) {
-  const { project, subtitles, characters, activeSubId, loadProject, setActiveSubId, updateSubtitle } = useStore()
+  // PERF: selectors riêng — KHÔNG destructure
+  const project = useStore(s => s.project)
+  const subtitles = useStore(s => s.subtitles)
+  const characters = useStore(s => s.characters)
+  const activeSubId = useStore(s => s.activeSubId)
+  const loadProject = useStore(s => s.loadProject)
+  const setActiveSubId = useStore(s => s.setActiveSubId)
+  const updateSubtitle = useStore(s => s.updateSubtitle)
   const [sidebarVisible, setSidebarVisible] = useState(true)
   const [filter, setFilter] = useState('')
   const [filterNoChar, setFilterNoChar] = useState(false)
@@ -206,8 +213,6 @@ export default function Editor({ projectId, onBack }: Props) {
     await loadProject(projectId)
   }
 
-  const done = subtitles.filter(s => s.tts_done).length
-
   // Tính overlap chains — chuỗi audio liên tiếp chồng nhau
   const overlapGroups = useMemo(() => {
     const withAudio = subtitles.filter(s => s.tts_done && s.audio_path)
@@ -220,31 +225,32 @@ export default function Editor({ projectId, onBack }: Props) {
     const getStart = (s: any) => s.start_time + (s.audio_offset || 0)
     const getEnd   = (s: any) => getStart(s) + (s.wav_duration ?? (s.end_time - s.start_time))
 
-    // Tìm chains: mỗi audio chồng với audio kế tiếp
+    // PERF: track chainMaxEnd inline thay vì Math.max(...chain.map(...)) mỗi vòng
     const chains: number[][] = []
     let currentChain: any[] = []
+    let chainMaxEnd = 0
 
     for (let i = 0; i < sorted.length; i++) {
+      const cur = sorted[i]
       if (currentChain.length === 0) {
-        currentChain = [sorted[i]]
+        currentChain = [cur]
+        chainMaxEnd = getEnd(cur)
         continue
       }
-      // Chain end = max end time của tất cả trong chain hiện tại
-      const chainEnd = Math.max(...currentChain.map(s => getEnd(s)))
-      const nextStart = getStart(sorted[i])
+      const nextStart = getStart(cur)
 
-      if (nextStart < chainEnd - overlapMinSec) {
-        // Chồng lấn → thêm vào chain
-        currentChain.push(sorted[i])
+      if (nextStart < chainMaxEnd - overlapMinSec) {
+        currentChain.push(cur)
+        const ce = getEnd(cur)
+        if (ce > chainMaxEnd) chainMaxEnd = ce
       } else {
-        // Không chồng → lưu chain cũ nếu đủ dài
         if (currentChain.length >= overlapMinCount) {
           chains.push(currentChain.map(s => s.id))
         }
-        currentChain = [sorted[i]]
+        currentChain = [cur]
+        chainMaxEnd = getEnd(cur)
       }
     }
-    // Xử lý chain cuối
     if (currentChain.length >= overlapMinCount) {
       chains.push(currentChain.map(s => s.id))
     }
@@ -254,14 +260,27 @@ export default function Editor({ projectId, onBack }: Props) {
 
   const overlapSubIds = useMemo(() => new Set(overlapGroups.flat()), [overlapGroups])
 
-  const visibleCount = subtitles.filter(s => {
-    if (filter && !s.text.toLowerCase().includes(filter.toLowerCase())) return false
-    if (filterNoChar && s.character_id) return false
-    if (filterNoTTS && s.tts_done) return false
-    if (filterOverlap && !overlapSubIds.has(s.id)) return false
-    if (filterCharId !== null && s.character_id !== filterCharId) return false
-    return true
-  }).length
+  // PERF: memo visibleCount — trước đây chạy filter trên 6000 items mỗi render
+  const visibleCount = useMemo(() => {
+    const f = filter.toLowerCase()
+    let n = 0
+    for (const s of subtitles) {
+      if (f && !s.text.toLowerCase().includes(f)) continue
+      if (filterNoChar && s.character_id) continue
+      if (filterNoTTS && s.tts_done) continue
+      if (filterOverlap && !overlapSubIds.has(s.id)) continue
+      if (filterCharId !== null && s.character_id !== filterCharId) continue
+      n++
+    }
+    return n
+  }, [subtitles, filter, filterNoChar, filterNoTTS, filterOverlap, overlapSubIds, filterCharId])
+
+  // PERF: memo done count
+  const done = useMemo(() => {
+    let n = 0
+    for (const s of subtitles) if (s.tts_done) n++
+    return n
+  }, [subtitles])
 
   return (
     <div className="flex flex-col h-screen bg-zinc-100 dark:bg-zinc-950 overflow-hidden text-zinc-900 dark:text-zinc-100">

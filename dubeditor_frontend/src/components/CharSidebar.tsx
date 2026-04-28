@@ -16,7 +16,15 @@ interface Preset {
 }
 
 export default function CharSidebar({ visible }: Props) {
-  const { characters, project, selectedIds, updateSubtitle, setCharacters, subtitles } = useStore()
+  // PERF: selectors riêng — KHÔNG destructure useStore()
+  const characters = useStore(s => s.characters)
+  const project = useStore(s => s.project)
+  const selectedIds = useStore(s => s.selectedIds)
+  const updateSubtitle = useStore(s => s.updateSubtitle)
+  const setCharacters = useStore(s => s.setCharacters)
+  // Lưu ý: KHÔNG subscribe `subtitles` ở đây vì nó đổi mỗi lần TTS xong.
+  // Khi cần đọc subtitles bên trong handler, dùng useStore.getState().subtitles.
+
   const [showPicker, setShowPicker]     = useState(false)
   const [editingId, setEditingId]       = useState<number | null>(null)
   const [editingName, setEditingName]   = useState('')
@@ -34,10 +42,12 @@ export default function CharSidebar({ visible }: Props) {
   // Speaker mapping modal
   const [mappingCharId, setMappingCharId] = useState<number | null>(null)
 
-  // Active character từ subtitle đang active
-  const { activeSubId } = useStore()
-  const activeSub = useStore(s => s.subtitles.find(s2 => s2.id === s.activeSubId))
-  const activeCharId = activeSub?.character_id ?? null
+  // Active character — chỉ subscribe character_id của activeSub, không phải toàn bộ object
+  const activeSubId = useStore(s => s.activeSubId)
+  const activeCharId = useStore(s => {
+    const sub = s.subtitles.find(s2 => s2.id === s.activeSubId)
+    return sub?.character_id ?? null
+  })
   const activeCardRefs = useRef<Record<number, HTMLDivElement | null>>({})
 
   // Scroll tới nhân vật active
@@ -196,12 +206,16 @@ export default function CharSidebar({ visible }: Props) {
     setReplacingCharId(null)
   }
 
-  // Đếm số dòng mỗi nhân vật
+  // PERF: subscribe `subtitles` để đếm — không thể tránh được nếu muốn UI đúng,
+  // nhưng đếm O(n) là rẻ. Vấn đề trước đây là CharSidebar render LẠI toàn bộ
+  // mỗi lần subtitles đổi; giờ đa số state khác đã tách ra (selectors riêng),
+  // nên chỉ render khi thực sự cần.
+  const subtitlesForCount = useStore(s => s.subtitles)
   const charLineCounts = React.useMemo(() => {
     const counts: Record<number, number> = {}
-    subtitles.forEach(s => { if (s.character_id) counts[s.character_id] = (counts[s.character_id] || 0) + 1 })
+    subtitlesForCount.forEach(s => { if (s.character_id) counts[s.character_id] = (counts[s.character_id] || 0) + 1 })
     return counts
-  }, [subtitles])
+  }, [subtitlesForCount])
 
   return (
     <>

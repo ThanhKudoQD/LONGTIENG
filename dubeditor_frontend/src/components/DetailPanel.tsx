@@ -3,7 +3,13 @@ import useStore from '../store'
 import api from '../api'
 
 export default function DetailPanel() {
-  const { subtitles, characters, project, activeSubId, updateSubtitle, selectedIds } = useStore()
+  // PERF: selectors riêng — KHÔNG destructure
+  const subtitles = useStore(s => s.subtitles)
+  const characters = useStore(s => s.characters)
+  const project = useStore(s => s.project)
+  const activeSubId = useStore(s => s.activeSubId)
+  const updateSubtitle = useStore(s => s.updateSubtitle)
+  const selectedIds = useStore(s => s.selectedIds)
 
   const activeSub = subtitles.find(s => s.id === activeSubId)
   const lastSubRef = React.useRef<typeof activeSub | undefined>(undefined)

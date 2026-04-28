@@ -1,26 +1,12 @@
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react'
-import useStore from '../store'
+import useStore, { usePlayTimeStore } from '../store'
 import api from '../api'
+import { findOverlapsSweep, assignLanes, maxOf } from '../utils/perf'
+import { playSubAudio, stopGlobalAudio, subscribePlayingId } from '../audio'
+import type { Subtitle } from '../types'
 
-let _globalAudio: HTMLAudioElement | null = null
-let _globalPlayingId: number | null = null
-
-export function playSubAudio(subId: number, audioPath: string, onEnd?: () => void): boolean {
-  if (_globalPlayingId === subId && _globalAudio && !_globalAudio.paused) {
-    _globalAudio.pause(); _globalAudio.currentTime = 0
-    _globalAudio = null; _globalPlayingId = null; return false
-  }
-  if (_globalAudio) { _globalAudio.pause(); _globalAudio = null; _globalPlayingId = null }
-  const audio = new Audio(`${audioPath}?t=${Date.now()}`)
-  _globalAudio = audio; _globalPlayingId = subId
-  audio.play().catch(() => {})
-  audio.onended = () => { _globalAudio = null; _globalPlayingId = null; onEnd?.() }
-  return true
-}
-export function stopGlobalAudio() {
-  if (_globalAudio) { _globalAudio.pause(); _globalAudio = null; _globalPlayingId = null }
-}
-export function getGlobalPlayingId() { return _globalPlayingId }
+// Re-export để code khác (CharSidebar, Editor) dùng tiếp các API cũ
+export { playSubAudio, stopGlobalAudio, getGlobalPlayingId } from '../audio'
 
 const PX_PER_SEC = 120
 const SUB_ROW_H  = 26
@@ -31,52 +17,165 @@ const DEFAULT_H  = 200
 const MIN_H      = 100
 const MAX_H      = 500
 
-function assignLanes(subs: any[]): Map<number, number> {
-  const lanes = new Map<number, number>()
-  const laneEnds: number[] = []
-  const sorted = [...subs].sort((a, b) =>
-    (a.start_time + (a.audio_offset||0)) - (b.start_time + (b.audio_offset||0)))
-  for (const s of sorted) {
-    const start = s.start_time + (s.audio_offset || 0)
-    const end   = start + (s.wav_duration ?? (s.end_time - s.start_time))
-    let lane = 0
-    while (lane < laneEnds.length && laneEnds[lane] > start + 0.01) lane++
-    lanes.set(s.id, lane)
-    laneEnds[lane] = end
-  }
-  return lanes
+// ─── Playhead riêng component ──────────────────────────────────────────────
+// Tách Playhead ra thành component riêng subscribe playTime store.
+// → 60 tick/giây của playhead KHÔNG re-render toàn bộ AudioList nữa.
+function Playhead({ pxPerSec }: { pxPerSec: number }) {
+  const playTime = usePlayTimeStore(s => s.playTime)
+  return (
+    <div className="absolute top-0 bottom-0 pointer-events-none z-20"
+      style={{ left: Math.round(playTime * pxPerSec), width: 1 }}>
+      <div className="absolute top-0 bottom-0 w-px bg-red-500 opacity-90"/>
+      <div className="absolute w-0 h-0 border-l-[4px] border-r-[4px] border-t-[6px] border-l-transparent border-r-transparent border-t-red-500"
+        style={{ top: 0, left: -3.5 }}/>
+    </div>
+  )
 }
 
-function findOverlaps(subs: any[]): Set<number> {
-  const overlaps = new Set<number>()
-  for (let i = 0; i < subs.length; i++) {
-    for (let j = i + 1; j < subs.length; j++) {
-      const a = subs[i], b = subs[j]
-      const aS = a.start_time+(a.audio_offset||0)
-      const aE = aS + (a.wav_duration ?? (a.end_time - a.start_time))
-      const bS = b.start_time+(b.audio_offset||0)
-      const bE = bS + (b.wav_duration ?? (b.end_time - b.start_time))
-      if (aS < bE - 0.01 && aE > bS + 0.01) { overlaps.add(a.id); overlaps.add(b.id) }
-    }
-  }
-  return overlaps
+// ─── Subtitle bar (hàng trên) ──────────────────────────────────────────────
+interface SubBarProps {
+  s: Subtitle
+  isActive: boolean
+  pxPerSec: number
+  onClick: (id: number) => void
 }
+const SubBar = React.memo(function SubBar({ s, isActive, pxPerSec, onClick }: SubBarProps) {
+  const leftPx  = Math.round(s.start_time * pxPerSec)
+  const widthPx = Math.max(2, Math.round((s.end_time - s.start_time) * pxPerSec))
+  const color   = s.character?.color || '#475569'
+  return (
+    <div
+      className="absolute top-0.5 rounded-sm cursor-pointer overflow-hidden"
+      style={{
+        left: leftPx, width: widthPx, height: SUB_ROW_H - 4,
+        background: color + (isActive ? 'cc' : '35'),
+        border: `1px solid ${color}${isActive ? 'ff' : '55'}`,
+        zIndex: isActive ? 5 : 1,
+      }}
+      onClick={e => { e.stopPropagation(); onClick(s.id) }}
+      title={`#${s.index} ${s.text?.slice(0, 40)}`}>
+      {widthPx > 25 && (
+        <span className="text-[10px] px-1 truncate w-full block font-semibold leading-tight"
+          style={{ color: isActive ? '#fff' : color, marginTop: 2 }}>
+          {s.text?.slice(0, 30)}
+        </span>
+      )}
+    </div>
+  )
+})
 
+// ─── Audio block (hàng dưới) ───────────────────────────────────────────────
+interface AudioBlockProps {
+  s: Subtitle
+  lane: number
+  isActive: boolean
+  isPlaying: boolean
+  isDragging: boolean
+  isOverlap: boolean
+  pxPerSec: number
+  audioTopOffset: number
+  onClick: (id: number) => void
+  onDragStart: (e: React.MouseEvent, s: Subtitle) => void
+  blockRef?: React.RefObject<HTMLDivElement>
+}
+const AudioBlock = React.memo(function AudioBlock({
+  s, lane, isActive, isPlaying, isDragging, isOverlap, pxPerSec, audioTopOffset, onClick, onDragStart, blockRef,
+}: AudioBlockProps) {
+  const offset    = s.audio_offset || 0
+  const start     = s.start_time + offset
+  const dur       = s.wav_duration ?? (s.end_time - s.start_time)
+  const char      = s.character
+
+  const leftPx  = Math.round(start * pxPerSec)
+  const widthPx = Math.max(30, Math.round(dur * pxPerSec))
+  const topPx   = audioTopOffset + lane * LANE_H + 3
+
+  const base = char?.color || '#3B82F6'
+  let bg = base+'25', border = base+'70', text = '#94A3B8'
+  if (isOverlap && !isActive && !isPlaying) { bg='#450A0A80'; border='#EF4444'; text='#FCA5A5' }
+  if (isActive)   { bg='#1E3A8A50'; border='#60A5FA'; text='#BFDBFE' }
+  if (isPlaying)  { bg='#052E1660'; border='#10B981'; text='#6EE7B7' }
+  if (isDragging) { bg='#2E1065cc'; border='#A78BFA'; text='#DDD6FE' }
+
+  return (
+    <div
+      ref={blockRef}
+      data-audio-block="1"
+      className="absolute rounded flex items-center overflow-hidden select-none"
+      style={{
+        left: leftPx, width: widthPx, top: topPx, height: LANE_H-6,
+        background: bg, border: `1.5px solid ${border}`,
+        cursor: isDragging ? 'grabbing' : 'grab',
+        boxShadow: isPlaying ? `0 0 8px ${border}60`
+          : isOverlap && !isActive ? `inset 0 0 0 1px #EF4444, 0 0 0 2px #EF444430` : 'none',
+        zIndex: isDragging ? 30 : isActive||isPlaying ? 10 : isOverlap ? 5 : 1,
+        transition: isDragging ? 'none' : 'border-color 0.15s',
+      }}
+      title={`#${s.index} ${char?.name||''} | ${dur.toFixed(2)}s`}
+      onClick={e => { e.stopPropagation(); onClick(s.id) }}
+      onMouseDown={e => onDragStart(e, s)}>
+
+      {/* PERF: ĐÃ BỎ "fake waveform" 40 bars/block — tiết kiệm 240k DOM nodes
+          với 6000 audio. Nếu muốn waveform thật, render bằng SVG path từ
+          peak data, chỉ khi block trong viewport và đủ rộng. */}
+
+      {isPlaying && (
+        <div className="flex items-end gap-px ml-1.5 flex-shrink-0 z-10" style={{ height: 16 }}>
+          {[5,9,13,10,6].map((h,i) => (
+            <div key={i} className="w-0.5 rounded-full animate-bounce"
+              style={{ height: h, background: border, animationDelay: `${i*0.08}s` }}/>
+          ))}
+        </div>
+      )}
+
+      {isOverlap && !isPlaying && !isDragging && <span className="ml-1 text-[10px] flex-shrink-0 z-10">⚠</span>}
+
+      <span className="px-1.5 text-[11px] font-bold truncate flex-1 z-10" style={{ color: text }}>
+        #{s.index}{char?.name ? ` · ${char.name}` : ''}
+      </span>
+
+      {widthPx > 60 && (
+        <span className="text-[9px] pr-1 flex-shrink-0 z-10 tabular-nums opacity-60" style={{ color: text }}>
+          {dur.toFixed(1)}s
+        </span>
+      )}
+
+      {Math.abs(offset) > 0.05 && widthPx > 80 && (
+        <span className="text-[9px] pr-1 flex-shrink-0 z-10 tabular-nums font-medium" style={{ color: '#F59E0B' }}>
+          {offset > 0 ? '+' : ''}{offset.toFixed(1)}s
+        </span>
+      )}
+    </div>
+  )
+})
+
+// ─── Main ──────────────────────────────────────────────────────────────────
 export default function AudioList() {
-  const { subtitles, activeSubId, setActiveSubId, updateSubtitle, playTime } = useStore()
+  // PERF: selectors riêng — KHÔNG destructure useStore()
+  const subtitles = useStore(s => s.subtitles)
+  const activeSubId = useStore(s => s.activeSubId)
+  const setActiveSubId = useStore(s => s.setActiveSubId)
+  const updateSubtitle = useStore(s => s.updateSubtitle)
+
   const [playingId,  setPlayingId]  = useState<number | null>(null)
   const [draggingId, setDraggingId] = useState<number | null>(null)
   const [height, setHeight]         = useState(DEFAULT_H)
   const [zoom, setZoom]             = useState(1)
+  const [scrollLeft, setScrollLeft] = useState(0)
+  const [viewportWidth, setViewportWidth] = useState(2000)
+
   const scrollRef    = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const resizeRef    = useRef<{ startY: number; startH: number } | null>(null)
-  const zoomRef      = useRef(zoom)
-  zoomRef.current    = zoom
+  const zoomRef      = useRef(zoom); zoomRef.current = zoom
   const snapLanesRef   = useRef<Map<number, number>>(new Map())
   const dragBlockRef   = useRef<HTMLDivElement | null>(null)
   const userInteractingRef = useRef(false)
   const isDraggingRef  = useRef(false)
+  const scrollRafRef   = useRef<number | null>(null)
+
+  // PERF: pub/sub thay setInterval(150ms)
+  useEffect(() => subscribePlayingId(setPlayingId), [])
 
   const withAudio = useMemo(() =>
     subtitles.filter(s => s.tts_done && s.audio_path), [subtitles])
@@ -87,26 +186,93 @@ export default function AudioList() {
 
   const computedLanes = useMemo(() => assignLanes(withDur), [withDur])
   const lanes    = draggingId ? snapLanesRef.current : computedLanes
-  const overlaps = useMemo(() => findOverlaps(withDur), [withDur])
-  const maxLane  = useMemo(() =>
-    withAudio.length ? Math.max(0, ...Array.from(lanes.values())) : 0, [lanes, withAudio])
+
+  // PERF: O(n log n) sweep thay O(n²)
+  const overlaps = useMemo(() => findOverlapsSweep(withDur), [withDur])
+
+  const maxLane  = useMemo(() => {
+    if (!withAudio.length) return 0
+    // PERF: maxOf reduce thay vì Math.max(...arr) spread
+    const vals = Array.from(lanes.values())
+    return Math.max(0, maxOf(vals))
+  }, [lanes, withAudio.length])
 
   const totalDur = useMemo(() => {
-    const ends = [
-      ...withDur.map(s => s.start_time + (s.audio_offset||0) + (s.wav_duration ?? (s.end_time - s.start_time))),
-      ...subtitles.map(s => s.end_time)
-    ]
-    return ends.length ? Math.max(...ends) + 5 : 60
+    if (!subtitles.length && !withDur.length) return 60
+    let m = 0
+    for (const s of withDur) {
+      const e = s.start_time + (s.audio_offset||0) + (s.wav_duration ?? (s.end_time - s.start_time))
+      if (e > m) m = e
+    }
+    for (const s of subtitles) {
+      if (s.end_time > m) m = s.end_time
+    }
+    return m + 5
   }, [withDur, subtitles])
 
   const pxPerSec     = PX_PER_SEC * zoom
   const totalWidth   = Math.ceil(totalDur * pxPerSec) + 40
   const audioTopOffset = SUB_ROW_H + 4
 
+  // ─── Viewport tracking — chỉ render block trong vùng nhìn thấy ─────────
+  // PERF: với 6000 audio blocks, render hết là 6000+ DOM nodes. Chỉ render
+  // các block visible (+ buffer 1 viewport hai bên để smooth scroll).
   useEffect(() => {
-    const id = setInterval(() => setPlayingId(getGlobalPlayingId()), 150)
-    return () => clearInterval(id)
+    const el = scrollRef.current
+    if (!el) return
+    const updateViewport = () => {
+      setViewportWidth(el.clientWidth)
+      setScrollLeft(el.scrollLeft)
+    }
+    updateViewport()
+
+    const onScroll = () => {
+      // RAF throttle — tránh setState 60+/giây
+      if (scrollRafRef.current) return
+      scrollRafRef.current = requestAnimationFrame(() => {
+        scrollRafRef.current = null
+        if (el) setScrollLeft(el.scrollLeft)
+      })
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+
+    const ro = new ResizeObserver(() => setViewportWidth(el.clientWidth))
+    ro.observe(el)
+
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      ro.disconnect()
+      if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current)
+    }
   }, [])
+
+  // Buffer = 1 viewport hai bên → smooth khi scroll nhanh
+  const visibleRange = useMemo(() => {
+    const buffer = viewportWidth
+    const fromPx = scrollLeft - buffer
+    const toPx   = scrollLeft + viewportWidth + buffer
+    return {
+      fromSec: fromPx / pxPerSec,
+      toSec:   toPx / pxPerSec,
+    }
+  }, [scrollLeft, viewportWidth, pxPerSec])
+
+  // PERF: lọc subtitles & audio blocks theo viewport
+  // Subtitles ngắn (vài giây), filter tuyến tính ổn. Nếu sau này chậm hơn,
+  // chuyển sang interval tree.
+  const visibleSubs = useMemo(() => {
+    return subtitles.filter(s =>
+      s.end_time >= visibleRange.fromSec && s.start_time <= visibleRange.toSec
+    )
+  }, [subtitles, visibleRange.fromSec, visibleRange.toSec])
+
+  const visibleAudio = useMemo(() => {
+    return withDur.filter(s => {
+      const start = s.start_time + (s.audio_offset || 0)
+      const end = start + (s.wav_duration ?? (s.end_time - s.start_time))
+      return end >= visibleRange.fromSec && start <= visibleRange.toSec
+    })
+  }, [withDur, visibleRange.fromSec, visibleRange.toSec])
 
   // Block browser Ctrl+zoom
   useEffect(() => {
@@ -116,7 +282,7 @@ export default function AudioList() {
     return () => el.removeEventListener('wheel', block)
   }, [])
 
-  // Ctrl+scroll zoom anchor tại con trỏ
+  // Ctrl+scroll zoom
   useEffect(() => {
     const el = scrollRef.current; if (!el) return
     const fn = (e: WheelEvent) => {
@@ -138,7 +304,6 @@ export default function AudioList() {
     return () => el.removeEventListener('wheel', fn)
   }, [])
 
-  // Zoom +/- giữ center
   const zoomBy = useCallback((factor: number) => {
     const el = scrollRef.current
     const anchorSec = el ? (el.scrollLeft + el.clientWidth / 2) / (PX_PER_SEC * zoomRef.current) : 0
@@ -149,18 +314,31 @@ export default function AudioList() {
     })
   }, [])
 
-  // Auto scroll theo activeSubId — dùng subtitles để tìm kể cả sub chưa có audio
+  // Auto scroll theo activeSubId
+  // PERF: bỏ setTimeout(60) — gây trễ rõ khi click sub
+  // PERF: bỏ behavior:'smooth' — smooth scroll bắn ~30 scroll events trong ~400ms
+  //       mỗi event re-compute visibleRange → re-filter audio blocks → re-render.
+  //       Với 6000 subs và viewport virtualization, smooth scroll = layout thrash.
+  // PERF: dùng ref để đọc start_time hiện tại của activeSub thay vì subtitles dep —
+  //       subtitles đổi mỗi lần TTS xong, không nên trigger lại scroll.
+  const subtitlesRef = useRef(subtitles)
+  subtitlesRef.current = subtitles
+
   useEffect(() => {
     if (!activeSubId || isDraggingRef.current) return
-    const sub = subtitles.find(s => s.id === activeSubId); if (!sub) return
-    setTimeout(() => {
-      const el = scrollRef.current; if (!el) return
-      const offset = (sub as any).audio_offset || 0
-      const px = (sub.start_time + offset) * pxPerSec
-      if (px < el.scrollLeft + 20 || px > el.scrollLeft + el.clientWidth - 80)
-        el.scrollTo({ left: Math.max(0, px - el.clientWidth / 3), behavior: 'smooth' })
-    }, 60)
-  }, [activeSubId])
+    const sub = subtitlesRef.current.find(s => s.id === activeSubId)
+    if (!sub) return
+    const el = scrollRef.current; if (!el) return
+
+    const offset = (sub as any).audio_offset || 0
+    const px = (sub.start_time + offset) * pxPerSec
+
+    // Chỉ scroll khi sub ngoài viewport (giữ logic cũ)
+    if (px < el.scrollLeft + 20 || px > el.scrollLeft + el.clientWidth - 80) {
+      // Instant scroll — nhanh hơn smooth ~10x với big lists
+      el.scrollLeft = Math.max(0, px - el.clientWidth / 3)
+    }
+  }, [activeSubId, pxPerSec])
 
   // Resize
   const onResizeDown = (e: React.MouseEvent) => {
@@ -175,7 +353,7 @@ export default function AudioList() {
     document.addEventListener('mouseup', onUp)
   }
 
-  // Drag: DOM only trong onMove, React update khi mouseup
+  // Drag block — DOM only trong onMove, React update khi mouseup
   const startDrag = useCallback((e: React.MouseEvent, sub: any) => {
     e.preventDefault(); e.stopPropagation()
     const startX   = e.clientX
@@ -197,7 +375,6 @@ export default function AudioList() {
       setDraggingId(null)
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
-      // Block playhead auto-scroll 2s sau khi thả
       userInteractingRef.current = true
       updateSubtitle(sub.id, { audio_offset: rounded })
       await api.patch(`/subtitles/${sub.id}`, { audio_offset: rounded })
@@ -208,10 +385,15 @@ export default function AudioList() {
     document.addEventListener('mouseup', onUp)
   }, [computedLanes, updateSubtitle])
 
-  // Không return early — luôn render timeline với hàng phụ đề
-
+  // Ruler — chỉ render ticks trong viewport
   const tickInterval = pxPerSec >= 60 ? 1 : pxPerSec >= 20 ? 5 : 10
-  const ticks = Array.from({ length: Math.ceil(totalDur / tickInterval) + 1 }, (_, i) => i * tickInterval)
+  const ticks = useMemo(() => {
+    const fromTick = Math.max(0, Math.floor(visibleRange.fromSec / tickInterval) * tickInterval)
+    const toTick = Math.ceil(Math.min(totalDur, visibleRange.toSec) / tickInterval) * tickInterval
+    const arr: number[] = []
+    for (let t = fromTick; t <= toTick; t += tickInterval) arr.push(t)
+    return arr
+  }, [visibleRange.fromSec, visibleRange.toSec, totalDur, tickInterval])
 
   return (
     <div ref={containerRef} style={{display:'contents'}}>
@@ -266,37 +448,19 @@ export default function AudioList() {
           }}>
           <div className="relative" style={{ width: totalWidth, height: '100%', minHeight: audioTopOffset + (maxLane+1)*LANE_H + 8 }}>
 
-            {/* ── Hàng phụ đề ── */}
+            {/* Hàng phụ đề — chỉ render visibleSubs */}
             <div className="absolute left-0 right-0 border-b border-zinc-800/60"
               style={{ top: 0, height: SUB_ROW_H, background: 'rgba(15,23,42,0.9)' }}>
-              {subtitles.map(s => {
-                const leftPx  = Math.round(s.start_time * pxPerSec)
-                const widthPx = Math.max(2, Math.round((s.end_time - s.start_time) * pxPerSec))
-                const isActive = s.id === activeSubId
-                const color    = s.character?.color || '#475569'
-                return (
-                  <div key={s.id}
-                    className="absolute top-0.5 rounded-sm cursor-pointer overflow-hidden"
-                    style={{
-                      left: leftPx, width: widthPx, height: SUB_ROW_H - 4,
-                      background: color + (isActive ? 'cc' : '35'),
-                      border: `1px solid ${color}${isActive ? 'ff' : '55'}`,
-                      zIndex: isActive ? 5 : 1,
-                    }}
-                    onClick={e => { e.stopPropagation(); setActiveSubId(s.id) }}
-                    title={`#${s.index} ${s.text?.slice(0, 40)}`}>
-                    {widthPx > 25 && (
-                      <span className="text-[10px] px-1 truncate w-full block font-semibold leading-tight"
-                        style={{ color: isActive ? '#fff' : color, marginTop: 2 }}>
-                        {s.text?.slice(0, 30)}
-                      </span>
-                    )}
-                  </div>
-                )
-              })}
+              {visibleSubs.map(s => (
+                <SubBar key={s.id}
+                  s={s}
+                  isActive={s.id === activeSubId}
+                  pxPerSec={pxPerSec}
+                  onClick={setActiveSubId} />
+              ))}
             </div>
 
-            {/* ── Lane backgrounds ── */}
+            {/* Lane backgrounds */}
             {Array.from({ length: maxLane+1 }, (_, i) => (
               <div key={i} className="absolute left-0 right-0"
                 style={{ top: audioTopOffset + i*LANE_H, height: LANE_H,
@@ -306,7 +470,7 @@ export default function AudioList() {
               </div>
             ))}
 
-            {/* ── Ruler ── */}
+            {/* Ruler — chỉ ticks visible */}
             {ticks.map(sec => {
               const x = sec * pxPerSec
               const isMajor = sec % (tickInterval*5) === 0 || tickInterval >= 5
@@ -324,15 +488,10 @@ export default function AudioList() {
               )
             })}
 
-            {/* ── Playhead ── */}
-            <div className="absolute top-0 bottom-0 pointer-events-none z-20"
-              style={{ left: Math.round(playTime * pxPerSec), width: 1 }}>
-              <div className="absolute top-0 bottom-0 w-px bg-red-500 opacity-90"/>
-              <div className="absolute w-0 h-0 border-l-[4px] border-r-[4px] border-t-[6px] border-l-transparent border-r-transparent border-t-red-500"
-                style={{ top: 0, left: -3.5 }}/>
-            </div>
+            {/* Playhead — subscribe playTime store riêng */}
+            <Playhead pxPerSec={pxPerSec} />
 
-            {/* ── Empty state ── */}
+            {/* Empty state */}
             {withAudio.length === 0 && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none"
                 style={{ top: audioTopOffset }}>
@@ -340,81 +499,23 @@ export default function AudioList() {
               </div>
             )}
 
-            {/* ── Audio blocks ── */}
-            {withDur.map(s => {
-              const lane      = lanes.get(s.id) ?? 0
-              const offset    = s.audio_offset || 0
-              const start     = s.start_time + offset
-              const dur       = s.wav_duration ?? (s.end_time - s.start_time)
-              const isActive   = s.id === activeSubId
-              const isPlaying  = s.id === playingId
-              const isDragging = s.id === draggingId
-              const isOverlap  = overlaps.has(s.id)
-              const char = s.character
-
-              const leftPx  = Math.round(start * pxPerSec)
-              const widthPx = Math.max(30, Math.round(dur * pxPerSec))
-              const topPx   = audioTopOffset + lane * LANE_H + 3
-
-              const base = char?.color || '#3B82F6'
-              let bg = base+'25', border = base+'70', text = '#94A3B8'
-              if (isOverlap && !isActive && !isPlaying) { bg='#450A0A80'; border='#EF4444'; text='#FCA5A5' }
-              if (isActive)   { bg='#1E3A8A50'; border='#60A5FA'; text='#BFDBFE' }
-              if (isPlaying)  { bg='#052E1660'; border='#10B981'; text='#6EE7B7' }
-              if (isDragging) { bg='#2E1065cc'; border='#A78BFA'; text='#DDD6FE' }
-
+            {/* Audio blocks — chỉ render visibleAudio */}
+            {visibleAudio.map(s => {
+              const lane = lanes.get(s.id) ?? 0
               return (
-                <div key={s.id}
-                  ref={isDragging ? dragBlockRef : null}
-                  data-audio-block="1"
-                  className="absolute rounded flex items-center overflow-hidden select-none"
-                  style={{ left: leftPx, width: widthPx, top: topPx, height: LANE_H-6,
-                    background: bg, border: `1.5px solid ${border}`,
-                    cursor: isDragging ? 'grabbing' : 'grab',
-                    boxShadow: isPlaying ? `0 0 8px ${border}60`
-                      : isOverlap && !isActive ? `inset 0 0 0 1px #EF4444, 0 0 0 2px #EF444430` : 'none',
-                    zIndex: isDragging ? 30 : isActive||isPlaying ? 10 : isOverlap ? 5 : 1,
-                    transition: isDragging ? 'none' : 'border-color 0.15s',
-                  }}
-                  title={`#${s.index} ${char?.name||''} | ${dur.toFixed(2)}s`}
-                  onClick={e => { e.stopPropagation(); setActiveSubId(s.id) }}
-                  onMouseDown={e => startDrag(e, s)}>
-
-                  <div className="absolute inset-0 flex items-center justify-around px-1 pointer-events-none opacity-20">
-                    {Array.from({ length: Math.min(40, Math.ceil(widthPx/5)) }, (_, i) => (
-                      <div key={i} className="flex-shrink-0 rounded-full" style={{ width: 2,
-                        height: `${25+Math.abs(Math.sin(i*0.7+s.id))*50+Math.abs(Math.cos(i*1.1))*25}%`,
-                        background: border }}/>
-                    ))}
-                  </div>
-
-                  {isPlaying && (
-                    <div className="flex items-end gap-px ml-1.5 flex-shrink-0 z-10" style={{ height: 16 }}>
-                      {[5,9,13,10,6].map((h,i) => (
-                        <div key={i} className="w-0.5 rounded-full animate-bounce"
-                          style={{ height: h, background: border, animationDelay: `${i*0.08}s` }}/>
-                      ))}
-                    </div>
-                  )}
-
-                  {isOverlap && !isPlaying && !isDragging && <span className="ml-1 text-[10px] flex-shrink-0 z-10">⚠</span>}
-
-                  <span className="px-1.5 text-[11px] font-bold truncate flex-1 z-10" style={{ color: text }}>
-                    #{s.index}{char?.name ? ` · ${char.name}` : ''}
-                  </span>
-
-                  {widthPx > 60 && (
-                    <span className="text-[9px] pr-1 flex-shrink-0 z-10 tabular-nums opacity-60" style={{ color: text }}>
-                      {dur.toFixed(1)}s
-                    </span>
-                  )}
-
-                  {Math.abs(offset) > 0.05 && widthPx > 80 && (
-                    <span className="text-[9px] pr-1 flex-shrink-0 z-10 tabular-nums font-medium" style={{ color: '#F59E0B' }}>
-                      {offset > 0 ? '+' : ''}{offset.toFixed(1)}s
-                    </span>
-                  )}
-                </div>
+                <AudioBlock key={s.id}
+                  s={s}
+                  lane={lane}
+                  isActive={s.id === activeSubId}
+                  isPlaying={s.id === playingId}
+                  isDragging={s.id === draggingId}
+                  isOverlap={overlaps.has(s.id)}
+                  pxPerSec={pxPerSec}
+                  audioTopOffset={audioTopOffset}
+                  onClick={setActiveSubId}
+                  onDragStart={startDrag}
+                  blockRef={s.id === draggingId ? (dragBlockRef as any) : undefined}
+                />
               )
             })}
           </div>

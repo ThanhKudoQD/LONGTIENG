@@ -30,7 +30,7 @@ const EMPTY_JOB: JobState = {
 }
 
 export default function AutoAssignPanel({ projectId, onClose }: Props) {
-  const { characters } = useStore()
+  const characters = useStore(s => s.characters)
   const [job, setJob]         = useState<JobState>(EMPTY_JOB)
   const [batchSize, setBatchSize] = useState(50)
   const [minSpk, setMinSpk]   = useState(5)
