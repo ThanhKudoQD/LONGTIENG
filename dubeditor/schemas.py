@@ -11,9 +11,21 @@ class CharacterBase(BaseModel):
     voxcpm_actor_name: str = ""
     voxcpm_role_name:  str = ""
     audio:             Optional[str] = None
+    shortcut_key:      Optional[str] = None
 
 class CharacterCreate(CharacterBase):
     pass
+
+class CharacterUpdate(BaseModel):
+    name:              Optional[str] = None
+    description:       Optional[str] = None
+    color:             Optional[str] = None
+    avatar:            Optional[str] = None
+    voxcpm_role_id:    Optional[str] = None
+    voxcpm_actor_name: Optional[str] = None
+    voxcpm_role_name:  Optional[str] = None
+    audio:             Optional[str] = None
+    shortcut_key:      Optional[str] = None
 
 class CharacterOut(CharacterBase):
     id:         int
@@ -65,8 +77,41 @@ class ProjectOut(ProjectBase):
     created_at:     Optional[datetime] = None
     subtitle_count: int                = 0
     tts_done_count: int                = 0
+    current_chapter_id: Optional[int]  = None
     class Config:
         from_attributes = True
+
+class ChapterBase(BaseModel):
+    name:            str = "Đoạn"
+    start_sub_index: int
+    end_sub_index:   int
+    status:          str = "pending"
+    collapsed:       int = 0
+    sort_order:      int = 0
+
+class ChapterCreate(ChapterBase):
+    pass
+
+class ChapterUpdate(BaseModel):
+    name:            Optional[str] = None
+    start_sub_index: Optional[int] = None
+    end_sub_index:   Optional[int] = None
+    status:          Optional[str] = None
+    collapsed:       Optional[int] = None
+    sort_order:      Optional[int] = None
+
+class ChapterOut(ChapterBase):
+    id:         int
+    project_id: int
+    created_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+class AutoSplitRequest(BaseModel):
+    size: int = 300  # số sub mỗi đoạn
+
+class SetCurrentChapterRequest(BaseModel):
+    chapter_id: Optional[int] = None
 
 class TTSRequest(BaseModel):
     subtitle_id: int

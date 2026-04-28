@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from dubeditor.database import get_db
 from dubeditor.models import Character
-from dubeditor.schemas import CharacterCreate, CharacterOut
+from dubeditor.schemas import CharacterCreate, CharacterUpdate, CharacterOut
 
 router = APIRouter()
 
@@ -21,7 +21,7 @@ def create_character(project_id: int, data: CharacterCreate, db: Session = Depen
 
 
 @router.patch("/{character_id}", response_model=CharacterOut)
-def update_character(character_id: int, data: CharacterCreate, db: Session = Depends(get_db)):
+def update_character(character_id: int, data: CharacterUpdate, db: Session = Depends(get_db)):
     c = db.query(Character).filter(Character.id == character_id).first()
     if not c:
         raise HTTPException(404, "Character not found")

@@ -23,3 +23,29 @@ def get_db():
 def init_db():
     from dubeditor import models  # noqa
     Base.metadata.create_all(bind=engine)
+    # Migration: thêm column shortcut_key nếu chưa có
+    _migrate()
+
+
+def _migrate():
+    """Migration ad-hoc cho SQLite — chỉ thêm column mới, không drop."""
+    import sqlite3
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        cur = conn.cursor()
+        # Check + add shortcut_key vào characters
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(characters)").fetchall()]
+        if 'shortcut_key' not in cols:
+            cur.execute("ALTER TABLE characters ADD COLUMN shortcut_key TEXT")
+            conn.commit()
+            print("[migrate] Added characters.shortcut_key")
+        # Check + add current_chapter_id vào projects
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(projects)").fetchall()]
+        if 'current_chapter_id' not in cols:
+            cur.execute("ALTER TABLE projects ADD COLUMN current_chapter_id INTEGER")
+            conn.commit()
+            print("[migrate] Added projects.current_chapter_id")
+    except Exception as e:
+        print(f"[migrate] Error: {e}")
+    finally:
+        conn.close()

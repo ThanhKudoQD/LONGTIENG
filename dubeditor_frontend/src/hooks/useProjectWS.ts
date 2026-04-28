@@ -99,6 +99,19 @@ export function useProjectWS(projectId: number | null) {
       if (msg.type === 'auto_assign_error') {
         window.dispatchEvent(new CustomEvent('aa_error', { detail: msg }))
       }
+      // Bulk TTS events — forward để BulkTTSProgress component lắng nghe
+      if (msg.type === 'tts_bulk_start') {
+        window.dispatchEvent(new CustomEvent('tts_bulk_start', { detail: msg }))
+      }
+      if (msg.type === 'tts_bulk_progress') {
+        window.dispatchEvent(new CustomEvent('tts_bulk_progress', { detail: msg }))
+      }
+      if (msg.type === 'tts_bulk_done') {
+        window.dispatchEvent(new CustomEvent('tts_bulk_done', { detail: msg }))
+      }
+      if (msg.type === 'tts_bulk_cancelled') {
+        window.dispatchEvent(new CustomEvent('tts_bulk_cancelled', { detail: msg }))
+      }
     }
 
     return () => {

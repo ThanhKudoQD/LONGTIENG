@@ -9,6 +9,19 @@ export interface Character {
   voxcpm_actor_name: string
   voxcpm_role_name: string
   audio?: string
+  shortcut_key?: string | null
+}
+
+export interface Chapter {
+  id: number
+  project_id: number
+  name: string
+  start_sub_index: number
+  end_sub_index: number
+  status: 'pending' | 'in_progress' | 'done'
+  collapsed: boolean
+  sort_order: number
+  created_at: string
 }
 
 export interface VoxRole {
@@ -53,6 +66,7 @@ export interface Project {
   created_at: string
   subtitle_count: number
   tts_done_count: number
+  current_chapter_id?: number | null
 }
 
 export const CHAR_COLORS = [

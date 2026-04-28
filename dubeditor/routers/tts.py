@@ -168,13 +168,91 @@ async def bulk_tts(data: BulkTTSRequest, background_tasks: BackgroundTasks, db: 
     if not subs:
         raise HTTPException(404, "No subtitles found")
 
+    # Lấy project_id từ sub đầu (tất cả sub cùng project)
+    project_id = subs[0].project_id
+    sub_ids = [s.id for s in subs]
+    total = len(sub_ids)
+
+    # Tạo job ID + lưu vào registry để cancel
+    job_id = uuid.uuid4().hex[:8]
+    _bulk_jobs[project_id] = {"job_id": job_id, "cancelled": False}
+
     async def process():
-        for s in subs:
-            await do_generate(s.id, db)
-            await asyncio.sleep(0.1)
+        # PERF + BUG FIX: tạo session mới riêng cho background task
+        # (session từ Depends(get_db) đã đóng khi response trả về)
+        from dubeditor.database import SessionLocal
+        bg_db = SessionLocal()
+        try:
+            await broadcast(project_id, {
+                "type": "tts_bulk_start",
+                "job_id": job_id,
+                "total": total,
+            })
+
+            success = 0
+            failed = 0
+            errors: list[dict] = []
+
+            for i, sid in enumerate(sub_ids):
+                # Check cancel flag
+                state = _bulk_jobs.get(project_id)
+                if not state or state.get("cancelled") or state.get("job_id") != job_id:
+                    logger.info(f"[bulk-tts] cancelled job={job_id}")
+                    await broadcast(project_id, {
+                        "type": "tts_bulk_cancelled",
+                        "job_id": job_id,
+                        "current": i,
+                        "total": total,
+                    })
+                    return
+
+                try:
+                    await broadcast(project_id, {
+                        "type": "tts_bulk_progress",
+                        "job_id": job_id,
+                        "current": i,
+                        "total": total,
+                        "subtitle_id": sid,
+                    })
+                    await do_generate(sid, bg_db)
+                    success += 1
+                except Exception as e:
+                    failed += 1
+                    errors.append({"subtitle_id": sid, "error": str(e)[:200]})
+                    logger.error(f"[bulk-tts] sub={sid} error: {e}")
+
+                await asyncio.sleep(0.05)
+
+            await broadcast(project_id, {
+                "type": "tts_bulk_done",
+                "job_id": job_id,
+                "total": total,
+                "success": success,
+                "failed": failed,
+                "errors": errors[:50],  # giới hạn 50 lỗi đầu
+            })
+        finally:
+            bg_db.close()
+            # Xoá job khỏi registry
+            if _bulk_jobs.get(project_id, {}).get("job_id") == job_id:
+                _bulk_jobs.pop(project_id, None)
 
     background_tasks.add_task(process)
-    return {"queued": len(subs)}
+    return {"queued": total, "job_id": job_id}
+
+
+# In-memory registry các bulk jobs đang chạy
+# key = project_id, value = {"job_id": str, "cancelled": bool}
+_bulk_jobs: dict[int, dict] = {}
+
+
+@router.post("/bulk/cancel/{project_id}")
+async def cancel_bulk_tts(project_id: int):
+    state = _bulk_jobs.get(project_id)
+    if not state:
+        return {"cancelled": False, "reason": "no_active_job"}
+    state["cancelled"] = True
+    return {"cancelled": True, "job_id": state["job_id"]}
 
 
 @router.get("/voices")

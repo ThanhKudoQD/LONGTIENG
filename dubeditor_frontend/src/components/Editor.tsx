@@ -8,7 +8,12 @@ import AudioList from './AudioList'
 import VideoPlayer from './VideoPlayer'
 import DetailPanel from './DetailPanel'
 import { useProjectWS } from '../hooks/useProjectWS'
+import { parseShortcutFromEvent, formatShortcut } from '../utils/shortcuts'
 import AutoAssignPanel from './AutoAssignPanel'
+import AutoFixOverlapModal from './AutoFixOverlapModal'
+import BulkTTSProgress from './BulkTTSProgress'
+import ChapterSelector from './ChapterSelector'
+import ChaptersModal from './ChaptersModal'
 
 interface Props { projectId: number; onBack: () => void }
 
@@ -31,6 +36,8 @@ export default function Editor({ projectId, onBack }: Props) {
   const [swapTo, setSwapTo]               = useState<number | null>(null)
   const [swapping, setSwapping]           = useState(false)
   const [showAutoAssign, setShowAutoAssign] = useState(false)
+  const [showAutoFix, setShowAutoFix] = useState(false)
+  const [showChapters, setShowChapters] = useState(false)
   const [modelStatus, setModelStatus] = useState<'unknown'|'loaded'|'loading'|'unloaded'>('unknown')
 
   // Poll model status
@@ -73,6 +80,31 @@ export default function Editor({ projectId, onBack }: Props) {
 
   useProjectWS(projectId)
   useEffect(() => { loadProject(projectId) }, [projectId])
+
+  // Khi subtitles đã load xong, tự scroll đến chapter đang làm dở (current_chapter_id)
+  // hoặc chapter pending đầu tiên
+  const didAutoJumpRef = useRef(false)
+  useEffect(() => {
+    if (didAutoJumpRef.current) return
+    if (!project || !subtitles.length) return
+    didAutoJumpRef.current = true
+
+    // Async load chapters và jump
+    ;(async () => {
+      try {
+        const r = await api.get(`/chapters/project/${projectId}`)
+        const chapters: any[] = r.data
+        if (!chapters.length) return
+        const target =
+          chapters.find(c => c.id === project.current_chapter_id) ||
+          chapters.find(c => c.status === 'in_progress') ||
+          chapters.find(c => c.status === 'pending')
+        if (!target) return
+        const sub = subtitles.find(s => s.index === target.start_sub_index)
+        if (sub) setActiveSubId(sub.id)
+      } catch {}
+    })()
+  }, [project?.id, subtitles.length, projectId])
 
   useEffect(() => {
     const onUpload = (e: any) => {
@@ -148,6 +180,9 @@ export default function Editor({ projectId, onBack }: Props) {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      // Bỏ qua nếu đang ở chế độ recording shortcut (data-recording-shortcut)
+      if (document.querySelector('[data-recording-shortcut="1"]')) return
+
       if (e.code === 'ArrowDown') {
         e.preventDefault()
         const { subtitles: subs, activeSubId: cur } = useStore.getState()
@@ -160,10 +195,15 @@ export default function Editor({ projectId, onBack }: Props) {
         const idx = subs.findIndex(s => s.id === cur)
         if (idx > 0) setActiveSubId(subs[idx - 1].id)
       }
-      const num = parseInt(e.key)
-      if (num >= 1 && num <= 9) {
-        const char = characters[num - 1]
+
+      // Match phím tắt với character — dùng shortcut_key thay vì index 1-9
+      // Bỏ qua Ctrl+T (handler riêng)
+      if (e.ctrlKey && e.key === 't') return
+      const shortcut = parseShortcutFromEvent(e)
+      if (shortcut) {
+        const char = characters.find(c => c.shortcut_key === shortcut)
         if (char) {
+          e.preventDefault()
           const { selectedIds: selIds } = useStore.getState()
           const ids = selIds.size > 0 ? Array.from(selIds) : (activeSubId ? [activeSubId] : [])
           if (ids.length > 0) {
@@ -172,6 +212,7 @@ export default function Editor({ projectId, onBack }: Props) {
           }
         }
       }
+
       if (e.ctrlKey && e.key === 't' && activeSubId) {
         e.preventDefault()
         const sub = subtitles.find(s => s.id === activeSubId)
@@ -406,6 +447,7 @@ export default function Editor({ projectId, onBack }: Props) {
         {/* Col 3: Subtitle list */}
         <div className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-zinc-900 min-w-0">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
+            <ChapterSelector projectId={projectId} onOpenManage={() => setShowChapters(true)} />
             <div className="relative flex-1">
               <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-400" width="13" height="13" viewBox="0 0 13 13" fill="none">
                 <circle cx="5.5" cy="5.5" r="4" stroke="currentColor" strokeWidth="1.5"/>
@@ -428,6 +470,14 @@ export default function Editor({ projectId, onBack }: Props) {
               <button onClick={() => { setFilterOverlap(v => !v); setOverlapIdx(0) }}
                 className={`px-2.5 py-1.5 text-[12px] rounded-lg border transition-all font-medium ${filterOverlap ? 'bg-red-50 text-red-700 border-red-300 dark:bg-red-950 dark:text-red-400 dark:border-red-800' : 'btn'}`}>
                 ⚠{overlapGroups.length > 0 ? ` ${overlapGroups.length}` : ''}
+              </button>
+
+              {/* Auto Fix Overlap button */}
+              <button onClick={() => setShowAutoFix(true)}
+                disabled={overlapGroups.length === 0}
+                title={overlapGroups.length > 0 ? `Tự động fix ${overlapGroups.length} chuỗi đè` : 'Không có chuỗi đè'}
+                className="px-2.5 py-1.5 text-[12px] rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-950 transition-all font-medium disabled:opacity-40 disabled:cursor-not-allowed">
+                ⚡ Auto fix
               </button>
               {filterOverlap && (
                 <>
@@ -510,8 +560,12 @@ export default function Editor({ projectId, onBack }: Props) {
                       if (!selectedIds.size) return
                       selectedIds.forEach(id => { api.patch(`/subtitles/${id}`, { character_id: c.id }); upd(id, { character_id: c.id, character: c }) })
                     }}
-                    className="flex-shrink-0 px-2.5 py-0.5 rounded-full text-[12px] font-medium border transition-all hover:opacity-90 active:scale-95"
+                    title={c.shortcut_key ? `Phím tắt: ${formatShortcut(c.shortcut_key)}` : 'Chưa đặt phím tắt'}
+                    className="flex-shrink-0 px-2.5 py-0.5 rounded-full text-[12px] font-medium border transition-all hover:opacity-90 active:scale-95 inline-flex items-center gap-1"
                     style={{ background: c.color + '18', color: c.color, borderColor: c.color + '40' }}>
+                    {c.shortcut_key && (
+                      <span className="text-[10px] font-mono opacity-70">{formatShortcut(c.shortcut_key)}</span>
+                    )}
                     {c.name}
                   </button>
                 ))}
@@ -568,6 +622,24 @@ export default function Editor({ projectId, onBack }: Props) {
           onClose={() => setShowAutoAssign(false)}
         />
       )}
+
+      {showAutoFix && (
+        <AutoFixOverlapModal
+          projectId={projectId}
+          onClose={() => setShowAutoFix(false)}
+        />
+      )}
+
+      {showChapters && (
+        <ChaptersModal
+          projectId={projectId}
+          onClose={() => setShowChapters(false)}
+          onChaptersChanged={() => window.dispatchEvent(new Event('chapters_changed'))}
+        />
+      )}
+
+      {/* Sticky toast tiến trình bulk TTS */}
+      <BulkTTSProgress projectId={projectId} />
     </div>
   )
 }

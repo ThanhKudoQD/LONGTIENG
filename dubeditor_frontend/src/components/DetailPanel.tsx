@@ -47,18 +47,43 @@ export default function DetailPanel() {
 
   const bulkTTS = async () => {
     if (!project) return
-    const ids = subtitles.filter(s => !s.tts_done).map(s => s.id)
-    if (!ids.length) return alert('Tất cả đã có TTS rồi!')
-    await api.post('/tts/bulk', { subtitle_ids: ids })
-    alert(`Đang tạo TTS cho ${ids.length} dòng...`)
+    const total = subtitles.filter(s => !s.tts_done).length
+    const willGenerate = subtitles.filter(s => !s.tts_done && s.character_id).map(s => s.id)
+    const skipped = total - willGenerate.length
+
+    if (!willGenerate.length) {
+      if (skipped > 0) return alert(`Không có dòng nào để tạo TTS.\n${skipped} dòng chưa gán nhân vật bị bỏ qua.`)
+      return alert('Tất cả đã có TTS rồi!')
+    }
+
+    let msg = `Sẽ tạo TTS cho ${willGenerate.length} dòng đã gán nhân vật.`
+    if (skipped > 0) msg += `\n⚠ Bỏ qua ${skipped} dòng chưa gán nhân vật.`
+    msg += '\n\nTiếp tục?'
+
+    if (!confirm(msg)) return
+    await api.post('/tts/bulk', { subtitle_ids: willGenerate })
   }
 
   const bulkTTSSelected = async () => {
-    const ids = Array.from(useStore.getState().selectedIds)
-    if (!ids.length) return alert('Chưa chọn dòng nào!')
+    const allSel = Array.from(useStore.getState().selectedIds)
+    if (!allSel.length) return alert('Chưa chọn dòng nào!')
+    const subs = useStore.getState().subtitles
+    const willGenerate = allSel.filter(id => {
+      const s = subs.find(x => x.id === id)
+      return s && !s.tts_done && s.character_id
+    })
+    const skipped = allSel.length - willGenerate.length
+
+    if (!willGenerate.length) {
+      return alert(`Không có dòng nào để tạo TTS trong ${allSel.length} dòng đã chọn.\n(Đã có TTS hoặc chưa gán nhân vật)`)
+    }
+    if (skipped > 0) {
+      if (!confirm(`Sẽ tạo TTS cho ${willGenerate.length} dòng.\n⚠ Bỏ qua ${skipped} dòng (đã có TTS hoặc chưa gán nhân vật).\n\nTiếp tục?`)) return
+    }
+
     setBulkTtsLoading(true)
     try {
-      await api.post('/tts/bulk', { subtitle_ids: ids })
+      await api.post('/tts/bulk', { subtitle_ids: willGenerate })
     } finally { setBulkTtsLoading(false) }
   }
 

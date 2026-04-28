@@ -3,6 +3,7 @@ import useStore from '../store'
 import api from '../api'
 import { VoxActor, VoxRole } from '../types'
 import VoicePicker from './VoicePicker'
+import { formatShortcut, parseShortcutFromEvent, isValidShortcut, nextAvailableShortcut } from '../utils/shortcuts'
 
 interface Props { visible: boolean }
 
@@ -41,6 +42,10 @@ export default function CharSidebar({ visible }: Props) {
 
   // Speaker mapping modal
   const [mappingCharId, setMappingCharId] = useState<number | null>(null)
+
+  // Shortcut key editing
+  const [shortcutEditingId, setShortcutEditingId] = useState<number | null>(null)
+  const [shortcutError, setShortcutError] = useState<string>('')
 
   // Active character — chỉ subscribe character_id của activeSub, không phải toàn bộ object
   const activeSubId = useStore(s => s.activeSubId)
@@ -217,6 +222,64 @@ export default function CharSidebar({ visible }: Props) {
     return counts
   }, [subtitlesForCount])
 
+  // ─── Shortcut key handling ──────────────────────────────────────────────
+  // Capture key khi đang edit shortcut
+  useEffect(() => {
+    if (shortcutEditingId == null) return
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.key === 'Escape') {
+        setShortcutEditingId(null)
+        setShortcutError('')
+        return
+      }
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        // Xoá phím tắt
+        api.patch(`/characters/${shortcutEditingId}`, { shortcut_key: null })
+        setCharacters(characters.map(c => c.id === shortcutEditingId ? { ...c, shortcut_key: null } : c))
+        setShortcutEditingId(null)
+        setShortcutError('')
+        return
+      }
+      const sk = parseShortcutFromEvent(e)
+      if (!sk) {
+        setShortcutError('Phím không hợp lệ. Dùng: 0-9, a-z, hoặc Shift+phím')
+        return
+      }
+      // Check trùng
+      const conflict = characters.find(c => c.id !== shortcutEditingId && c.shortcut_key === sk)
+      if (conflict) {
+        setShortcutError(`Phím "${formatShortcut(sk)}" đã dùng cho "${conflict.name}"`)
+        return
+      }
+      api.patch(`/characters/${shortcutEditingId}`, { shortcut_key: sk })
+      setCharacters(characters.map(c => c.id === shortcutEditingId ? { ...c, shortcut_key: sk } : c))
+      setShortcutEditingId(null)
+      setShortcutError('')
+    }
+    window.addEventListener('keydown', onKey, true)  // capture phase
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [shortcutEditingId, characters, setCharacters])
+
+  // Auto-assign shortcut cho character mới (chưa có shortcut_key)
+  useEffect(() => {
+    const noKey = characters.filter(c => !c.shortcut_key)
+    if (!noKey.length) return
+    const used = new Set(characters.map(c => c.shortcut_key).filter(Boolean) as string[])
+    let updated = false
+    const newChars = characters.map(c => {
+      if (c.shortcut_key) return c
+      const next = nextAvailableShortcut(used)
+      if (!next) return c
+      used.add(next)
+      api.patch(`/characters/${c.id}`, { shortcut_key: next }).catch(() => {})
+      updated = true
+      return { ...c, shortcut_key: next }
+    })
+    if (updated) setCharacters(newChars)
+  }, [characters.length])  // chỉ chạy khi số nhân vật đổi
+
   return (
     <>
       <div className="w-[240px] flex flex-col h-full bg-white dark:bg-zinc-900 border-r border-zinc-200 dark:border-zinc-800 overflow-hidden">
@@ -349,7 +412,18 @@ export default function CharSidebar({ visible }: Props) {
 
                     <div className="flex items-center gap-1 mt-1">
                       <span className="text-[10px] text-zinc-400">Phím</span>
-                      <span className="font-black text-[14px]" style={{color: c.color}}>{i+1}</span>
+                      <button
+                        onClick={e => { e.stopPropagation(); setShortcutEditingId(c.id) }}
+                        title="Click để đổi phím tắt"
+                        className="font-black text-[12px] px-1.5 py-0.5 rounded border hover:opacity-80 transition-all"
+                        style={{
+                          color: c.shortcut_key ? c.color : '#9CA3AF',
+                          borderColor: (c.shortcut_key ? c.color : '#D1D5DB') + '60',
+                          background: (c.shortcut_key ? c.color : '#9CA3AF') + '15',
+                          minWidth: 28,
+                        }}>
+                        {c.shortcut_key ? formatShortcut(c.shortcut_key) : '—'}
+                      </button>
                       <span className="text-[10px] text-zinc-400">· {lineCount}d</span>
                       <div className="ml-auto">
                         {c.voxcpm_role_id && (
@@ -465,6 +539,39 @@ export default function CharSidebar({ visible }: Props) {
       )}
       {replacingCharId !== null && (
         <VoicePicker onSelect={replaceChar} onClose={() => setReplacingCharId(null)}/>
+      )}
+
+      {/* Modal capture shortcut key */}
+      {shortcutEditingId !== null && (
+        <div data-recording-shortcut="1"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => { setShortcutEditingId(null); setShortcutError('') }}>
+          <div className="bg-white dark:bg-zinc-900 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl"
+            onClick={e => e.stopPropagation()}>
+            <h3 className="text-base font-bold mb-2">Đặt phím tắt</h3>
+            <p className="text-[13px] text-zinc-500 mb-4">
+              Gán phím tắt cho: <span className="font-semibold text-zinc-700 dark:text-zinc-300">
+                {characters.find(c => c.id === shortcutEditingId)?.name}
+              </span>
+            </p>
+            <div className="flex flex-col items-center gap-3 py-6 bg-zinc-50 dark:bg-zinc-800 rounded-lg">
+              <span className="text-[12px] text-zinc-400">Bấm phím muốn gán...</span>
+              <div className="text-3xl">⌨️</div>
+              <span className="text-[11px] text-zinc-500">
+                Hợp lệ: 0-9, a-z, có thể giữ Shift
+              </span>
+            </div>
+            {shortcutError && (
+              <div className="mt-3 text-[12px] text-red-500 bg-red-50 dark:bg-red-950/40 px-3 py-2 rounded">
+                {shortcutError}
+              </div>
+            )}
+            <div className="flex justify-between items-center mt-4 text-[11px] text-zinc-500">
+              <span><kbd className="px-1.5 py-0.5 bg-zinc-200 dark:bg-zinc-700 rounded font-mono">Esc</kbd> hủy</span>
+              <span><kbd className="px-1.5 py-0.5 bg-zinc-200 dark:bg-zinc-700 rounded font-mono">Delete</kbd> xoá phím tắt</span>
+            </div>
+          </div>
+        </div>
       )}
     </>
   )
