@@ -4,7 +4,7 @@ import useStore from '../store'
 import api from '../api'
 import { playSubAudio, stopGlobalAudio, subscribePlayingId } from '../audio'
 import { findDuplicateStarts } from '../utils/perf'
-import type { Subtitle } from '../types'
+import type { Subtitle, Chapter } from '../types'
 
 interface Props {
   filter: string
@@ -12,6 +12,8 @@ interface Props {
   filterNoTTS: boolean
   overlapSubIds?: Set<number>
   filterCharId?: number | null
+  chapters?: Chapter[]
+  onToggleChapter?: (chapterId: number) => void
 }
 
 const fmt = (s: number) => {
@@ -148,7 +150,7 @@ const Row = React.memo(function Row({
 })
 
 // ─── Main ──────────────────────────────────────────────────────────────────
-export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overlapSubIds, filterCharId }: Props) {
+export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overlapSubIds, filterCharId, chapters = [], onToggleChapter }: Props) {
   // PERF: selectors riêng cho từng field — KHÔNG destructure useStore()
   const subtitles  = useStore(s => s.subtitles)
   const characters = useStore(s => s.characters)
@@ -186,33 +188,94 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
 
   const visibleIds = useMemo(() => visible.map(s => s.id), [visible])
 
+  // ─── Build items array với chapters ─────────────────────────────────────
+  // Khi có chapters: items = [header(ch1), sub1, sub2, ..., header(ch2), ...]
+  // Khi không: items = [sub1, sub2, ...]
+  type ItemSub = { type: 'sub', sub: Subtitle }
+  type ItemHeader = { type: 'header', chapter: Chapter, count: number, collapsed: boolean }
+  type Item = ItemSub | ItemHeader
+
+  const items = useMemo<Item[]>(() => {
+    if (!chapters.length) {
+      return visible.map(s => ({ type: 'sub' as const, sub: s }))
+    }
+
+    // Sort chapters theo sort_order
+    const sortedChapters = [...chapters].sort((a, b) => a.sort_order - b.sort_order)
+
+    // Group visible subs theo chapter (theo `index` của sub)
+    const result: Item[] = []
+    const chapterRanges = sortedChapters.map(c => ({
+      chapter: c,
+      subs: visible.filter(s => s.index >= c.start_sub_index && s.index <= c.end_sub_index),
+    }))
+    // Subs ngoài tất cả chapter (nếu có) — đẩy vào mục "Chưa phân loại" cuối
+    const allChapterRanges = sortedChapters.map(c => [c.start_sub_index, c.end_sub_index] as [number, number])
+    const orphanSubs = visible.filter(s =>
+      !allChapterRanges.some(([lo, hi]) => s.index >= lo && s.index <= hi)
+    )
+
+    for (const { chapter, subs } of chapterRanges) {
+      const collapsed = !!chapter.collapsed
+      result.push({
+        type: 'header',
+        chapter,
+        count: subs.length,
+        collapsed,
+      })
+      if (!collapsed) {
+        for (const s of subs) result.push({ type: 'sub', sub: s })
+      }
+    }
+    // Orphan subs (sub ngoài range chapter) — hiển thị ở dưới cùng không có header
+    for (const s of orphanSubs) {
+      result.push({ type: 'sub', sub: s })
+    }
+    return result
+  }, [visible, chapters])
+
+  const HEADER_H = 44
+  const SUB_H    = 68
+
   const virt = useVirtualizer({
-    count: visible.length,
+    count: items.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 68,
+    estimateSize: (index) => items[index]?.type === 'header' ? HEADER_H : SUB_H,
     overscan: 14,
   })
 
+  // Lưu ý cho virtualizer: estimateSize phụ thuộc vào items, phải reset khi items đổi
+  useEffect(() => { virt.measure() }, [items.length])
+
   // Auto scroll list theo activeSubId
-  // PERF: dùng ref để đọc visible hiện tại — tránh effect re-run khi subtitles
+  // PERF: dùng ref để đọc visible/items hiện tại — tránh effect re-run khi subtitles
   // đổi (TTS xong từng dòng) trong khi activeSubId không đổi.
   const visibleRef = useRef(visible)
   visibleRef.current = visible
+  const itemsRef = useRef(items)
+  itemsRef.current = items
 
   useEffect(() => {
     if (!activeSubId) return
-    const idx = visibleRef.current.findIndex(s => s.id === activeSubId)
+    // Tìm item index trong items (có thể là sub trong chapter expanded)
+    const idx = itemsRef.current.findIndex(it => it.type === 'sub' && it.sub.id === activeSubId)
     if (idx < 0) return
     const parent = parentRef.current; if (!parent) return
-    const ITEM_H = 68
-    const itemTop = idx * ITEM_H
-    const itemBottom = itemTop + ITEM_H
+
+    // Lấy offset của item từ virtualizer
+    const itemSize = SUB_H
+    // Tính offset thủ công theo cumulated size — virtualizer đã có sẵn offset
+    let itemTop = 0
+    for (let i = 0; i < idx; i++) {
+      itemTop += itemsRef.current[i].type === 'header' ? HEADER_H : SUB_H
+    }
+    const itemBottom = itemTop + itemSize
     const scrollTop = parent.scrollTop
     const viewHeight = parent.clientHeight
     if (itemBottom > scrollTop + viewHeight * 0.7) {
       parent.scrollTo({ top: itemTop - viewHeight * 0.5, behavior: 'smooth' })
     } else if (itemTop < scrollTop) {
-      parent.scrollTo({ top: itemTop - ITEM_H, behavior: 'smooth' })
+      parent.scrollTo({ top: itemTop - SUB_H, behavior: 'smooth' })
     }
   }, [activeSubId])
 
@@ -269,9 +332,51 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   return (
     <div ref={parentRef} className="flex-1 overflow-y-auto bg-[#FAFAF8] dark:bg-zinc-900">
       <div style={{ height: virt.getTotalSize(), position: 'relative' }}>
-        {virt.getVirtualItems().map(item => {
-          const s = visible[item.index]
-          if (!s) return null
+        {virt.getVirtualItems().map(vi => {
+          const it = items[vi.index]
+          if (!it) return null
+
+          if (it.type === 'header') {
+            const ch = it.chapter
+            const statusColor = ch.status === 'done' ? '#10B981'
+              : ch.status === 'in_progress' ? '#F59E0B'
+              : '#9CA3AF'
+            const statusIcon = ch.status === 'done' ? '✓'
+              : ch.status === 'in_progress' ? '▶'
+              : '○'
+            return (
+              <div key={`h-${ch.id}`}
+                onClick={() => onToggleChapter && onToggleChapter(ch.id)}
+                className="absolute left-0 right-0 cursor-pointer select-none flex items-center gap-2 px-3 border-b-2 hover:opacity-90 transition-opacity"
+                style={{
+                  top: vi.start,
+                  height: vi.size,
+                  background: '#1E293B',
+                  borderBottomColor: statusColor,
+                  zIndex: 5,
+                }}>
+                <span className="text-white/70 text-[14px] font-mono w-4">
+                  {it.collapsed ? '▶' : '▼'}
+                </span>
+                <span className="text-white font-bold text-[14px]">{ch.name}</span>
+                <span className="text-white/50 text-[11px] font-mono">
+                  ({ch.start_sub_index}-{ch.end_sub_index})
+                </span>
+                <span className="ml-auto flex items-center gap-2">
+                  <span className="text-white/60 text-[11px] tabular-nums">
+                    {it.count}{it.collapsed ? '' : '/' + (ch.end_sub_index - ch.start_sub_index + 1)} dòng
+                  </span>
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded"
+                    style={{ background: statusColor + '30', color: statusColor }}>
+                    {statusIcon} {ch.status === 'done' ? 'Xong' : ch.status === 'in_progress' ? 'Đang làm' : 'Chưa làm'}
+                  </span>
+                </span>
+              </div>
+            )
+          }
+
+          // sub item
+          const s = it.sub
           const isActive  = s.id === activeSubId
           const isSel     = selectedIds.has(s.id)
           const isDup     = dupStartIds.has(s.id)
@@ -293,8 +398,8 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
               onTTS={handleTTS}
               onDeleteAudio={handleDeleteAudio}
               onDeleteSub={handleDeleteSub}
-              top={item.start}
-              height={item.size}
+              top={vi.start}
+              height={vi.size}
             />
           )
         })}

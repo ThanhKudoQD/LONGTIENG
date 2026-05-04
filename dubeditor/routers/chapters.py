@@ -18,6 +18,75 @@ def list_chapters(project_id: int, db: Session = Depends(get_db)):
     return db.query(Chapter).filter(Chapter.project_id == project_id).order_by(Chapter.sort_order).all()
 
 
+@router.get("/project/{project_id}/stats")
+def chapters_stats(project_id: int, db: Session = Depends(get_db)):
+    """
+    Trả về thống kê cho từng chapter của project.
+    Format:
+    [
+      {
+        "chapter_id": 1,
+        "total": 300,
+        "assigned": 285,
+        "tts_done": 280,
+        "overlap_count": 0
+      },
+      ...
+    ]
+    """
+    chapters = db.query(Chapter).filter(Chapter.project_id == project_id).order_by(Chapter.sort_order).all()
+    if not chapters:
+        return []
+
+    # Lấy hết subs của project 1 lần
+    subs = db.query(Subtitle).filter(Subtitle.project_id == project_id).order_by(Subtitle.index).all()
+
+    # Tính overlap toàn project (dùng auto_fix_overlap util)
+    from dubeditor.auto_fix_overlap import SubInfo, detect_chains
+    sub_infos = [
+        SubInfo(
+            id=s.id, index=s.index,
+            start_time=s.start_time, end_time=s.end_time,
+            audio_offset=s.audio_offset or 0.0,
+            wav_duration=s.wav_duration,
+            has_audio=bool(s.tts_done and s.audio_path),
+        )
+        for s in subs
+    ]
+    # threshold mặc định 0.3s — tương thích với UI
+    chains = detect_chains(sub_infos, overlap_threshold=0.3)
+    overlap_sub_ids = set()
+    for chain in chains:
+        for idx in chain:
+            overlap_sub_ids.add(sub_infos[idx].id)
+
+    # Index lookup nhanh
+    subs_by_index = {s.index: s for s in subs}
+
+    result = []
+    for c in chapters:
+        chapter_subs = [s for idx, s in subs_by_index.items()
+                        if c.start_sub_index <= idx <= c.end_sub_index]
+        total = len(chapter_subs)
+        assigned = sum(1 for s in chapter_subs if s.character_id)
+        tts_done = sum(1 for s in chapter_subs if s.tts_done)
+        overlap_count = sum(1 for s in chapter_subs if s.id in overlap_sub_ids)
+
+        result.append({
+            "chapter_id": c.id,
+            "name": c.name,
+            "status": c.status,
+            "collapsed": c.collapsed,
+            "start_sub_index": c.start_sub_index,
+            "end_sub_index": c.end_sub_index,
+            "total": total,
+            "assigned": assigned,
+            "tts_done": tts_done,
+            "overlap_count": overlap_count,
+        })
+    return result
+
+
 @router.post("/project/{project_id}", response_model=ChapterOut)
 def create_chapter(project_id: int, data: ChapterCreate, db: Session = Depends(get_db)):
     # Tự gán sort_order = max + 1 nếu chưa có

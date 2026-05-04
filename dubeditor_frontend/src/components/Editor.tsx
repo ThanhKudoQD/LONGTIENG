@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react'
+import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import useStore from '../store'
 import api from '../api'
 import CharSidebar from './CharSidebar'
@@ -38,6 +38,53 @@ export default function Editor({ projectId, onBack }: Props) {
   const [showAutoAssign, setShowAutoAssign] = useState(false)
   const [showAutoFix, setShowAutoFix] = useState(false)
   const [showChapters, setShowChapters] = useState(false)
+
+  // Chapters local state — dùng để render trong SubtitleList với collapse + statistics
+  const [chapters, setChapters] = useState<any[]>([])
+  const reloadChapters = useCallback(async () => {
+    try {
+      const r = await api.get(`/chapters/project/${projectId}`)
+      setChapters(r.data)
+    } catch {}
+  }, [projectId])
+
+  useEffect(() => { reloadChapters() }, [reloadChapters])
+
+  // Listen event chapters changed (từ ChaptersModal hoặc ChapterSelector)
+  useEffect(() => {
+    const onChange = () => reloadChapters()
+    window.addEventListener('chapters_changed', onChange)
+    return () => window.removeEventListener('chapters_changed', onChange)
+  }, [reloadChapters])
+
+  // Toggle collapse 1 đoạn
+  const handleToggleChapter = useCallback(async (chapterId: number) => {
+    const ch = chapters.find(c => c.id === chapterId)
+    if (!ch) return
+    const newCollapsed = ch.collapsed ? 0 : 1
+    // Optimistic update local
+    setChapters(prev => prev.map(c => c.id === chapterId ? { ...c, collapsed: newCollapsed } : c))
+    try {
+      await api.patch(`/chapters/${chapterId}`, { collapsed: newCollapsed })
+    } catch {
+      // Rollback nếu lỗi
+      setChapters(prev => prev.map(c => c.id === chapterId ? { ...c, collapsed: ch.collapsed } : c))
+    }
+  }, [chapters])
+
+  // Khi user click chuyển chapter (từ modal stats): expand chapter đó nếu đang collapsed
+  useEffect(() => {
+    const onJump = (e: Event) => {
+      const chapterId = (e as CustomEvent).detail?.chapter_id
+      if (!chapterId) return
+      const ch = chapters.find(c => c.id === chapterId)
+      if (ch && ch.collapsed) {
+        handleToggleChapter(chapterId)
+      }
+    }
+    window.addEventListener('chapter_jump', onJump)
+    return () => window.removeEventListener('chapter_jump', onJump)
+  }, [chapters, handleToggleChapter])
   const [modelStatus, setModelStatus] = useState<'unknown'|'loaded'|'loading'|'unloaded'>('unknown')
 
   // Poll model status
@@ -610,7 +657,15 @@ export default function Editor({ projectId, onBack }: Props) {
             </div>
           )}
 
-          <SubtitleList filter={filter} filterNoChar={filterNoChar} filterNoTTS={filterNoTTS} overlapSubIds={filterOverlap ? overlapSubIds : undefined} filterCharId={filterCharId} />
+          <SubtitleList
+            filter={filter}
+            filterNoChar={filterNoChar}
+            filterNoTTS={filterNoTTS}
+            overlapSubIds={filterOverlap ? overlapSubIds : undefined}
+            filterCharId={filterCharId}
+            chapters={chapters}
+            onToggleChapter={handleToggleChapter}
+          />
         </div>
 
         <DetailPanel />

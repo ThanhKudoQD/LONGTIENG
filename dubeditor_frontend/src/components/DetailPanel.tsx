@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import useStore from '../store'
 import api from '../api'
-
+import ConfirmModal from './ConfirmModal'
 export default function DetailPanel() {
   // PERF: selectors riêng — KHÔNG destructure
   const subtitles = useStore(s => s.subtitles)
@@ -16,34 +16,43 @@ export default function DetailPanel() {
   if (activeSub) (lastSubRef as React.MutableRefObject<typeof activeSub>).current = activeSub
   const sub = lastSubRef.current
 
-  const [ttsLoading,    setTtsLoading]    = useState(false)
+  const [ttsLoading, setTtsLoading] = useState(false)
   const [bulkTtsLoading, setBulkTtsLoading] = useState(false)
+  // Modal xác nhận
+  const [confirmCfg, setConfirmCfg] = useState<{
+    title: string
+    message: string
+    warnings?: string[]
+    variant?: 'default' | 'danger' | 'warning'
+    confirmText?: string
+    onConfirm: () => void
+  } | null>(null)
   const [bulkDelLoading, setBulkDelLoading] = useState(false)
   const [bulkAudioDelLoading, setBulkAudioDelLoading] = useState(false)
   const [trimLoading, setTrimLoading] = useState(false)
-  const [trimDb,      setTrimDb]      = useState(-35)
-  const [trimMsg,     setTrimMsg]     = useState('')
-  const [exportPct,   setExportPct]   = useState(-1)  // -1 = idle
-  const [exportMsg,   setExportMsg]   = useState('')
+  const [trimDb, setTrimDb] = useState(-35)
+  const [trimMsg, setTrimMsg] = useState('')
+  const [exportPct, setExportPct] = useState(-1)  // -1 = idle
+  const [exportMsg, setExportMsg] = useState('')
 
   React.useEffect(() => {
     const onProgress = (e: any) => { setExportPct(e.detail.pct); setExportMsg(e.detail.msg) }
-    const onDone     = (e: any) => { setExportPct(100); setExportMsg(`✓ Xong! ${e.detail.size_mb || ''}MB · ${e.detail.duration || ''}s`) }
-    const onError    = (e: any) => { setExportPct(-1); setExportMsg('❌ ' + e.detail.error) }
+    const onDone = (e: any) => { setExportPct(100); setExportMsg(`✓ Xong! ${e.detail.size_mb || ''}MB · ${e.detail.duration || ''}s`) }
+    const onError = (e: any) => { setExportPct(-1); setExportMsg('❌ ' + e.detail.error) }
     window.addEventListener('export_progress', onProgress)
-    window.addEventListener('export_done',     onDone)
-    window.addEventListener('export_error',    onError)
+    window.addEventListener('export_done', onDone)
+    window.addEventListener('export_error', onError)
     return () => {
       window.removeEventListener('export_progress', onProgress)
-      window.removeEventListener('export_done',     onDone)
-      window.removeEventListener('export_error',    onError)
+      window.removeEventListener('export_done', onDone)
+      window.removeEventListener('export_error', onError)
     }
   }, [])
 
-  const done   = subtitles.filter(s => s.tts_done).length
-  const total  = subtitles.length
+  const done = subtitles.filter(s => s.tts_done).length
+  const total = subtitles.length
   const noChar = subtitles.filter(s => !s.character_id).length
-  const pct    = total ? Math.round(done / total * 100) : 0
+  const pct = total ? Math.round(done / total * 100) : 0
 
   const bulkTTS = async () => {
     if (!project) return
@@ -52,39 +61,107 @@ export default function DetailPanel() {
     const skipped = total - willGenerate.length
 
     if (!willGenerate.length) {
-      if (skipped > 0) return alert(`Không có dòng nào để tạo TTS.\n${skipped} dòng chưa gán nhân vật bị bỏ qua.`)
-      return alert('Tất cả đã có TTS rồi!')
+      setConfirmCfg({
+        title: 'Không có gì để tạo',
+        message: skipped > 0
+          ? `${skipped} dòng chưa gán nhân vật bị bỏ qua, không có dòng nào hợp lệ để tạo TTS.`
+          : 'Tất cả phụ đề đã có TTS rồi!',
+        variant: 'default',
+        confirmText: 'Đóng',
+        onConfirm: () => setConfirmCfg(null),
+      })
+      return
     }
 
-    let msg = `Sẽ tạo TTS cho ${willGenerate.length} dòng đã gán nhân vật.`
-    if (skipped > 0) msg += `\n⚠ Bỏ qua ${skipped} dòng chưa gán nhân vật.`
-    msg += '\n\nTiếp tục?'
+    const warnings: string[] = []
+    if (skipped > 0) warnings.push(`Bỏ qua ${skipped} dòng chưa gán nhân vật`)
 
-    if (!confirm(msg)) return
-    await api.post('/tts/bulk', { subtitle_ids: willGenerate })
+    setConfirmCfg({
+      title: 'Tạo TTS tất cả',
+      message: `Sẽ tạo TTS cho ${willGenerate.length} dòng đã gán nhân vật. Quá trình này có thể mất nhiều thời gian.`,
+      warnings,
+      variant: 'default',
+      confirmText: 'Bắt đầu tạo',
+      onConfirm: async () => {
+        setConfirmCfg(null)
+        try {
+          await api.post('/tts/bulk', { subtitle_ids: willGenerate })
+        } catch (e: any) {
+          setConfirmCfg({
+            title: 'Lỗi',
+            message: e?.response?.data?.detail || e?.message || 'Không thể tạo TTS',
+            variant: 'danger',
+            confirmText: 'Đóng',
+            onConfirm: () => setConfirmCfg(null),
+          })
+        }
+      },
+    })
   }
 
   const bulkTTSSelected = async () => {
     const allSel = Array.from(useStore.getState().selectedIds)
-    if (!allSel.length) return alert('Chưa chọn dòng nào!')
+    if (!allSel.length) {
+      setConfirmCfg({
+        title: 'Chưa chọn dòng nào',
+        message: 'Hãy chọn các dòng phụ đề muốn tạo TTS trước.',
+        variant: 'default',
+        confirmText: 'Đóng',
+        onConfirm: () => setConfirmCfg(null),
+      })
+      return
+    }
     const subs = useStore.getState().subtitles
     const willGenerate = allSel.filter(id => {
       const s = subs.find(x => x.id === id)
-      return s && !s.tts_done && s.character_id
+      return s && s.character_id
     })
-    const skipped = allSel.length - willGenerate.length
+    const noChar = allSel.length - willGenerate.length
 
     if (!willGenerate.length) {
-      return alert(`Không có dòng nào để tạo TTS trong ${allSel.length} dòng đã chọn.\n(Đã có TTS hoặc chưa gán nhân vật)`)
-    }
-    if (skipped > 0) {
-      if (!confirm(`Sẽ tạo TTS cho ${willGenerate.length} dòng.\n⚠ Bỏ qua ${skipped} dòng (đã có TTS hoặc chưa gán nhân vật).\n\nTiếp tục?`)) return
+      setConfirmCfg({
+        title: 'Không có dòng nào hợp lệ',
+        message: `Trong ${allSel.length} dòng đã chọn, không có dòng nào đã gán nhân vật.`,
+        variant: 'default',
+        confirmText: 'Đóng',
+        onConfirm: () => setConfirmCfg(null),
+      })
+      return
     }
 
-    setBulkTtsLoading(true)
-    try {
-      await api.post('/tts/bulk', { subtitle_ids: willGenerate })
-    } finally { setBulkTtsLoading(false) }
+    const existing = willGenerate.filter(id => {
+      const s = subs.find(x => x.id === id)
+      return s && s.tts_done
+    }).length
+
+    const warnings: string[] = []
+    if (existing > 0) warnings.push(`${existing} dòng đã có TTS — audio cũ sẽ bị GHI ĐÈ`)
+    if (noChar > 0) warnings.push(`Bỏ qua ${noChar} dòng chưa gán nhân vật`)
+
+    setConfirmCfg({
+      title: 'Tạo TTS cho mục đã chọn',
+      message: `Sẽ tạo TTS cho ${willGenerate.length} dòng.`,
+      warnings,
+      variant: existing > 0 ? 'warning' : 'default',
+      confirmText: existing > 0 ? 'Ghi đè và tạo lại' : 'Bắt đầu tạo',
+      onConfirm: async () => {
+        setConfirmCfg(null)
+        setBulkTtsLoading(true)
+        try {
+          await api.post('/tts/bulk', { subtitle_ids: willGenerate })
+        } catch (e: any) {
+          setConfirmCfg({
+            title: 'Lỗi',
+            message: e?.response?.data?.detail || e?.message || 'Không thể tạo TTS',
+            variant: 'danger',
+            confirmText: 'Đóng',
+            onConfirm: () => setConfirmCfg(null),
+          })
+        } finally {
+          setBulkTtsLoading(false)
+        }
+      },
+    })
   }
 
   const bulkDeleteAudio = async () => {
@@ -181,17 +258,17 @@ export default function DetailPanel() {
             <button onClick={playAudio} disabled={!sub.audio_path}
               className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-40 transition-colors">
               <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-                <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.2"/>
-                <path d="M4.5 3.5L9 6L4.5 8.5V3.5Z" fill="currentColor"/>
+                <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M4.5 3.5L9 6L4.5 8.5V3.5Z" fill="currentColor" />
               </svg>
               Nghe
             </button>
             <button onClick={genTTS} disabled={ttsLoading}
               className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-[11px] font-medium text-white disabled:opacity-60 transition-colors">
               <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-                <path d="M1.5 4.5H3.5L6 2V10L3.5 7.5H1.5V4.5Z" fill="currentColor"/>
-                <path d="M8 4C8.8 4.8 8.8 7.2 8 8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
-                <path d="M9.5 2.5C11 4 11 8 9.5 9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/>
+                <path d="M1.5 4.5H3.5L6 2V10L3.5 7.5H1.5V4.5Z" fill="currentColor" />
+                <path d="M8 4C8.8 4.8 8.8 7.2 8 8" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+                <path d="M9.5 2.5C11 4 11 8 9.5 9.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
               </svg>
               {ttsLoading ? '...' : 'TTS'}
             </button>
@@ -283,7 +360,7 @@ export default function DetailPanel() {
           </div>
           {/* Gợi ý */}
           <div className="flex gap-1 flex-wrap">
-            {[[-50,'Nhẹ'],[-35,'Tối ưu'],[-20,'Mạnh']].map(([v, label]) => (
+            {[[-50, 'Nhẹ'], [-35, 'Tối ưu'], [-20, 'Mạnh']].map(([v, label]) => (
               <button key={v} onClick={() => setTrimDb(v as number)}
                 className={`px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${trimDb === v ? 'bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300' : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 hover:bg-zinc-200'}`}>
                 {label}
@@ -317,7 +394,7 @@ export default function DetailPanel() {
       <section className="p-3 space-y-2">
         <p className="panel-label">Phím tắt</p>
         <div className="space-y-1.5">
-          {[['Space','Play/Pause'],['↑↓','Di chuyển'],['1–9','Gán char'],['Ctrl+T','TTS dòng'],['[ ]','±100ms'],['Del','Xóa dòng']].map(([k,v]) => (
+          {[['Space', 'Play/Pause'], ['↑↓', 'Di chuyển'], ['1–9', 'Gán char'], ['Ctrl+T', 'TTS dòng'], ['[ ]', '±100ms'], ['Del', 'Xóa dòng']].map(([k, v]) => (
             <div key={k} className="flex items-center justify-between gap-2">
               <span className="kbd">{k}</span>
               <span className="text-[11px] text-zinc-500 text-right">{v}</span>
@@ -325,8 +402,20 @@ export default function DetailPanel() {
           ))}
         </div>
       </section>
+      <ConfirmModal
+        open={confirmCfg !== null}
+        title={confirmCfg?.title || ''}
+        message={confirmCfg?.message || ''}
+        warnings={confirmCfg?.warnings}
+        variant={confirmCfg?.variant}
+        confirmText={confirmCfg?.confirmText}
+        onConfirm={() => confirmCfg?.onConfirm()}
+        onCancel={() => setConfirmCfg(null)}
+      />
     </div>
+
   )
+
 }
 
 function Row({ k, v, color }: { k: string; v: string; color?: string }) {

@@ -100,6 +100,8 @@ def get_nano():
     _nano_ready.wait()
     if _nano_error:
         raise RuntimeError(f"Model load failed: {_nano_error}")
+    if _nano_server is None:
+        raise RuntimeError("Model TTS chưa được load. Bấm 'Model ON' ở header để load model trước.")
     return _nano_server
 
 def _preload_all_loras():
