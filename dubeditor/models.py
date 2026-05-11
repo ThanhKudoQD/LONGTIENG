@@ -3,6 +3,8 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from dubeditor.database import Base
 
+# ─── DubEditor Models ─────────────────────────────────────────────────────────
+
 class Project(Base):
     __tablename__ = "projects"
     id         = Column(Integer, primary_key=True, index=True)
@@ -29,8 +31,8 @@ class Character(Base):
     voxcpm_actor_name = Column(String, default="")
     voxcpm_role_name  = Column(String, default="")
     audio             = Column(String, nullable=True)
-    shortcut_key      = Column(String, nullable=True)  # Phím tắt gán nhanh (1, 2, q, w, Shift+1...)
-    tts_speed         = Column(Float, default=1.0)  # Tốc độ TTS mặc định (0.5-2.0)
+    shortcut_key      = Column(String, nullable=True)
+    tts_speed         = Column(Float, default=1.0)
     project   = relationship("Project",  back_populates="characters")
     subtitles = relationship("Subtitle", back_populates="character")
 
@@ -46,11 +48,10 @@ class Subtitle(Base):
     audio_path   = Column(String, nullable=True)
     audio_offset = Column(Float, default=0.0)
     tts_done     = Column(Boolean, default=False)
-    wav_duration  = Column(Float, nullable=True)  # thời lượng thực tế của file WAV
-    tts_speed     = Column(Float, nullable=True)  # Tốc độ TTS override (NULL = kế thừa từ character)
+    wav_duration = Column(Float, nullable=True)
+    tts_speed    = Column(Float, nullable=True)
     project   = relationship("Project",   back_populates="subtitles")
     character = relationship("Character", back_populates="subtitles")
-
 
 class Chapter(Base):
     __tablename__ = "chapters"
@@ -59,8 +60,54 @@ class Chapter(Base):
     name            = Column(String, nullable=False, default="Đoạn")
     start_sub_index = Column(Integer, nullable=False)
     end_sub_index   = Column(Integer, nullable=False)
-    status          = Column(String, default="pending")  # pending | in_progress | done
+    status          = Column(String, default="pending")
     collapsed       = Column(Integer, default=0)
     sort_order      = Column(Integer, default=0)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
     project = relationship("Project", back_populates="chapters")
+
+# ─── VoiceCast Models ─────────────────────────────────────────────────────────
+
+class Admin(Base):
+    __tablename__ = "admins"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    username   = Column(String, unique=True, nullable=False)
+    password   = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+class Actor(Base):
+    __tablename__ = "actors"
+    id         = Column(String, primary_key=True)
+    name       = Column(String, nullable=False)
+    gender     = Column(String, nullable=False, default="nam")
+    birth_year = Column(Integer, nullable=True)
+    avatar     = Column(String, default="")
+    bio        = Column(String, default="")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    roles      = relationship("Role", back_populates="actor", cascade="all, delete", order_by="Role.sort_order")
+
+class Role(Base):
+    __tablename__ = "roles"
+    id                   = Column(String, primary_key=True)
+    actor_id             = Column(String, ForeignKey("actors.id", ondelete="CASCADE"), nullable=False)
+    character_name       = Column(String, nullable=False)
+    show_name            = Column(String, default="")
+    type                 = Column(String, default="chinh")
+    genre                = Column(String, default="hien-dai")
+    description          = Column(String, default="")
+    audio                = Column(String, default="")
+    reference_audio_text = Column(String, default="")
+    lora_path            = Column(String, default="")
+    sort_order           = Column(Integer, default=0)
+    created_at           = Column(DateTime, server_default=func.now())
+    actor  = relationship("Actor", back_populates="roles")
+    images = relationship("RoleImage", back_populates="role", cascade="all, delete", order_by="RoleImage.sort_order")
+
+class RoleImage(Base):
+    __tablename__ = "role_images"
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    role_id    = Column(String, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False)
+    url        = Column(String, nullable=False)
+    sort_order = Column(Integer, default=0)
+    role       = relationship("Role", back_populates="images")

@@ -16,7 +16,6 @@ from typing import Optional
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 
-import sqlite3
 import bcrypt
 import jwt as pyjwt
 
@@ -44,7 +43,6 @@ BASE_DIR    = Path(__file__).parent
 DATA_DIR    = BASE_DIR / "data"
 PUBLIC_DIR  = BASE_DIR / "public"
 UPLOADS_DIR = PUBLIC_DIR / "uploads"
-DB_PATH     = DATA_DIR / "voicecast.db"
 GEN_DIR     = UPLOADS_DIR / "generated"
 
 for d in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR,
@@ -107,140 +105,84 @@ def get_nano():
 def _preload_all_loras():
     """Register tất cả LoRA từ DB khi khởi động."""
     try:
+        from dubeditor.models import Role
         srv = get_nano()
-        with get_db() as conn:
-            roles = conn.execute(
-                "SELECT id, character_name, lora_path FROM roles WHERE lora_path != ''"
-            ).fetchall()
+        db  = _get_vc_session()
+        try:
+            roles = db.query(Role).filter(Role.lora_path != "").all()
+        finally:
+            db.close()
         for role in roles:
-            lora_path = role["lora_path"].strip()
+            lora_path = (role.lora_path or "").strip()
             if not lora_path or not os.path.exists(lora_path):
                 continue
             try:
                 lora_name = f"lora_{hash(lora_path) & 0xFFFFFF:06x}"
-                if hasattr(srv, 'list_loras') and hasattr(srv, 'register_lora'):
+                if hasattr(srv, "list_loras") and hasattr(srv, "register_lora"):
                     registered = [l.name for l in srv.list_loras()]
                     if lora_name not in registered:
                         srv.register_lora(name=lora_name, path=lora_path)
+                    logger.info(f"[LoRA] Preloaded: {role.character_name} → {lora_name}")
                 else:
-                    logger.info(f"[LoRA] Version này không hỗ trợ register_lora, bỏ qua preload")
+                    logger.info("[LoRA] Version này không hỗ trợ register_lora, bỏ qua preload")
                     break
-                    char_name = role["character_name"]
-                    logger.info(f"[LoRA] Preloaded: {char_name} → {lora_name}")
             except Exception as e:
-                char_name = role["character_name"]
-                logger.warning(f"[LoRA] Preload failed {char_name}: {e}")
+                logger.warning(f"[LoRA] Preload failed {role.character_name}: {e}")
     except Exception as e:
         logger.warning(f"[LoRA] Preload all failed: {e}")
 
 # ─── Database ─────────────────────────────────────────────────────────────────
-def get_db():
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-def init_db():
-    with get_db() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS admins (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            username   TEXT UNIQUE NOT NULL,
-            password   TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS actors (
-            id         TEXT PRIMARY KEY,
-            name       TEXT NOT NULL,
-            gender     TEXT NOT NULL DEFAULT 'nam',
-            birth_year INTEGER,
-            avatar     TEXT DEFAULT '',
-            bio        TEXT DEFAULT '',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS roles (
-            id                   TEXT PRIMARY KEY,
-            actor_id             TEXT NOT NULL,
-            character_name       TEXT NOT NULL,
-            show_name            TEXT DEFAULT '',
-            type                 TEXT DEFAULT 'chinh',
-            genre                TEXT DEFAULT 'hien-dai',
-            description          TEXT DEFAULT '',
-            audio                TEXT DEFAULT '',
-            reference_audio_text TEXT DEFAULT '',
-            lora_path            TEXT DEFAULT '',
-            sort_order           INTEGER DEFAULT 0,
-            created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(actor_id) REFERENCES actors(id) ON DELETE CASCADE
-        );
-        CREATE TABLE IF NOT EXISTS role_images (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            role_id    TEXT NOT NULL,
-            url        TEXT NOT NULL,
-            sort_order INTEGER DEFAULT 0,
-            FOREIGN KEY(role_id) REFERENCES roles(id) ON DELETE CASCADE
-        );
-        """)
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(roles)")]
-        if "lora_path" not in cols:
-            conn.execute("ALTER TABLE roles ADD COLUMN lora_path TEXT DEFAULT ''")
-        conn.commit()
-
-def seed_admin():
-    username = os.environ.get("ADMIN_USERNAME", "admin")
-    password = os.environ.get("ADMIN_PASSWORD", "admin123")
-    with get_db() as conn:
-        exists = conn.execute(
-            "SELECT id FROM admins WHERE username=?", (username,)
-        ).fetchone()
-        if not exists:
-            hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-            conn.execute(
-                "INSERT INTO admins (username, password) VALUES (?,?)",
-                (username, hashed)
-            )
-            conn.commit()
-            logger.info(f"✅ Admin tạo thành công: {username}")
-
 def uid():
     return hex(int(time.time() * 1000))[2:] + hex(int.from_bytes(
         os.urandom(3), 'big'))[2:]
 
-# ─── DB Helpers ───────────────────────────────────────────────────────────────
-def _get_roles(conn, actor_id: str):
-    roles = conn.execute(
-        "SELECT * FROM roles WHERE actor_id=? ORDER BY sort_order, created_at",
-        (actor_id,)
-    ).fetchall()
-    result = []
-    for r in roles:
-        r = dict(r)
-        imgs = conn.execute(
-            "SELECT url FROM role_images WHERE role_id=? ORDER BY sort_order",
-            (r["id"],)
-        ).fetchall()
-        r["images"] = [i["url"] for i in imgs]
-        result.append(r)
-    return result
+# ─── DB Helpers (SQLAlchemy) ──────────────────────────────────────────────────
+def _role_to_dict(role) -> dict:
+    return {
+        "id":                   role.id,
+        "actor_id":             role.actor_id,
+        "character_name":       role.character_name,
+        "show_name":            role.show_name,
+        "type":                 role.type,
+        "genre":                role.genre,
+        "description":          role.description,
+        "audio":                role.audio,
+        "reference_audio_text": role.reference_audio_text,
+        "lora_path":            role.lora_path,
+        "sort_order":           role.sort_order,
+        "images":               [img.url for img in role.images],
+    }
 
-def _get_actor(conn, actor_id: str):
-    a = conn.execute("SELECT * FROM actors WHERE id=?", (actor_id,)).fetchone()
-    if not a:
-        return None
-    a = dict(a)
-    a["roles"] = _get_roles(conn, actor_id)
-    return a
+def _actor_to_dict(actor) -> dict:
+    return {
+        "id":         actor.id,
+        "name":       actor.name,
+        "gender":     actor.gender,
+        "birth_year": actor.birth_year,
+        "avatar":     actor.avatar,
+        "bio":        actor.bio,
+        "roles":      [_role_to_dict(r) for r in actor.roles],
+    }
 
-def _get_all_actors(conn):
-    actors = conn.execute("SELECT * FROM actors ORDER BY name ASC").fetchall()
-    result = []
-    for a in actors:
-        a = dict(a)
-        a["roles"] = _get_roles(conn, a["id"])
-        result.append(a)
-    return result
+def _get_vc_session():
+    """Trả về SQLAlchemy session từ dubeditor (DB dùng chung)."""
+    from dubeditor.database import SessionLocal
+    return SessionLocal()
+
+def seed_admin():
+    from dubeditor.models import Admin
+    username = os.environ.get("ADMIN_USERNAME", "admin")
+    password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    db = _get_vc_session()
+    try:
+        exists = db.query(Admin).filter(Admin.username == username).first()
+        if not exists:
+            hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+            db.add(Admin(username=username, password=hashed))
+            db.commit()
+            logger.info(f"✅ Admin tạo thành công: {username}")
+    finally:
+        db.close()
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 def sign_token(payload: dict) -> str:
@@ -366,9 +308,8 @@ def _do_load():
 # ─── FastAPI App ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
     from dubeditor.database import init_db as dub_init_db
-    dub_init_db()
+    dub_init_db()  # khởi tạo toàn bộ bảng (DubEditor + VoiceCast) trong 1 DB
     seed_admin()
 
     # Khởi động TTS Queue worker
@@ -440,17 +381,18 @@ class LoginBody(BaseModel):
 
 @app.post("/admin/login")
 async def do_login(body: LoginBody, response: Response):
-    with get_db() as conn:
-        admin = conn.execute(
-            "SELECT * FROM admins WHERE username=?", (body.username,)
-        ).fetchone()
+    from dubeditor.models import Admin
+    db = _get_vc_session()
+    try:
+        admin = db.query(Admin).filter(Admin.username == body.username).first()
+    finally:
+        db.close()
     if not admin:
         raise HTTPException(401, "Tên đăng nhập hoặc mật khẩu không đúng")
-    if not bcrypt.checkpw(body.password.encode(), admin["password"].encode()):
+    if not bcrypt.checkpw(body.password.encode(), admin.password.encode()):
         raise HTTPException(401, "Tên đăng nhập hoặc mật khẩu không đúng")
-    token = sign_token({"id": admin["id"], "username": admin["username"]})
-    response.set_cookie("token", token, httponly=True,
-                        max_age=JWT_EXPIRE * 86400)
+    token = sign_token({"id": admin.id, "username": admin.username})
+    response.set_cookie("token", token, httponly=True, max_age=JWT_EXPIRE * 86400)
     return {"token": token, "message": "Đăng nhập thành công"}
 
 @app.post("/admin/logout")
@@ -460,137 +402,164 @@ async def do_logout(response: Response):
 
 @app.post("/api/admin/change-password")
 async def change_password(request: Request, admin=Depends(require_auth_api)):
+    from dubeditor.models import Admin
     body = await request.json()
-    with get_db() as conn:
-        a = conn.execute(
-            "SELECT * FROM admins WHERE username=?", (admin["username"],)
-        ).fetchone()
-        if not bcrypt.checkpw(body.get("current","").encode(),
-                               a["password"].encode()):
+    db   = _get_vc_session()
+    try:
+        a = db.query(Admin).filter(Admin.username == admin["username"]).first()
+        if not bcrypt.checkpw(body.get("current", "").encode(), a.password.encode()):
             raise HTTPException(400, "Mật khẩu hiện tại không đúng")
-        hashed = bcrypt.hashpw(
-            body.get("newPass","").encode(), bcrypt.gensalt()).decode()
-        conn.execute("UPDATE admins SET password=? WHERE id=?",
-                     (hashed, a["id"]))
-        conn.commit()
+        a.password = bcrypt.hashpw(body.get("newPass", "").encode(), bcrypt.gensalt()).decode()
+        db.commit()
+    finally:
+        db.close()
     return {"message": "Đã đổi mật khẩu"}
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 @app.get("/api/actors")
 async def api_actors():
-    with get_db() as conn:
-        return {"actors": _get_all_actors(conn)}
+    from dubeditor.models import Actor
+    db = _get_vc_session()
+    try:
+        actors = db.query(Actor).order_by(Actor.name).all()
+        return {"actors": [_actor_to_dict(a) for a in actors]}
+    finally:
+        db.close()
 
 @app.get("/api/actors/{actor_id}")
 async def api_actor(actor_id: str):
-    with get_db() as conn:
-        a = _get_actor(conn, actor_id)
-    if not a:
-        raise HTTPException(404, "Không tìm thấy")
-    return a
+    from dubeditor.models import Actor
+    db = _get_vc_session()
+    try:
+        a = db.query(Actor).filter(Actor.id == actor_id).first()
+        if not a:
+            raise HTTPException(404, "Không tìm thấy")
+        return _actor_to_dict(a)
+    finally:
+        db.close()
 
 # ─── Admin: Actors ────────────────────────────────────────────────────────────
 @app.post("/api/admin/actors")
 async def create_actor(request: Request, admin=Depends(require_auth_api)):
+    from dubeditor.models import Actor
     body = await request.json()
     if not body.get("name", "").strip():
         raise HTTPException(400, "Tên là bắt buộc")
     new_id = uid()
-    with get_db() as conn:
-        conn.execute(
-            "INSERT INTO actors (id,name,gender,birth_year,avatar,bio) VALUES (?,?,?,?,?,?)",
-            (new_id, body["name"].strip(), body.get("gender","nam"),
-             int(body.get("birth_year", 1990)),
-             body.get("avatar",""), body.get("bio",""))
-        )
-        conn.commit()
+    db = _get_vc_session()
+    try:
+        db.add(Actor(
+            id=new_id,
+            name=body["name"].strip(),
+            gender=body.get("gender", "nam"),
+            birth_year=int(body.get("birth_year", 1990)),
+            avatar=body.get("avatar", ""),
+            bio=body.get("bio", ""),
+        ))
+        db.commit()
+    finally:
+        db.close()
     return {"id": new_id, "message": "Đã tạo diễn viên"}
 
 @app.put("/api/admin/actors/{actor_id}")
-async def update_actor(actor_id: str, request: Request,
-                       admin=Depends(require_auth_api)):
+async def update_actor(actor_id: str, request: Request, admin=Depends(require_auth_api)):
+    from dubeditor.models import Actor
     body = await request.json()
-    if not body.get("name","").strip():
+    if not body.get("name", "").strip():
         raise HTTPException(400, "Tên là bắt buộc")
-    with get_db() as conn:
-        conn.execute(
-            """UPDATE actors SET name=?,gender=?,birth_year=?,avatar=?,bio=?,
-               updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-            (body["name"].strip(), body.get("gender","nam"),
-             int(body.get("birth_year",1990)),
-             body.get("avatar",""), body.get("bio",""), actor_id)
-        )
-        conn.commit()
+    db = _get_vc_session()
+    try:
+        a = db.query(Actor).filter(Actor.id == actor_id).first()
+        if not a:
+            raise HTTPException(404, "Không tìm thấy")
+        a.name       = body["name"].strip()
+        a.gender     = body.get("gender", "nam")
+        a.birth_year = int(body.get("birth_year", 1990))
+        a.avatar     = body.get("avatar", "")
+        a.bio        = body.get("bio", "")
+        db.commit()
+    finally:
+        db.close()
     return {"message": "Đã cập nhật"}
 
 @app.delete("/api/admin/actors/{actor_id}")
 async def delete_actor(actor_id: str, admin=Depends(require_auth_api)):
-    with get_db() as conn:
-        conn.execute("DELETE FROM actors WHERE id=?", (actor_id,))
-        conn.commit()
+    from dubeditor.models import Actor
+    db = _get_vc_session()
+    try:
+        a = db.query(Actor).filter(Actor.id == actor_id).first()
+        if a:
+            db.delete(a)
+            db.commit()
+    finally:
+        db.close()
     return {"message": "Đã xóa"}
 
 # ─── Admin: Roles ─────────────────────────────────────────────────────────────
 @app.post("/api/admin/actors/{actor_id}/roles")
-async def create_role(actor_id: str, request: Request,
-                      admin=Depends(require_auth_api)):
-    body = await request.json()
+async def create_role(actor_id: str, request: Request, admin=Depends(require_auth_api)):
+    from dubeditor.models import Role, RoleImage
+    body   = await request.json()
     new_id = uid()
-    with get_db() as conn:
-        count = conn.execute(
-            "SELECT COUNT(*) FROM roles WHERE actor_id=?", (actor_id,)
-        ).fetchone()[0]
-        conn.execute(
-            """INSERT INTO roles
-               (id,actor_id,character_name,show_name,type,genre,
-                description,audio,reference_audio_text,lora_path,sort_order)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (new_id, actor_id,
-             body.get("character_name",""), body.get("show_name",""),
-             body.get("type","chinh"),      body.get("genre","hien-dai"),
-             body.get("description",""),    body.get("audio",""),
-             body.get("reference_audio_text",""),
-             body.get("lora_path",""),      count)
-        )
-        if body.get("images"):
-            for i, url in enumerate(body["images"]):
-                conn.execute(
-                    "INSERT INTO role_images (role_id,url,sort_order) VALUES (?,?,?)",
-                    (new_id, url, i)
-                )
-        conn.commit()
+    db     = _get_vc_session()
+    try:
+        count = db.query(Role).filter(Role.actor_id == actor_id).count()
+        db.add(Role(
+            id=new_id, actor_id=actor_id,
+            character_name=body.get("character_name", ""),
+            show_name=body.get("show_name", ""),
+            type=body.get("type", "chinh"),
+            genre=body.get("genre", "hien-dai"),
+            description=body.get("description", ""),
+            audio=body.get("audio", ""),
+            reference_audio_text=body.get("reference_audio_text", ""),
+            lora_path=body.get("lora_path", ""),
+            sort_order=count,
+        ))
+        for i, url in enumerate(body.get("images", [])):
+            db.add(RoleImage(role_id=new_id, url=url, sort_order=i))
+        db.commit()
+    finally:
+        db.close()
     return {"id": new_id, "message": "Đã thêm vai"}
 
 @app.put("/api/admin/roles/{role_id}")
-async def update_role(role_id: str, request: Request,
-                      admin=Depends(require_auth_api)):
+async def update_role(role_id: str, request: Request, admin=Depends(require_auth_api)):
+    from dubeditor.models import Role, RoleImage
     body = await request.json()
-    with get_db() as conn:
-        conn.execute(
-            """UPDATE roles SET character_name=?,show_name=?,type=?,genre=?,
-               description=?,audio=?,reference_audio_text=?,lora_path=?
-               WHERE id=?""",
-            (body.get("character_name",""), body.get("show_name",""),
-             body.get("type","chinh"),      body.get("genre","hien-dai"),
-             body.get("description",""),    body.get("audio",""),
-             body.get("reference_audio_text",""),
-             body.get("lora_path",""),      role_id)
-        )
-        conn.execute("DELETE FROM role_images WHERE role_id=?", (role_id,))
-        if body.get("images"):
-            for i, url in enumerate(body["images"]):
-                conn.execute(
-                    "INSERT INTO role_images (role_id,url,sort_order) VALUES (?,?,?)",
-                    (role_id, url, i)
-                )
-        conn.commit()
+    db   = _get_vc_session()
+    try:
+        r = db.query(Role).filter(Role.id == role_id).first()
+        if not r:
+            raise HTTPException(404, "Không tìm thấy")
+        r.character_name       = body.get("character_name", "")
+        r.show_name            = body.get("show_name", "")
+        r.type                 = body.get("type", "chinh")
+        r.genre                = body.get("genre", "hien-dai")
+        r.description          = body.get("description", "")
+        r.audio                = body.get("audio", "")
+        r.reference_audio_text = body.get("reference_audio_text", "")
+        r.lora_path            = body.get("lora_path", "")
+        # Cập nhật images
+        db.query(RoleImage).filter(RoleImage.role_id == role_id).delete()
+        for i, url in enumerate(body.get("images", [])):
+            db.add(RoleImage(role_id=role_id, url=url, sort_order=i))
+        db.commit()
+    finally:
+        db.close()
     return {"message": "Đã cập nhật vai"}
 
 @app.delete("/api/admin/roles/{role_id}")
 async def delete_role(role_id: str, admin=Depends(require_auth_api)):
-    with get_db() as conn:
-        conn.execute("DELETE FROM roles WHERE id=?", (role_id,))
-        conn.commit()
+    from dubeditor.models import Role
+    db = _get_vc_session()
+    try:
+        r = db.query(Role).filter(Role.id == role_id).first()
+        if r:
+            db.delete(r)
+            db.commit()
+    finally:
+        db.close()
     return {"message": "Đã xóa vai"}
 
 # ─── Admin: Upload ────────────────────────────────────────────────────────────
@@ -624,39 +593,33 @@ class TTSRequest(BaseModel):
 
 @app.post("/api/tts/generate")
 async def tts_generate(body: TTSRequest):
-    with get_db() as conn:
-        role = conn.execute(
-            "SELECT * FROM roles WHERE id=?", (body.role_id,)
-        ).fetchone()
-    if not role:
-        raise HTTPException(404, f"Không tìm thấy role: {body.role_id}")
-    role = dict(role)
+    from dubeditor.models import Role
+    db = _get_vc_session()
+    try:
+        role = db.query(Role).filter(Role.id == body.role_id).first()
+        if not role:
+            raise HTTPException(404, f"Không tìm thấy role: {body.role_id}")
+        audio_url = role.audio or ""
+        ref_text  = role.reference_audio_text or ""
+        lora_path = (role.lora_path or "").strip() or None
+    finally:
+        db.close()
 
-    audio_url = role.get("audio", "")
-    ref_text  = role.get("reference_audio_text", "")
-    lora_path = role.get("lora_path", "").strip() or None
-
-    # URL → absolute path
     audio_path = None
     if audio_url:
         candidate = PUBLIC_DIR / audio_url.lstrip("/")
         if candidate.exists():
             audio_path = str(candidate)
 
-    # Tự động dùng LoRA nếu role có lora_path (không cần use_lora=true)
-    # if not body.use_lora:
-    #     lora_path = None
     if lora_path and not os.path.exists(lora_path):
         logger.warning(f"LoRA path không tồn tại: {lora_path}")
         lora_path = None
 
     if not audio_path and not lora_path:
-        raise HTTPException(400,
-            "Role này chưa có audio mẫu hoặc LoRA. Không thể generate.")
+        raise HTTPException(400, "Role này chưa có audio mẫu hoặc LoRA. Không thể generate.")
 
     target_text = _build_text(body.text, body.control_instruction)
 
-    # Chạy trong thread riêng — tránh block asyncio event loop
     loop = asyncio.get_event_loop()
     try:
         if body.mode == "ultimate" and audio_path and ref_text:
@@ -687,9 +650,9 @@ async def tts_generate(body: TTSRequest):
 
         url = _save_generated(wav)
         return {
-            "url": url,
-            "mode": mode_used,
-            "role_id": body.role_id,
+            "url":      url,
+            "mode":     mode_used,
+            "role_id":  body.role_id,
             "duration": round(len(wav) / 48000, 2),
         }
     except HTTPException:

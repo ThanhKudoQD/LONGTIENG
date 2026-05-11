@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from pathlib import Path
@@ -21,11 +21,9 @@ def get_db():
         db.close()
 
 def init_db():
-    from dubeditor import models  # noqa
+    from dubeditor import models  # noqa — đăng ký tất cả models
     Base.metadata.create_all(bind=engine)
-    # Migration: thêm column shortcut_key nếu chưa có
     _migrate()
-
 
 def _migrate():
     """Migration ad-hoc cho SQLite — chỉ thêm column mới, không drop."""
@@ -33,28 +31,41 @@ def _migrate():
     conn = sqlite3.connect(str(DB_PATH))
     try:
         cur = conn.cursor()
+
         # characters
         cols = [r[1] for r in cur.execute("PRAGMA table_info(characters)").fetchall()]
-        if 'shortcut_key' not in cols:
+        if "shortcut_key" not in cols:
             cur.execute("ALTER TABLE characters ADD COLUMN shortcut_key TEXT")
             conn.commit()
             print("[migrate] Added characters.shortcut_key")
-        if 'tts_speed' not in cols:
+        if "tts_speed" not in cols:
             cur.execute("ALTER TABLE characters ADD COLUMN tts_speed REAL DEFAULT 1.0")
             conn.commit()
             print("[migrate] Added characters.tts_speed")
+
         # projects
         cols = [r[1] for r in cur.execute("PRAGMA table_info(projects)").fetchall()]
-        if 'current_chapter_id' not in cols:
+        if "current_chapter_id" not in cols:
             cur.execute("ALTER TABLE projects ADD COLUMN current_chapter_id INTEGER")
             conn.commit()
             print("[migrate] Added projects.current_chapter_id")
+
         # subtitles
         cols = [r[1] for r in cur.execute("PRAGMA table_info(subtitles)").fetchall()]
-        if 'tts_speed' not in cols:
+        if "tts_speed" not in cols:
             cur.execute("ALTER TABLE subtitles ADD COLUMN tts_speed REAL DEFAULT NULL")
             conn.commit()
             print("[migrate] Added subtitles.tts_speed")
+
+        # roles (thêm lora_path nếu thiếu — migrate từ voicecast.db cũ)
+        tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "roles" in tables:
+            cols = [r[1] for r in cur.execute("PRAGMA table_info(roles)").fetchall()]
+            if "lora_path" not in cols:
+                cur.execute("ALTER TABLE roles ADD COLUMN lora_path TEXT DEFAULT ''")
+                conn.commit()
+                print("[migrate] Added roles.lora_path")
+
     except Exception as e:
         print(f"[migrate] Error: {e}")
     finally:
