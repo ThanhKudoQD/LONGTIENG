@@ -29,6 +29,8 @@ def list_projects(db: Session = Depends(get_db)):
         out = ProjectOut.model_validate(p)
         out.subtitle_count = total or 0
         out.tts_done_count = done or 0
+        out.has_bible  = bool(p.bible_json)
+        out.source_lang = p.source_lang or 'vi'
         result.append(out)
     return result
 
@@ -51,6 +53,8 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
     out = ProjectOut.model_validate(p)
     out.subtitle_count = total or 0
     out.tts_done_count = done or 0
+    out.has_bible   = bool(p.bible_json)
+    out.source_lang = p.source_lang or 'vi'
     return out
 
 

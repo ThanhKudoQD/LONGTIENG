@@ -63,6 +63,12 @@ export default function ProjectList({ onOpen }: Props) {
                       {p.tts_done_count}/{p.subtitle_count} TTS
                     </span>
                     {p.video_name && <><span>·</span><span className="truncate">{p.video_name}</span></>}
+                    {p.has_bible && (
+                      <><span>·</span>
+                      <span style={{ color: '#7c3aed', fontWeight: 700 }}>
+                        {p.source_lang === 'zh' ? '🌐 Đã dịch' : '📋 Có Bible'}
+                      </span></>
+                    )}
                   </div>
                 </div>
                 <div className="flex gap-2 flex-shrink-0">

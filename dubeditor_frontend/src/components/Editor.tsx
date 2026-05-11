@@ -9,15 +9,14 @@ import VideoPlayer from './VideoPlayer'
 import DetailPanel from './DetailPanel'
 import { useProjectWS } from '../hooks/useProjectWS'
 import { parseShortcutFromEvent, formatShortcut } from '../utils/shortcuts'
-import AutoAssignPanel from './AutoAssignPanel'
 import AutoFixOverlapModal from './AutoFixOverlapModal'
 import BulkTTSProgress from './BulkTTSProgress'
 import ChapterSelector from './ChapterSelector'
 import ChaptersModal from './ChaptersModal'
 
-interface Props { projectId: number; onBack: () => void }
+interface Props { projectId: number; onBack: () => void; onTranslate: () => void }
 
-export default function Editor({ projectId, onBack }: Props) {
+export default function Editor({ projectId, onBack, onTranslate }: Props) {
   // PERF: selectors riêng — KHÔNG destructure
   const project = useStore(s => s.project)
   const subtitles = useStore(s => s.subtitles)
@@ -37,7 +36,6 @@ export default function Editor({ projectId, onBack }: Props) {
   const [swapFrom, setSwapFrom]           = useState<number | null>(null)
   const [swapTo, setSwapTo]               = useState<number | null>(null)
   const [swapping, setSwapping]           = useState(false)
-  const [showAutoAssign, setShowAutoAssign] = useState(false)
   const [showAutoFix, setShowAutoFix] = useState(false)
   const [showChapters, setShowChapters] = useState(false)
 
@@ -229,31 +227,7 @@ export default function Editor({ projectId, onBack }: Props) {
     return () => window.removeEventListener('video_upload', onUpload)
   }, [projectId])
 
-  // Forward WS auto-assign events từ useProjectWS → AutoAssignPanel
-  useEffect(() => {
-    const onWSMsg = (e: any) => {
-      const msg = e.detail
-      if (msg.type === 'auto_assign_progress') {
-        window.dispatchEvent(new CustomEvent('aa_progress', { detail: { pct: msg.pct, step: msg.step } }))
-      } else if (msg.type === 'auto_assign_done') {
-        window.dispatchEvent(new CustomEvent('aa_done', { detail: msg }))
-      } else if (msg.type === 'auto_assign_error') {
-        window.dispatchEvent(new CustomEvent('aa_error', { detail: msg }))
-      }
-    }
-    window.addEventListener('ws_message', onWSMsg)
-    return () => window.removeEventListener('ws_message', onWSMsg)
-  }, [])
 
-  // Seek video từ AutoAssignPanel (click sample text)
-  useEffect(() => {
-    const onSeek = (e: any) => {
-      const video = document.querySelector('video') as HTMLVideoElement | null
-      if (video) video.currentTime = e.detail
-    }
-    window.addEventListener('seek_video', onSeek)
-    return () => window.removeEventListener('seek_video', onSeek)
-  }, [])
 
   const onHDividerDown = (e: React.MouseEvent) => {
     e.preventDefault()
@@ -497,14 +471,16 @@ export default function Editor({ projectId, onBack }: Props) {
           {modelStatus==='loading' && <><div className="w-3 h-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin"/>Loading...</>}
           {(modelStatus==='unloaded'||modelStatus==='unknown') && <><span className="w-1.5 h-1.5 rounded-full bg-zinc-400"/>Model OFF</>}
         </button>
-        <button onClick={() => setShowAutoAssign(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-purple-300 dark:border-purple-800 bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-400 text-[12px] font-medium hover:bg-purple-100 dark:hover:bg-purple-950 transition-colors flex-shrink-0">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.2"/>
-            <path d="M4 6l1.5 1.5L8 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+        <button onClick={onTranslate}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0"
+          style={{ borderColor: '#7c3aed', background: 'linear-gradient(135deg,#7c3aed18,#4f46e518)', color: '#7c3aed' }}>
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+            <path d="M1 3h6M4 1v2M2 3c0 3 2 5 4 6M7 3c0 1-.3 2.3-1 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+            <path d="M8 8h5M10 7v1M9 8c0 2 1.5 4 3.5 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
           </svg>
-          AI Gán NV
+          🌐 Dịch
         </button>
+
       </header>
 
       <div className="flex flex-1 overflow-hidden">
@@ -769,12 +745,6 @@ export default function Editor({ projectId, onBack }: Props) {
         <DetailPanel />
       </div>
 
-      {showAutoAssign && (
-        <AutoAssignPanel
-          projectId={projectId}
-          onClose={() => setShowAutoAssign(false)}
-        />
-      )}
 
       {showAutoFix && (
         <AutoFixOverlapModal

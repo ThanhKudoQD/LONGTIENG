@@ -50,6 +50,7 @@ export interface Subtitle {
   start_time: number
   end_time: number
   text: string
+  original_text?: string | null   // Văn bản gốc tiếng Trung
   character_id: number | null
   character?: Character
   audio_path: string | null
@@ -69,7 +70,44 @@ export interface Project {
   subtitle_count: number
   tts_done_count: number
   current_chapter_id?: number | null
+  source_lang?: 'zh' | 'vi'
+  has_bible?: boolean
 }
+
+// ── Translate types ──────────────────────────────────────────────────────────
+
+export interface BibleCharacter {
+  zh: string
+  vi: string
+  vai: 'nu_chinh' | 'nam_chinh' | 'phu' | 'phan_dien' | string
+  tu_xung: string
+  xung_ho?: Record<string, string>
+  than_phan: string
+  kieu_noi?: string
+}
+
+export interface Bible {
+  the_loai?: {
+    boi_canh: 'do_thi' | 'co_trang' | 'dan_quoc' | 'tien_hiep' | string
+    ghi_chu_dich: string
+  }
+  nhan_vat?: BibleCharacter[]
+  quan_he_noi_bat?: string[]
+  story_arc?: { tom_tat_phim: string }
+  thuat_ngu?: Record<string, string>
+  scene_map?: Array<{ tu_dong: number; den_dong: number; tom_tat: string }>
+}
+
+export interface TranslateProgress {
+  stage: 'idle' | 'pass1' | 'pass3' | 'done' | 'error'
+  message: string
+  percent: number
+  chunks_total: number
+  chunks_done: number
+  error?: string
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────────
 
 export const CHAR_COLORS = [
   '#185FA5','#993C1D','#0F6E56','#854F0B','#534AB7',
@@ -89,10 +127,6 @@ export function srtToSec(t: string): number {
   return h*3600 + m*60 + s + (ms ? parseFloat('0.'+ms) : 0)
 }
 
-/**
- * Effective TTS speed cho 1 sub:
- * - sub.tts_speed (nếu có override) → fallback character.tts_speed → fallback 1.0
- */
 export function getEffectiveSpeed(sub: Subtitle, character?: Character | null): number {
   if (sub.tts_speed != null) return sub.tts_speed
   if (character?.tts_speed != null) return character.tts_speed

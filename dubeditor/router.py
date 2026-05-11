@@ -1,8 +1,7 @@
 from fastapi import APIRouter
 from dubeditor.routers import projects, subtitles, characters, tts, export, ws, presets
-from dubeditor.routers import auto_assign
-from dubeditor.routers import auto_fix
-from dubeditor.routers import chapters
+from dubeditor.routers import auto_assign, auto_fix, chapters
+from dubeditor.routers import translate
 
 router = APIRouter()
 router.include_router(projects.router,     prefix="/api/projects",   tags=["dub-projects"])
@@ -13,5 +12,6 @@ router.include_router(export.router,       prefix="/api/export",     tags=["dub-
 router.include_router(auto_assign.router,  prefix="/api",            tags=["dub-auto-assign"])
 router.include_router(auto_fix.router,     prefix="/api",            tags=["dub-auto-fix"])
 router.include_router(chapters.router,     prefix="/api/chapters",   tags=["dub-chapters"])
+router.include_router(translate.router,    prefix="/api",            tags=["dub-translate"])
 router.include_router(ws.router,                                      tags=["dub-ws"])
 router.include_router(presets.router,      prefix="/api/presets",    tags=["dub-presets"])

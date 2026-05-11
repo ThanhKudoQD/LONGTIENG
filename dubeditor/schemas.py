@@ -14,8 +14,7 @@ class CharacterBase(BaseModel):
     shortcut_key:      Optional[str] = None
     tts_speed:         float = 1.0
 
-class CharacterCreate(CharacterBase):
-    pass
+class CharacterCreate(CharacterBase): pass
 
 class CharacterUpdate(BaseModel):
     name:              Optional[str] = None
@@ -40,48 +39,50 @@ class SubtitleBase(BaseModel):
     start_time:   float
     end_time:     float
     text:         str = ""
+    original_text: Optional[str] = None
     character_id: Optional[int] = None
     audio_offset: float = 0.0
 
-class SubtitleCreate(SubtitleBase):
-    pass
+class SubtitleCreate(SubtitleBase): pass
 
 class SubtitleUpdate(BaseModel):
-    start_time:   Optional[float] = None
-    end_time:     Optional[float] = None
-    text:         Optional[str]   = None
-    character_id: Optional[int]   = None
-    audio_offset: Optional[float] = None
-    tts_done:     Optional[bool]  = None
-    wav_duration: Optional[float] = None
-    tts_speed:    Optional[float] = None
+    start_time:    Optional[float] = None
+    end_time:      Optional[float] = None
+    text:          Optional[str]   = None
+    original_text: Optional[str]   = None
+    character_id:  Optional[int]   = None
+    audio_offset:  Optional[float] = None
+    tts_done:      Optional[bool]  = None
+    wav_duration:  Optional[float] = None
+    tts_speed:     Optional[float] = None
 
 class SubtitleOut(SubtitleBase):
-    id:         int
-    project_id: int
-    audio_path:   Optional[str]   = None
-    tts_done:     bool           = False
-    wav_duration: Optional[float] = None
-    tts_speed:    Optional[float] = None
-    character:  Optional[CharacterOut] = None
+    id:            int
+    project_id:    int
+    audio_path:    Optional[str]   = None
+    tts_done:      bool            = False
+    wav_duration:  Optional[float] = None
+    tts_speed:     Optional[float] = None
+    character:     Optional[CharacterOut] = None
     class Config:
         from_attributes = True
 
 class ProjectBase(BaseModel):
     name: str
 
-class ProjectCreate(ProjectBase):
-    pass
+class ProjectCreate(ProjectBase): pass
 
 class ProjectOut(ProjectBase):
-    id:             int
-    video_path:     Optional[str]      = None
-    video_name:     Optional[str]      = None
-    duration:       float              = 0.0
-    created_at:     Optional[datetime] = None
-    subtitle_count: int                = 0
-    tts_done_count: int                = 0
-    current_chapter_id: Optional[int]  = None
+    id:                 int
+    video_path:         Optional[str]      = None
+    video_name:         Optional[str]      = None
+    duration:           float              = 0.0
+    created_at:         Optional[datetime] = None
+    subtitle_count:     int                = 0
+    tts_done_count:     int                = 0
+    current_chapter_id: Optional[int]      = None
+    source_lang:        str                = 'vi'
+    has_bible:          bool               = False
     class Config:
         from_attributes = True
 
@@ -93,8 +94,7 @@ class ChapterBase(BaseModel):
     collapsed:       int = 0
     sort_order:      int = 0
 
-class ChapterCreate(ChapterBase):
-    pass
+class ChapterCreate(ChapterBase): pass
 
 class ChapterUpdate(BaseModel):
     name:            Optional[str] = None
@@ -112,7 +112,7 @@ class ChapterOut(ChapterBase):
         from_attributes = True
 
 class AutoSplitRequest(BaseModel):
-    size: int = 300  # số sub mỗi đoạn
+    size: int = 300
 
 class SetCurrentChapterRequest(BaseModel):
     chapter_id: Optional[int] = None
@@ -129,12 +129,33 @@ class BulkAssignRequest(BaseModel):
 
 class BulkSetSpeedRequest(BaseModel):
     subtitle_ids: list[int]
-    tts_speed: Optional[float] = None  # null = clear override (kế thừa character)
+    tts_speed:    Optional[float] = None
 
 class CharacterSetSpeedRequest(BaseModel):
-    tts_speed: float
-    apply_to_subs: bool = True  # nếu True, clear tts_speed của tất cả sub thuộc character
+    tts_speed:     float
+    apply_to_subs: bool = True
 
 class TTSEnqueueRequest(BaseModel):
     subtitle_ids: list[int]
-    priority: str = "normal"  # "normal" | "high"
+    priority:     str = "normal"
+
+# ─── Translate schemas ────────────────────────────────────────────────────────
+
+class TranslateAnalyzeRequest(BaseModel):
+    api_key:     str
+    model:       str = "gemini-2.5-flash"
+    source_lang: str = "zh"
+
+class TranslateRunRequest(BaseModel):
+    api_key:     str
+    model:       str  = "gemini-2.5-flash"
+    concurrency: int  = 3
+    enable_qc:   bool = False
+
+class RetranslateRequest(BaseModel):
+    subtitle_id:   int
+    original_text: str
+    current_text:  str
+    variants:      int = 2
+    api_key:       str = ""
+    model:         str = "gemini-2.5-flash"

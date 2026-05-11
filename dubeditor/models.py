@@ -7,14 +7,17 @@ from dubeditor.database import Base
 
 class Project(Base):
     __tablename__ = "projects"
-    id         = Column(Integer, primary_key=True, index=True)
-    name       = Column(String, nullable=False)
-    video_path = Column(String, nullable=True)
-    video_name = Column(String, nullable=True)
-    duration   = Column(Float, default=0.0)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    id                 = Column(Integer, primary_key=True, index=True)
+    name               = Column(String, nullable=False)
+    video_path         = Column(String, nullable=True)
+    video_name         = Column(String, nullable=True)
+    duration           = Column(Float, default=0.0)
+    created_at         = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at         = Column(DateTime(timezone=True), onupdate=func.now())
     current_chapter_id = Column(Integer, nullable=True)
+    # ── Translate fields ──────────────────────────────────────────────────────
+    bible_json         = Column(Text, nullable=True)    # JSON Bible từ Pass 1
+    source_lang        = Column(String, default='vi')   # 'zh' | 'vi'
     subtitles  = relationship("Subtitle",  back_populates="project", cascade="all, delete")
     characters = relationship("Character", back_populates="project", cascade="all, delete")
     chapters   = relationship("Chapter",   back_populates="project", cascade="all, delete", order_by="Chapter.sort_order")
@@ -38,18 +41,19 @@ class Character(Base):
 
 class Subtitle(Base):
     __tablename__ = "subtitles"
-    id           = Column(Integer, primary_key=True, index=True)
-    project_id   = Column(Integer, ForeignKey("projects.id"), nullable=False)
-    character_id = Column(Integer, ForeignKey("characters.id"), nullable=True)
-    index        = Column(Integer, nullable=False)
-    start_time   = Column(Float, nullable=False)
-    end_time     = Column(Float, nullable=False)
-    text         = Column(Text, default="")
-    audio_path   = Column(String, nullable=True)
-    audio_offset = Column(Float, default=0.0)
-    tts_done     = Column(Boolean, default=False)
-    wav_duration = Column(Float, nullable=True)
-    tts_speed    = Column(Float, nullable=True)
+    id            = Column(Integer, primary_key=True, index=True)
+    project_id    = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    character_id  = Column(Integer, ForeignKey("characters.id"), nullable=True)
+    index         = Column(Integer, nullable=False)
+    start_time    = Column(Float, nullable=False)
+    end_time      = Column(Float, nullable=False)
+    text          = Column(Text, default="")
+    original_text = Column(Text, nullable=True)   # Văn bản gốc tiếng Trung
+    audio_path    = Column(String, nullable=True)
+    audio_offset  = Column(Float, default=0.0)
+    tts_done      = Column(Boolean, default=False)
+    wav_duration  = Column(Float, nullable=True)
+    tts_speed     = Column(Float, nullable=True)
     project   = relationship("Project",   back_populates="subtitles")
     character = relationship("Character", back_populates="subtitles")
 
@@ -65,6 +69,24 @@ class Chapter(Base):
     sort_order      = Column(Integer, default=0)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
     project = relationship("Project", back_populates="chapters")
+
+
+class TranslateChunk(Base):
+    """Lưu prompt/response của từng chunk dịch để debug và xem lại."""
+    __tablename__ = "translate_chunks"
+    id          = Column(Integer, primary_key=True, index=True)
+    project_id  = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)   # index trong scene_map
+    start_line  = Column(Integer, nullable=False)
+    end_line    = Column(Integer, nullable=False)
+    prompt      = Column(Text, nullable=True)       # prompt đã gửi
+    response    = Column(Text, nullable=True)       # raw response từ AI
+    tokens_in   = Column(Integer, default=0)
+    tokens_out  = Column(Integer, default=0)
+    timing_ms   = Column(Integer, default=0)
+    model       = Column(String, nullable=True)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at  = Column(DateTime(timezone=True), onupdate=func.now())
 
 # ─── VoiceCast Models ─────────────────────────────────────────────────────────
 

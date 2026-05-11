@@ -15,17 +15,7 @@ BASE_DIR   = Path(__file__).parent
 SRC_DB     = BASE_DIR / "data" / "voicecast.db"
 DST_DB     = BASE_DIR / "data" / "dubeditor.db"
 
-def ensure_tables():
-    """Tạo toàn bộ bảng trong dubeditor.db nếu chưa có."""
-    import sys
-    sys.path.insert(0, str(BASE_DIR))
-    from dubeditor.database import init_db
-    init_db()
-    print("[migrate] ✅ Bảng đã được khởi tạo trong dubeditor.db")
-
 def migrate():
-    ensure_tables()
-
     if not SRC_DB.exists():
         print(f"[migrate] voicecast.db không tồn tại ({SRC_DB}) — bỏ qua.")
         return
