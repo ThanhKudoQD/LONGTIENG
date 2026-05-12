@@ -33,7 +33,7 @@ interface Props {
 const MODELS = {
   gemini:   ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash-lite'],
   openai:   ['gpt-4.1', 'gpt-4.1-mini', 'gpt-5-mini', 'gpt-4o'],
-  deepseek: ['deepseek-v3', 'deepseek-chat'],
+  deepseek: ['deepseek-v4-pro', 'deepseek-v4-flash'],
 }
 
 const DEFAULT_SETTINGS: TranslateSettings = {

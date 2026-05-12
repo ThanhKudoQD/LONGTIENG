@@ -26,8 +26,8 @@ const MODELS_PASS1: ModelInfo[] = [
   { id: 'gpt-4.1-mini',          provider: 'openai',   label: 'GPT-4.1 mini',   ctx: '1M',   priceIn: '$0.40', priceOut: '$1.60',  note: 'Cân bằng giá/chất lượng' },
   { id: 'gpt-5-mini',            provider: 'openai',   label: 'GPT-5 mini',     ctx: '400K', priceIn: '$0.20', priceOut: '$0.80',  note: 'Thông minh hơn 4.1-mini' },
   { id: 'gpt-5-nano',            provider: 'openai',   label: 'GPT-5 nano',     ctx: '400K', priceIn: '$0.05', priceOut: '$0.40',  note: 'Rẻ nhất OpenAI ⚡' },
-  { id: 'deepseek-v3',           provider: 'deepseek', label: 'V3',             ctx: '1M',   priceIn: '$0.27', priceOut: '$1.10',  note: 'Tốt cho văn bản Trung' },
-  { id: 'deepseek-chat',         provider: 'deepseek', label: 'Chat',           ctx: '1M',   priceIn: '$0.14', priceOut: '$0.28',  note: 'Rẻ, nhanh 💰' },
+  { id: 'deepseek-v4-pro',           provider: 'deepseek', label: 'V4 Pro',             ctx: '1M',   priceIn: '$0.27', priceOut: '$1.10',  note: 'Tốt cho văn bản Trung' },
+  { id: 'deepseek-v4-flash',         provider: 'deepseek', label: 'V4 Flash',           ctx: '1M',   priceIn: '$0.14', priceOut: '$0.28',  note: 'Rẻ, nhanh 💰' },
 ]
 
 const MODELS_PASS3: ModelInfo[] = [
@@ -38,8 +38,8 @@ const MODELS_PASS3: ModelInfo[] = [
   { id: 'gpt-4.1-mini',          provider: 'openai',   label: 'GPT-4.1 mini',   ctx: '1M',   priceIn: '$0.40', priceOut: '$1.60',  note: 'Cân bằng' },
   { id: 'gpt-4.1-nano',          provider: 'openai',   label: 'GPT-4.1 nano',   ctx: '1M',   priceIn: '$0.10', priceOut: '$0.40',  note: 'Rẻ, ctx 1M' },
   { id: 'gpt-5-nano',            provider: 'openai',   label: 'GPT-5 nano',     ctx: '400K', priceIn: '$0.05', priceOut: '$0.40',  note: 'Rẻ nhất OpenAI ⚡' },
-  { id: 'deepseek-chat',         provider: 'deepseek', label: 'Chat',           ctx: '1M',   priceIn: '$0.14', priceOut: '$0.28',  note: 'Rẻ nhất thị trường 💰' },
-  { id: 'deepseek-v3',           provider: 'deepseek', label: 'V3',             ctx: '1M',   priceIn: '$0.27', priceOut: '$1.10',  note: 'Cân bằng' },
+  { id: 'deepseek-v4-flash',         provider: 'deepseek', label: 'V4 Flash',           ctx: '1M',   priceIn: '$0.14', priceOut: '$0.28',  note: 'Rẻ nhất thị trường 💰' },
+  { id: 'deepseek-v4-pro',           provider: 'deepseek', label: 'V4 Pro',             ctx: '1M',   priceIn: '$0.27', priceOut: '$1.10',  note: 'Cân bằng' },
 ]
 
 const PROV_TABS = [
@@ -61,6 +61,10 @@ export interface TranslateConfig {
   model_retranslate:  string   // model dùng cho "Dịch lại" từng dòng
   // Chunking
   concurrency: number
+  // QC Review (Pass 4) — auto-apply settings
+  qc_auto_apply_text:          boolean         // tự động áp dụng sửa văn phong / xưng hô / từ
+  qc_auto_apply_speaker:       boolean         // tự động đổi nhân vật khi Pass 4 đề xuất
+  qc_speaker_min_confidence:   'cao' | 'trung' // ngưỡng tin cậy tối thiểu để auto-apply speaker
 }
 
 const DEFAULT_CONFIG: TranslateConfig = {
@@ -71,6 +75,9 @@ const DEFAULT_CONFIG: TranslateConfig = {
   model_pass3:        'gemini-2.5-flash',
   model_retranslate:  'gemini-2.5-flash',
   concurrency:  3,
+  qc_auto_apply_text:        true,
+  qc_auto_apply_speaker:     true,
+  qc_speaker_min_confidence: 'cao',
 }
 
 export function loadConfig(): TranslateConfig {
@@ -226,7 +233,7 @@ export default function ConfigModal({ onClose, modelStatus, onToggleModel }: Pro
 
   const [config, setConfig] = useState<TranslateConfig>(loadConfig)
   const [saved,  setSaved]  = useState(false)
-  const [tab,    setTab]    = useState<'api' | 'model' | 'tts'>('api')
+  const [tab,    setTab]    = useState<'api' | 'model' | 'qc' | 'tts'>('api')
 
   const set = (patch: Partial<TranslateConfig>) => setConfig(c => ({ ...c, ...patch }))
 
@@ -262,6 +269,7 @@ export default function ConfigModal({ onClose, modelStatus, onToggleModel }: Pro
           {([
             ['api',   '🔑 API Keys'],
             ['model', '🤖 Models'],
+            ['qc',    '🔍 QC Review'],
             ['tts',   '🔊 TTS & Editor'],
           ] as const).map(([key, label]) => (
             <button key={key} onClick={() => setTab(key)}
@@ -359,6 +367,99 @@ export default function ConfigModal({ onClose, modelStatus, onToggleModel }: Pro
                 </p>
               </div>
             </>
+          )}
+
+          {/* ── QC Review (Pass 4) ── */}
+          {tab === 'qc' && (
+            <div className="flex flex-col gap-5">
+              <div>
+                <div className="panel-label">Tự động áp dụng sửa từ Pass 4</div>
+                <p className="text-[11px] text-zinc-400 mb-3">
+                  Khi bật, các sửa đổi từ Pass 4 (QC Review) sẽ được áp dụng ngay sau khi review xong.
+                  Khi tắt, bạn phải duyệt thủ công từng dòng.
+                </p>
+
+                {/* Toggle: auto-apply text */}
+                <label className="flex items-center gap-3 p-3 rounded-lg border border-zinc-200 dark:border-zinc-700 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/60 transition-colors mb-2">
+                  <div className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${config.qc_auto_apply_text ? 'bg-blue-500' : 'bg-zinc-300 dark:bg-zinc-600'}`}>
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${config.qc_auto_apply_text ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[13px] font-medium text-zinc-700 dark:text-zinc-200">
+                      Áp dụng sửa văn phong / xưng hô / từ
+                    </div>
+                    <div className="text-[11px] text-zinc-400">
+                      Sửa câu dịch theo gợi ý của Pass 4 (không đổi nhân vật)
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config.qc_auto_apply_text}
+                    onChange={e => set({ qc_auto_apply_text: e.target.checked })}
+                    className="sr-only"
+                  />
+                </label>
+
+                {/* Toggle: auto-apply speaker */}
+                <label className="flex items-center gap-3 p-3 rounded-lg border border-zinc-200 dark:border-zinc-700 cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/60 transition-colors">
+                  <div className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${config.qc_auto_apply_speaker ? 'bg-blue-500' : 'bg-zinc-300 dark:bg-zinc-600'}`}>
+                    <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${config.qc_auto_apply_speaker ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[13px] font-medium text-zinc-700 dark:text-zinc-200">
+                      Áp dụng đổi nhân vật (speaker)
+                    </div>
+                    <div className="text-[11px] text-zinc-400">
+                      Pass 4 phát hiện sai nhân vật → tự đổi character cho subtitle
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config.qc_auto_apply_speaker}
+                    onChange={e => set({ qc_auto_apply_speaker: e.target.checked })}
+                    className="sr-only"
+                  />
+                </label>
+              </div>
+
+              {/* Min confidence radio — chỉ hiện khi auto-apply speaker bật */}
+              {config.qc_auto_apply_speaker && (
+                <div className="border-t border-zinc-100 dark:border-zinc-800 pt-4">
+                  <div className="panel-label">Mức tin cậy tối thiểu để đổi speaker</div>
+                  <p className="text-[11px] text-zinc-400 mb-3">
+                    Pass 4 chấm độ tin cậy cho mỗi đề xuất đổi nhân vật. Đặt ngưỡng cao = an toàn hơn nhưng có thể bỏ sót.
+                  </p>
+                  <div className="flex gap-2">
+                    {([
+                      ['cao',   '🟢 Chỉ "cao"',         'An toàn — chỉ apply khi Pass 4 chắc chắn'],
+                      ['trung', '🟡 "cao" + "trung"',   'Mạnh tay — apply cả các đề xuất tin cậy trung bình'],
+                    ] as const).map(([val, label, hint]) => (
+                      <label key={val}
+                        className={`flex-1 p-3 rounded-lg border cursor-pointer transition-all ${
+                          config.qc_speaker_min_confidence === val
+                            ? 'border-blue-400 bg-blue-50 dark:bg-blue-950/20'
+                            : 'border-zinc-200 dark:border-zinc-700 hover:border-zinc-300'
+                        }`}>
+                        <input type="radio" name="qc_min_conf" value={val}
+                          checked={config.qc_speaker_min_confidence === val}
+                          onChange={() => set({ qc_speaker_min_confidence: val })}
+                          className="sr-only" />
+                        <div className="text-[12px] font-semibold text-zinc-700 dark:text-zinc-200">{label}</div>
+                        <div className="text-[10px] text-zinc-400 mt-1 leading-snug">{hint}</div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Info box */}
+              <div className="rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50 dark:bg-blue-950/20 p-3">
+                <div className="text-[11px] text-blue-700 dark:text-blue-300 leading-relaxed">
+                  💡 <strong>Pass 4</strong> kiểm tra 4 trục: speaker (ai nói), văn phong, xưng hô, tên/thuật ngữ/cường độ.
+                  Mỗi đề xuất sửa kèm bằng chứng cụ thể và mức tin cậy. Đề xuất tin cậy "thấp" tự động bị bỏ qua.
+                </div>
+              </div>
+            </div>
           )}
 
           {/* ── TTS & Editor ── */}

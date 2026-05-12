@@ -72,19 +72,38 @@ class Chapter(Base):
 
 
 class TranslateChunk(Base):
-    """Lưu prompt/response của từng chunk dịch để debug và xem lại."""
+    """Lưu prompt/response của từng chunk dịch để debug và xem lại.
+
+    Cập nhật: thêm status để FE biết trạng thái chunk từ DB (không phải đoán
+    qua subtitle.original_text), và snapshot kết quả QC Review (Pass 4) để
+    khi user chuyển chunk khác rồi quay lại, kết quả review vẫn còn.
+    """
     __tablename__ = "translate_chunks"
     id          = Column(Integer, primary_key=True, index=True)
     project_id  = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     chunk_index = Column(Integer, nullable=False)   # index trong scene_map
     start_line  = Column(Integer, nullable=False)
     end_line    = Column(Integer, nullable=False)
+    # ── Trạng thái ────────────────────────────────────────────────────────────
+    status      = Column(String, default="wait")    # 'wait' | 'run' | 'done' | 'err'
+    error       = Column(Text, nullable=True)       # thông báo lỗi gần nhất
+    # ── Pass 3 (dịch) ─────────────────────────────────────────────────────────
     prompt      = Column(Text, nullable=True)       # prompt đã gửi
     response    = Column(Text, nullable=True)       # raw response từ AI
     tokens_in   = Column(Integer, default=0)
     tokens_out  = Column(Integer, default=0)
     timing_ms   = Column(Integer, default=0)
     model       = Column(String, nullable=True)
+    # ── Pass 4 (QC Review) snapshot ────────────────────────────────────────────
+    qc_response   = Column(Text, nullable=True)     # raw response Pass 4
+    qc_van_de     = Column(Text, nullable=True)     # JSON array các vấn đề
+    qc_tong_ket   = Column(Text, nullable=True)     # JSON object tong_ket
+    qc_tokens_in  = Column(Integer, default=0)
+    qc_tokens_out = Column(Integer, default=0)
+    qc_timing_ms  = Column(Integer, default=0)
+    qc_model      = Column(String, nullable=True)
+    qc_run_at     = Column(DateTime(timezone=True), nullable=True)
+    # ── Timestamps ────────────────────────────────────────────────────────────
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
     updated_at  = Column(DateTime(timezone=True), onupdate=func.now())
 

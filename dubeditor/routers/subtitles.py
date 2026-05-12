@@ -99,6 +99,23 @@ def update_subtitle(subtitle_id: int, data: SubtitleUpdate, db: Session = Depend
     return s
 
 
+@router.patch("/by-index/{project_id}/{subtitle_index}", response_model=SubtitleOut)
+def update_subtitle_by_index(project_id: int, subtitle_index: int, data: SubtitleUpdate, db: Session = Depends(get_db)):
+    """PATCH subtitle theo index SRT (số thứ tự, 1-based) thay vì DB id.
+    Dùng cho QC apply fix — FE chỉ biết subtitle index từ SRT, không biết DB id.
+    """
+    s = db.query(Subtitle).filter(
+        Subtitle.project_id == project_id,
+        Subtitle.index == subtitle_index,
+    ).first()
+    if not s:
+        raise HTTPException(404, f"Subtitle index={subtitle_index} not found in project {project_id}")
+    for k, v in data.model_dump(exclude_none=True).items():
+        setattr(s, k, v)
+    db.commit(); db.refresh(s)
+    return s
+
+
 @router.delete("/{subtitle_id}")
 def delete_subtitle(subtitle_id: int, db: Session = Depends(get_db)):
     s = db.query(Subtitle).filter(Subtitle.id == subtitle_id).first()

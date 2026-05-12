@@ -102,6 +102,7 @@ async def _call_api(
     response_json: bool = False,
     max_output: int = 8192,
     on_retry=None,
+    thinking_budget: int = 0,  # 0=tắt thinking, -1=model tự quyết, N=giới hạn N token
 ) -> dict:
     """
     Unified call — tự detect provider từ tên model.
@@ -110,7 +111,7 @@ async def _call_api(
     max_output = _cap_max_output(max_output, model)
     provider = detect_provider(model)
     if provider == "gemini":
-        return await _call_gemini(prompt, api_key, model, temperature, response_json, max_output, on_retry)
+        return await _call_gemini(prompt, api_key, model, temperature, response_json, max_output, on_retry, thinking_budget)
     elif provider == "deepseek":
         return await _call_openai_compat(
             prompt, api_key, model, temperature, response_json, max_output, on_retry,
@@ -137,6 +138,7 @@ async def _call_gemini(
     response_json: bool = False,
     max_output: int = 8192,
     on_retry=None,
+    thinking_budget: int = 0,  # 0 = tắt thinking (nhanh hơn); -1 = để model tự quyết
 ) -> dict:
     url = (
         f"https://generativelanguage.googleapis.com/v1beta"
@@ -152,21 +154,50 @@ async def _call_gemini(
     if response_json:
         body["generationConfig"]["responseMimeType"] = "application/json"
 
+    # Gemini 2.5 Flash/Pro mặc định bật thinking → tốn thêm 8k-24k token & 30-90s.
+    # thinking_budget=0  → tắt hoàn toàn (Pass 3, Pass 4)
+    # thinking_budget=-1 → không set thinkingConfig gì cả, model tự quyết (Pass 1)
+    # thinking_budget=N  → giới hạn N token thinking
+    #
+    # Lưu ý:
+    # - gemini-2.5-pro KHÔNG hỗ trợ budget=0 (lỗi 400), minimum là 128
+    # - Khi có thinking (budget>0), temperature phải là 1.0 (API requirement)
+    # - Model cũ (1.5-pro, 1.5-flash) không có thinkingConfig → không set
+    m = model.lower()
+    is_flash25  = "2.5" in m and "flash" in m and "thinking" not in m
+    is_pro25    = "2.5" in m and "pro" in m
+    is_thinking_model = is_flash25 or is_pro25 or "flash-thinking" in m
+
+    if is_thinking_model and thinking_budget >= 0:
+        if is_pro25 and thinking_budget == 0:
+            # gemini-2.5-pro không cho tắt thinking → set minimum 128
+            effective_budget = 128
+        else:
+            effective_budget = thinking_budget
+        body["generationConfig"]["thinkingConfig"] = {
+            "thinkingBudget": effective_budget
+        }
+        # Khi thinking bật (budget > 0), temperature phải là 1.0
+        if effective_budget > 0 and "temperature" in body["generationConfig"]:
+            body["generationConfig"]["temperature"] = 1.0
+
     RETRYABLE = {429, 500, 503}
     last_err = ""
     t0 = time.monotonic()
     resp = None
-    MAX_RETRY = 6
+    MAX_RETRY = 8
 
     for attempt in range(MAX_RETRY):
         if attempt > 0:
-            wait = min(15 * attempt, 90)
+            wait = min(15 * attempt, 120)
             logger.warning(f"Gemini {last_err} — retry {attempt}/{MAX_RETRY-1}, chờ {wait}s...")
             if on_retry:
                 await on_retry(attempt, MAX_RETRY - 1, wait, last_err)
             await asyncio.sleep(wait)
 
-        async with httpx.AsyncClient(timeout=300) as client:
+        # Timeout 600s (10 phút) — phù hợp khi Pass 1 phân tích phim dài
+        # hoặc Pass 3 dịch chunk lớn, model có thể trả response chậm.
+        async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(url, json=body)
 
         if resp.status_code == 200:
@@ -236,17 +267,18 @@ async def _call_openai_compat(
     last_err = ""
     t0 = time.monotonic()
     resp = None
-    MAX_RETRY = 6
+    MAX_RETRY = 8
 
     for attempt in range(MAX_RETRY):
         if attempt > 0:
-            wait = min(15 * attempt, 90)
+            wait = min(15 * attempt, 120)
             logger.warning(f"{provider_name} {last_err} — retry {attempt}/{MAX_RETRY-1}, chờ {wait}s...")
             if on_retry:
                 await on_retry(attempt, MAX_RETRY - 1, wait, last_err)
             await asyncio.sleep(wait)
 
-        async with httpx.AsyncClient(timeout=300) as client:
+        # Timeout 600s (10 phút) — đủ thoáng cho các model chậm (o1, gpt-5...).
+        async with httpx.AsyncClient(timeout=600) as client:
             resp = await client.post(url, json=body, headers=headers)
 
         if resp.status_code == 200:
@@ -325,6 +357,7 @@ async def pass1_analyze(
         response_json=True,
         max_output=65536,   # Tăng từ 8192 → 65536 để JSON Bible không bị cắt
         on_retry=on_retry,
+        thinking_budget=-1,  # Pass 1: để model tự quyết thinking — cần suy luận sâu
     )
 
     # Cập nhật với response thực tế
@@ -980,6 +1013,7 @@ async def pass3_translate_chunk(
                 prompt, api_key, model,
                 temperature=0.35,
                 max_output=16384,   # Nâng để chunk to (~300 dòng) có chỗ thở
+                thinking_budget=0,  # Pass 3: tắt thinking → dịch nhanh hơn 3-5x
             )
             translated = parse_pass3_output(result["text"], blocks)
             trans_dict    = {t["index"]: t["text"]    for t in translated}
@@ -1016,38 +1050,201 @@ async def pass3_translate_chunk(
 # PASS 4 — QC REVIEW
 # ─────────────────────────────────────────────
 
-def _build_nhan_vat_summary(bible: dict) -> str:
+def _coerce_to_str(val, sep: str = "; ") -> str:
+    """
+    Bible có nhiều field model có thể trả về dưới dạng string HOẶC list of strings
+    (vd: kieu_noi, tu_xung, nhan_vat trong scene...).
+    Helper này coerce thành string, an toàn cho cả None/dict/số.
+    """
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val.strip()
+    if isinstance(val, (list, tuple)):
+        parts = []
+        for x in val:
+            if isinstance(x, str) and x.strip():
+                parts.append(x.strip())
+            elif x is not None:
+                parts.append(str(x).strip())
+        return sep.join(p for p in parts if p)
+    # dict / số / khác → cast sang str
+    return str(val).strip()
+
+
+def _build_nhan_vat_summary(bible: dict, scene_chars_zh: list[str] | None = None) -> str:
+    """
+    Tóm tắt nhân vật. Nếu truyền `scene_chars_zh` → CHỈ render những nhân vật có
+    trong scene đang xét (tiết kiệm ~200 token/chunk vì không render full list 10-15 người).
+    Fallback: render full nếu scene_chars rỗng hoặc không match được ai.
+    """
+    nv_list = bible.get("nhan_vat", []) or []
+
+    if scene_chars_zh:
+        scene_set = set(scene_chars_zh)
+        filtered = [nv for nv in nv_list if nv.get("zh", "") in scene_set]
+        # Nếu khớp được ≥1 thì dùng filtered, không thì fallback full để vẫn có info
+        if filtered:
+            nv_list = filtered
+
     lines = []
-    for nv in bible.get("nhan_vat", []):
-        zh       = nv.get("zh", "")
-        vi       = nv.get("vi", "")
-        vai      = nv.get("vai", "")
-        tu_xung  = nv.get("tu_xung", "")
-        lines.append(f"• {zh} = {vi} ({vai}) | tự xưng: {tu_xung}")
+    for nv in nv_list:
+        zh       = _coerce_to_str(nv.get("zh"))
+        vi       = _coerce_to_str(nv.get("vi"))
+        vai      = _coerce_to_str(nv.get("vai"))
+        tu_xung  = _coerce_to_str(nv.get("tu_xung"), sep=" / ")
+        kieu_noi = _coerce_to_str(nv.get("kieu_noi"), sep="; ")
+        parts = [f"• {zh}={vi} ({vai}) tự xưng: {tu_xung}"]
+        if kieu_noi:
+            # Cắt ngắn kieu_noi để gọn (lấy 80 ký tự đầu)
+            kn = kieu_noi if len(kieu_noi) <= 80 else kieu_noi[:77] + "..."
+            parts.append(f"  kiểu nói: {kn}")
+        lines.append("\n".join(parts))
     return "\n".join(lines) or "(Không có)"
 
 
-def _build_thuat_ngu_summary(bible: dict) -> str:
-    tn = bible.get("thuat_ngu", {})
+def _build_thuat_ngu_summary(bible: dict, entries: list[dict] | None = None) -> str:
+    """
+    Tóm tắt thuật ngữ. Nếu truyền `entries` → CHỈ render term có XUẤT HIỆN trong
+    nội dung chunk (so khớp substring trong original_text). Tiết kiệm ~100 token/chunk.
+    """
+    tn_raw = bible.get("thuat_ngu", {})
+    if not tn_raw:
+        return "(Không có)"
+
+    # Normalize thuat_ngu thành dict {zh: vi_string}.
+    # Model có thể trả: dict {zh: vi}, hoặc list of {zh, vi}, hoặc value là list.
+    tn: dict[str, str] = {}
+    if isinstance(tn_raw, dict):
+        for zh, vi in tn_raw.items():
+            if zh:
+                tn[str(zh)] = _coerce_to_str(vi, sep=" / ")
+    elif isinstance(tn_raw, list):
+        for item in tn_raw:
+            if isinstance(item, dict):
+                zh = item.get("zh") or item.get("term") or ""
+                vi = item.get("vi") or item.get("translation") or ""
+                if zh:
+                    tn[str(zh)] = _coerce_to_str(vi, sep=" / ")
+
     if not tn:
-        return "(Không có thuật ngữ đặc thù)"
-    return "\n".join(f"• {zh} → {vi}" for zh, vi in tn.items())
+        return "(Không có)"
+
+    if entries:
+        # Gom toàn bộ original_text thành 1 string để check substring
+        haystack = "\n".join((e.get("original_text") or "") for e in entries)
+        filtered = {zh: vi for zh, vi in tn.items() if zh and zh in haystack}
+        if filtered:
+            tn = filtered
+        # Nếu không match được term nào → vẫn render full (chunk có thể không có
+        # term đặc biệt, nhưng AI vẫn nên biết để spot khi cần)
+
+    return "\n".join(f"• {zh}→{vi}" for zh, vi in tn.items())
 
 
-def _build_turning_points_summary(bible: dict) -> str:
-    tp = bible.get("turning_points_xung_ho", [])
+def _build_turning_points_summary(bible: dict, scene_range: tuple[int, int] | None = None) -> str:
+    """
+    Tóm tắt turning points xưng hô. Nếu truyền `scene_range=(from, to)` → CHỈ render
+    turning point có dòng nằm trong hoặc gần scene (±50 dòng). Tiết kiệm ~150 token/chunk.
+    """
+    tp = bible.get("turning_points_xung_ho", []) or []
     if not tp:
         return "(Không có)"
-    return "\n".join(f"• {t}" for t in tp)
+
+    # Coerce mỗi item về string — model đôi khi trả về object {dong, mo_ta} thay vì string
+    tp_str: list[str] = []
+    for item in tp:
+        if isinstance(item, str):
+            tp_str.append(item.strip())
+        elif isinstance(item, dict):
+            # Format: {dong: 400, mo_ta: "..."} hoặc {line: 400, desc: "..."}
+            line = item.get("dong") or item.get("line") or item.get("line_num") or ""
+            desc = item.get("mo_ta") or item.get("desc") or item.get("description") or ""
+            if line and desc:
+                tp_str.append(f"dòng ~{line}: {desc}")
+            elif desc:
+                tp_str.append(str(desc))
+            else:
+                tp_str.append(str(item))
+        else:
+            tp_str.append(str(item))
+    tp_str = [t for t in tp_str if t]
+    if not tp_str:
+        return "(Không có)"
+
+    if scene_range:
+        from_line, to_line = scene_range
+        near = []
+        for t in tp_str:
+            # Parse số dòng trong text (vd: "Cảnh X (dòng ~400): ...")
+            m = re.search(r"dòng\s*~?\s*(\d+)", t)
+            if m:
+                line_num = int(m.group(1))
+                if from_line - 50 <= line_num <= to_line + 50:
+                    near.append(t)
+            else:
+                # Không parse được số → giữ lại để AI vẫn có context
+                near.append(t)
+        if near:
+            tp_str = near
+
+    return "\n".join(f"• {t}" for t in tp_str)
+
+
+def _build_nhan_vat_trong_canh(scene_info: dict, bible: dict) -> str:
+    """
+    Trả về danh sách tên Hán Việt của nhân vật trong cảnh (cách dấu phẩy).
+    Dùng cho prompt Pass 4 để AI dễ chọn speaker_de_xuat đúng tên.
+    """
+    scene_chars_raw = scene_info.get("nhan_vat") or []
+    if not scene_chars_raw:
+        return "(Không xác định)"
+
+    # Coerce mỗi item → mã zh (string). Model có thể trả về:
+    # - list[str]: ["苏念", "顾沉舟"]
+    # - list[dict]: [{"zh": "苏念", "vi": "Tô Niệm"}, ...]
+    scene_chars_zh: list[str] = []
+    for item in scene_chars_raw:
+        if isinstance(item, str):
+            scene_chars_zh.append(item)
+        elif isinstance(item, dict):
+            zh = item.get("zh") or item.get("name") or ""
+            if zh:
+                scene_chars_zh.append(str(zh))
+        else:
+            scene_chars_zh.append(str(item))
+
+    if not scene_chars_zh:
+        return "(Không xác định)"
+
+    zh_to_vi = {
+        _coerce_to_str(nv.get("zh")): _coerce_to_str(nv.get("vi"))
+        for nv in bible.get("nhan_vat", []) or []
+    }
+    names = []
+    for zh in scene_chars_zh:
+        vi = zh_to_vi.get(zh, "")
+        if vi:
+            names.append(vi)
+        else:
+            # Không có trong Bible → vẫn dùng zh để AI có info
+            names.append(zh)
+    return ", ".join(names) if names else "(Không xác định)"
 
 
 def _build_srt_review_input(entries: list[dict]) -> str:
+    """
+    Format mỗi dòng: `idx|speaker|gốc|dịch`. speaker rỗng → '?'.
+    Escape ký tự `|` trong text thành `｜` (fullwidth) để parser không nhầm.
+    """
     lines = []
     for e in entries:
-        idx   = e["index"]
-        orig  = e["original_text"].replace("|", "｜")
-        trans = e["translated_text"].replace("|", "｜")
-        lines.append(f"{idx}|{orig}|{trans}")
+        idx     = e["index"]
+        speaker = (e.get("speaker") or "").strip() or "?"
+        orig    = (e.get("original_text") or "").replace("|", "｜")
+        trans   = (e.get("translated_text") or "").replace("|", "｜")
+        speaker = speaker.replace("|", "｜")
+        lines.append(f"{idx}|{speaker}|{orig}|{trans}")
     return "\n".join(lines)
 
 
@@ -1063,8 +1260,44 @@ def build_pass4_prompt(
     tone         = scene_info.get("tone", "")
     scene_summary = f"{tom_tat} | Tone: {tone}" if tom_tat else "(Không có)"
 
-    matrix = scene_info.get("matrix_xung_ho", {})
-    toan_phim = bible.get("xung_ho_toan_phim", {})
+    # Phạm vi dòng của scene — để trim turning points
+    scene_range = None
+    tu_dong = scene_info.get("tu_dong")
+    den_dong = scene_info.get("den_dong")
+    if isinstance(tu_dong, int) and isinstance(den_dong, int):
+        scene_range = (tu_dong, den_dong)
+
+    # Nhân vật trong scene (mã zh) — để trim nhan_vat_summary.
+    # scene_info.nhan_vat có thể là list[str] hoặc list[dict{zh,vi}].
+    scene_chars_raw = scene_info.get("nhan_vat") or []
+    scene_chars_zh: list[str] = []
+    for item in scene_chars_raw:
+        if isinstance(item, str):
+            scene_chars_zh.append(item)
+        elif isinstance(item, dict):
+            zh = item.get("zh") or item.get("name") or ""
+            if zh:
+                scene_chars_zh.append(str(zh))
+
+    # Matrix: chỉ render scene matrix + nhánh toan_phim của cặp có nhân vật trong scene
+    matrix = scene_info.get("matrix_xung_ho", {}) or {}
+    toan_phim_full = bible.get("xung_ho_toan_phim", {}) or {}
+
+    # Lọc toan_phim chỉ giữ cặp mà cả 2 phía đều có trong scene (hoặc ít nhất 1 phía)
+    if scene_chars_zh and toan_phim_full:
+        scene_set = set(scene_chars_zh)
+        toan_phim = {}
+        for pair_key, pair_val in toan_phim_full.items():
+            # pair_key dạng "A -> B"
+            parts = [p.strip() for p in pair_key.split("->")]
+            if len(parts) == 2 and (parts[0] in scene_set or parts[1] in scene_set):
+                toan_phim[pair_key] = pair_val
+        # Nếu lọc xong rỗng → fallback dùng full để không mất context
+        if not toan_phim:
+            toan_phim = toan_phim_full
+    else:
+        toan_phim = toan_phim_full
+
     matrix_parts = []
     if toan_phim:
         matrix_parts.append("Toàn phim:")
@@ -1078,13 +1311,14 @@ def build_pass4_prompt(
 
     prompt_tpl = (PROMPTS_DIR / "pass4_review.txt").read_text(encoding="utf-8")
     return (prompt_tpl
-            .replace("{BOI_CANH}",          boi_canh)
-            .replace("{NHAN_VAT_SUMMARY}",  _build_nhan_vat_summary(bible))
-            .replace("{THUAT_NGU}",         _build_thuat_ngu_summary(bible))
-            .replace("{TURNING_POINTS}",    _build_turning_points_summary(bible))
-            .replace("{SCENE_SUMMARY}",     scene_summary)
-            .replace("{XUNG_HO_MATRIX}",    matrix_str)
-            .replace("{SRT_REVIEW_INPUT}",  _build_srt_review_input(entries)))
+            .replace("{BOI_CANH}",            boi_canh)
+            .replace("{NHAN_VAT_SUMMARY}",    _build_nhan_vat_summary(bible, scene_chars_zh))
+            .replace("{THUAT_NGU}",           _build_thuat_ngu_summary(bible, entries))
+            .replace("{TURNING_POINTS}",      _build_turning_points_summary(bible, scene_range))
+            .replace("{SCENE_SUMMARY}",       scene_summary)
+            .replace("{NHAN_VAT_TRONG_CANH}", _build_nhan_vat_trong_canh(scene_info, bible))
+            .replace("{XUNG_HO_MATRIX}",      matrix_str)
+            .replace("{SRT_REVIEW_INPUT}",    _build_srt_review_input(entries)))
 
 
 async def pass4_review_chunk(
@@ -1093,10 +1327,14 @@ async def pass4_review_chunk(
     entries: list[dict],
     api_key: str,
     model: str,
+    on_retry=None,
 ) -> dict:
     """
     QC review 1 chunk. Trả về {tong_ket, van_de, prompt, tokens_in, tokens_out, timing_ms}.
     Nếu lỗi → trả {} (không crash pipeline).
+
+    `on_retry`: callback async (attempt, max_retry, wait, err) — được _call_api gọi
+    mỗi khi retry. Dùng để forward thành SSE event cho FE biết server đang chờ.
     """
     prompt = build_pass4_prompt(chunk, bible, entries)
     try:
@@ -1105,6 +1343,8 @@ async def pass4_review_chunk(
             temperature=0.1,
             response_json=True,
             max_output=4096,
+            on_retry=on_retry,
+            thinking_budget=0,  # Pass 4 QC: tắt thinking → nhanh hơn
         )
         text = result["text"]
         try:

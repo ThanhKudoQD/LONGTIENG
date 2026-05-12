@@ -152,6 +152,13 @@ class TranslateRunRequest(BaseModel):
     concurrency: int  = 3
     enable_qc:   bool = False
 
+class TranslateRunChunksRequest(BaseModel):
+    """Dịch lại chỉ một số chunk cụ thể (theo chunk_index trong scene_map)."""
+    api_key:        str
+    model:          str       = "gemini-2.5-flash"
+    concurrency:    int       = 3
+    chunk_indices:  list[int] = []   # nếu rỗng → không làm gì
+
 class RetranslateRequest(BaseModel):
     subtitle_id:   int
     original_text: str

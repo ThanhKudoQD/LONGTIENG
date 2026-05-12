@@ -55,10 +55,19 @@ interface ChunkState {
   timingMs: number
   error: string
   entries: Array<{ index: number; original: string; translated: string; speaker?: string }>
+  // QC snapshot từ DB — restore khi user chuyển chunk khác rồi quay lại
+  qcVanDe?: any[] | null
+  qcTongKet?: any | null
+  qcTokensIn?: number
+  qcTokensOut?: number
+  qcTimingMs?: number
+  qcModel?: string
+  qcRunAt?: string
 }
 
 interface Pass3State {
-  running: boolean
+  running: boolean        // true khi đang chạy full-run (tất cả chunks)
+  runningChunks: Set<number>  // track từng chunk đang chạy độc lập
   done: boolean
   chunks: ChunkState[]
   totalTokensIn: number
@@ -522,12 +531,36 @@ interface QCEntry {
   index: number
   original: string
   translated: string
+  speaker?: string
   fixed?: string
   issue?: string
+  // Pass 4 v2 fields
+  loai_loi?:                 string  // speaker|van_phong|xung_ho|ten_nhan_vat|thuat_ngu|cuong_do|literal
+  speaker_hien_tai?:         string
+  speaker_de_xuat?:          string
+  speaker_de_xuat_char_id?:  number | null
+  bang_chung?:               string
+  do_tin_cay?:               'cao' | 'trung' | 'thap' | ''
+}
+
+const LOAI_LOI_LABEL: Record<string, string> = {
+  speaker:      '👤 Speaker',
+  van_phong:    '✍️ Văn phong',
+  xung_ho:      '🗣 Xưng hô',
+  ten_nhan_vat: '🏷 Tên',
+  thuat_ngu:    '📖 Thuật ngữ',
+  cuong_do:     '🌡 Cường độ',
+  literal:      '📝 Literal',
+}
+
+const TIN_CAY_LABEL: Record<string, { label: string; cls: string }> = {
+  cao:   { label: '🟢 cao',   cls: 'text-emerald-600 dark:text-emerald-400' },
+  trung: { label: '🟡 trung', cls: 'text-amber-600 dark:text-amber-400' },
+  thap:  { label: '🔴 thấp',  cls: 'text-zinc-400' },
 }
 
 function QCReviewPanel({
-  chunk, projectId, bible, apiKey, model, onApplyFixes,
+  chunk, projectId, bible, apiKey, model, onApplyFixes, onQCDone,
 }: {
   chunk: ChunkState
   projectId: number
@@ -535,14 +568,95 @@ function QCReviewPanel({
   apiKey: string
   model: string
   onApplyFixes: (chunkIndex: number, entries: ChunkState['entries']) => void
+  onQCDone: (chunkIndex: number, info: { tokensIn: number; tokensOut: number; timingMs: number; model: string }) => void
 }) {
   const [running,     setRunning]     = useState(false)
   const [result,      setResult]      = useState<QCEntry[]>([])
+  const [appliedSet,  setAppliedSet]  = useState<Set<number>>(new Set())  // index dòng đã apply
   const [rawResponse, setRawResponse] = useState('')
   const [tongKet,     setTongKet]     = useState<any>(null)
   const [error,       setError]       = useState('')
   const [elapsed,     setElapsed]     = useState(0)
+  // Progress feedback từ SSE
+  const [qcStage,     setQcStage]     = useState<string>('')   // qc_start | qc_calling | qc_retrying | qc_responding | qc_done | qc_error
+  const [qcMessage,   setQcMessage]   = useState<string>('')
+  const [qcEta,       setQcEta]       = useState<number>(0)
+  // restoredFromDb=true → kết quả đang hiển thị là từ DB snapshot (chunk chuyển trước đó),
+  // FE hiển thị badge "📌 Đã lưu" thay vì coi như vừa chạy.
+  const [restoredFromDb, setRestoredFromDb] = useState(false)
   const timerRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+  const sseRef = React.useRef<EventSource | null>(null)
+
+  // Restore QC snapshot từ DB khi user chuyển sang chunk (hoặc mount lần đầu).
+  // chunk.qcVanDe là JSON array đã được loadProject() đọc từ /translate/chunks endpoint.
+  useEffect(() => {
+    // Reset state về clean trước
+    setRunning(false); setError(''); setQcStage(''); setQcMessage(''); setQcEta(0)
+    setAppliedSet(new Set())
+
+    const savedVanDe = chunk.qcVanDe
+    if (Array.isArray(savedVanDe) && savedVanDe.length > 0) {
+      // Có snapshot QC trong DB → restore. Map các vấn đề lưu trong DB về dạng QCEntry,
+      // ghép thêm các dòng không có vấn đề (lấy từ chunk.entries) để bảng đầy đủ.
+      const issueByIdx: Record<number, any> = {}
+      savedVanDe.forEach((v: any) => { issueByIdx[v.index] = v })
+
+      const restored: QCEntry[] = chunk.entries.map(e => {
+        const v = issueByIdx[e.index]
+        if (!v) {
+          return {
+            index:                    e.index,
+            original:                 e.original,
+            translated:               e.translated,
+            speaker:                  e.speaker || '',
+            fixed:                    e.translated,
+            issue:                    '',
+            loai_loi:                 '',
+            speaker_hien_tai:         e.speaker || '',
+            speaker_de_xuat:          '',
+            speaker_de_xuat_char_id:  null,
+            bang_chung:               '',
+            do_tin_cay:               '',
+          }
+        }
+        return {
+          index:                    v.index,
+          original:                 v.original || e.original,
+          translated:               v.translated || e.translated,
+          speaker:                  v.speaker || e.speaker || '',
+          fixed:                    v.fixed || e.translated,
+          issue:                    v.issue || '',
+          loai_loi:                 v.loai_loi || '',
+          speaker_hien_tai:         v.speaker_hien_tai || '',
+          speaker_de_xuat:          v.speaker_de_xuat || '',
+          speaker_de_xuat_char_id:  v.speaker_de_xuat_char_id ?? null,
+          bang_chung:               v.bang_chung || '',
+          do_tin_cay:               v.do_tin_cay || '',
+        }
+      })
+      setResult(restored)
+      setTongKet(chunk.qcTongKet || null)
+      setRawResponse('')  // không restore raw response để tiết kiệm DOM
+      setRestoredFromDb(true)
+    } else {
+      // Chunk này chưa từng review → clear hết
+      setResult([])
+      setTongKet(null)
+      setRawResponse('')
+      setRestoredFromDb(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chunk.index, chunk.qcVanDe])
+
+  // Đọc config QC mỗi lần render (config có thể đã đổi ở ConfigModal mà không cần reload)
+  const qcConfig = useMemo(() => {
+    const c = loadConfig()
+    return {
+      autoApplyText:        c.qc_auto_apply_text ?? true,
+      autoApplySpeaker:     c.qc_auto_apply_speaker ?? true,
+      speakerMinConfidence: c.qc_speaker_min_confidence ?? 'cao',
+    }
+  }, [result.length])  // re-eval khi có kết quả mới
 
   useEffect(() => {
     if (running) {
@@ -554,10 +668,124 @@ function QCReviewPanel({
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [running])
 
+  // Apply 1 dòng (cả text và/hoặc speaker tùy issue) — gọi PATCH BE + cập nhật chunk state.
+  // Trả về true nếu thực sự có thay đổi.
+  const applyOneRow = (qc: QCEntry): boolean => {
+    const origEntry = chunk.entries.find(e => e.index === qc.index)
+    if (!origEntry) return false
+
+    const patchBody: Record<string, any> = {}
+    let changed = false
+
+    // Text fix
+    if (qc.fixed && qc.fixed !== origEntry.translated) {
+      patchBody.text = qc.fixed
+      changed = true
+    }
+    // Speaker fix
+    if (qc.loai_loi === 'speaker' && qc.speaker_de_xuat_char_id != null) {
+      patchBody.character_id = qc.speaker_de_xuat_char_id
+      changed = true
+    }
+
+    if (!changed) return false
+
+    // Cập nhật chunk state local
+    const newEntries = chunk.entries.map(e => {
+      if (e.index !== qc.index) return e
+      const upd = { ...e }
+      if (patchBody.text)      upd.translated = patchBody.text
+      if (qc.speaker_de_xuat)  upd.speaker    = qc.speaker_de_xuat
+      return upd
+    })
+    onApplyFixes(chunk.index, newEntries)
+
+    // Lưu BE (fire-and-forget)
+    api.patch(`/subtitles/by-index/${projectId}/${qc.index}`, patchBody).catch(() => {})
+
+    return true
+  }
+
+  // Apply nhiều dòng theo cấu hình auto-apply.
+  // Trả về Set các index đã apply.
+  const applyFixesFromResult = (qcEntries: QCEntry[]): Set<number> => {
+    const applied = new Set<number>()
+
+    qcEntries.forEach(qc => {
+      const isSpeakerFix = qc.loai_loi === 'speaker'
+      const isHighConf   = qc.do_tin_cay === 'cao'
+      const isOkConf     = isHighConf || (qcConfig.speakerMinConfidence === 'trung' && qc.do_tin_cay === 'trung')
+
+      let shouldApplyText    = false
+      let shouldApplySpeaker = false
+
+      if (isSpeakerFix) {
+        // Cho phép apply speaker (kèm text nếu có) khi:
+        // - bật auto-apply speaker
+        // - đạt ngưỡng tin cậy tối thiểu
+        // - đã resolve được character_id
+        if (qcConfig.autoApplySpeaker && isOkConf && qc.speaker_de_xuat_char_id != null) {
+          shouldApplySpeaker = true
+          shouldApplyText    = true   // text fix kèm theo nếu có
+        }
+      } else {
+        // Các loại lỗi khác — apply text theo config
+        if (qcConfig.autoApplyText) shouldApplyText = true
+      }
+
+      if (!shouldApplyText && !shouldApplySpeaker) return
+
+      // Gọi applyOneRow chỉ với phần được phép
+      const filteredQC: QCEntry = {
+        ...qc,
+        fixed: shouldApplyText ? qc.fixed : qc.translated,
+        speaker_de_xuat_char_id: shouldApplySpeaker ? qc.speaker_de_xuat_char_id : null,
+      }
+      if (applyOneRow(filteredQC)) applied.add(qc.index)
+    })
+
+    return applied
+  }
+
+  // Cleanup SSE khi component unmount
+  useEffect(() => {
+    return () => {
+      sseRef.current?.close()
+      sseRef.current = null
+    }
+  }, [])
+
   const handleRunQC = async () => {
     if (!apiKey) { alert('Chưa có API key trong Cấu hình!'); return }
     if (chunk.entries.length === 0) { alert('Chunk chưa có bản dịch. Hãy dịch trước.'); return }
-    setRunning(true); setError(''); setResult([]); setRawResponse(''); setTongKet(null)
+    setRunning(true); setError(''); setResult([]); setRawResponse(''); setTongKet(null); setAppliedSet(new Set())
+    setRestoredFromDb(false)
+    setQcStage('qc_starting'); setQcMessage('Đang kết nối...'); setQcEta(0)
+
+    // Mở SSE để lắng nghe progress events từ BE.
+    // BE publish vào kênh chung `progress` của project (cùng kênh với Pass 3).
+    // Ta chỉ lọc event có stage bắt đầu bằng `qc_`.
+    sseRef.current?.close()
+    const es = new EventSource(`/dub/api/projects/${projectId}/translate/progress`)
+    sseRef.current = es
+
+    es.addEventListener('progress', (e: MessageEvent) => {
+      try {
+        const d = JSON.parse(e.data)
+        const stage = d.stage || ''
+        if (!stage.startsWith('qc_')) return  // bỏ qua event của Pass 3
+        if (d.chunk_index != null && d.chunk_index !== chunk.index) return  // không phải chunk này
+
+        setQcStage(stage)
+        if (d.message) setQcMessage(d.message)
+        if (typeof d.eta_seconds === 'number') setQcEta(d.eta_seconds)
+      } catch {}
+    })
+    es.onerror = () => {
+      // Lỗi SSE → không crash, chỉ là không có progress feedback
+      // Request HTTP vẫn chạy
+    }
+
     try {
       const res = await api.post(`/projects/${projectId}/translate/review-chunk`, {
         api_key:     apiKey,
@@ -569,41 +797,79 @@ function QCReviewPanel({
           translated: e.translated.includes('|')
             ? e.translated.split('|').slice(1).join('|').trim()
             : e.translated,
+          speaker:    e.speaker || '',
         })),
       })
-      setResult(res.data.entries || [])
+      const qcEntries: QCEntry[] = res.data.entries || []
+      setResult(qcEntries)
       setRawResponse(res.data.raw_response || '')
       setTongKet(res.data.tong_ket || null)
+
+      // Lưu token QC ra chunk state (để hiển thị ở chunk list + header)
+      onQCDone(chunk.index, {
+        tokensIn:  res.data.tokens_in  || 0,
+        tokensOut: res.data.tokens_out || 0,
+        timingMs:  res.data.timing_ms  || 0,
+        model,
+      })
+
+      // Auto-apply theo config — chỉ áp dụng cho rows có vấn đề thật sự
+      const issueEntries = qcEntries.filter(r => (r.loai_loi || '').length > 0 || (r.issue || '').trim().length > 0)
+      if (issueEntries.length > 0) {
+        const applied = applyFixesFromResult(issueEntries)
+        setAppliedSet(applied)
+      }
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Lỗi QC')
+      setQcStage('qc_error')
     } finally {
       setRunning(false)
+      // Đóng SSE sau 1 nhịp để event qc_done cuối còn kịp đến
+      setTimeout(() => {
+        sseRef.current?.close()
+        sseRef.current = null
+      }, 500)
     }
   }
 
-  const handleApply = () => {
-    const fixed = chunk.entries.map(e => {
-      const qc = result.find(r => r.index === e.index)
-      if (!qc?.fixed || qc.fixed === e.translated) return e
-      return { ...e, translated: qc.fixed }
-    })
-    onApplyFixes(chunk.index, fixed)
-    fixed.forEach(e => {
-      const orig = chunk.entries.find(o => o.index === e.index)
-      if (e.translated !== orig?.translated)
-        api.patch(`/subtitles/by-index/${projectId}/${e.index}`, { text: e.translated }).catch(() => {})
-    })
+  // Apply lại toàn bộ (nút "Áp dụng lại")
+  const handleApplyAll = () => {
+    const applied = applyFixesFromResult(result)
+    setAppliedSet(prev => new Set([...prev, ...applied]))
   }
 
-  const issueCount = result.filter(r => r.issue && r.issue.trim()).length
-  const fixCount   = result.filter(r => r.fixed && r.fixed !== r.translated).length
+  // Apply 1 dòng thủ công (khi auto-apply tắt hoặc tin cậy không đủ)
+  const handleApplyRow = (qc: QCEntry) => {
+    if (applyOneRow(qc)) {
+      setAppliedSet(prev => new Set([...prev, qc.index]))
+    }
+  }
+
+  // Filter: chỉ giữ rows có vấn đề (loai_loi != '' hoặc issue != '')
+  const issueRows = result.filter(r =>
+    (r.loai_loi && r.loai_loi.length > 0) || (r.issue && r.issue.trim().length > 0)
+  )
+
+  const issueCount = issueRows.length
+  const fixCount   = issueRows.filter(r => (r.fixed && r.fixed !== r.translated) || (r.loai_loi === 'speaker' && r.speaker_de_xuat_char_id != null)).length
+  const appliedCount = appliedSet.size
+  const phanLoai = tongKet?.phan_loai || {}
 
   return (
     <div className="flex flex-col gap-4 p-4 overflow-y-auto">
       <div className="flex items-center gap-3">
         <div className="flex-1">
           <div className="text-[13px] font-bold text-zinc-700 dark:text-zinc-200">QC Review — Chunk {chunk.index + 1}</div>
-          <div className="text-[11px] text-zinc-400 mt-0.5">AI kiểm tra xưng hô · tên nhân vật · thuật ngữ · cường độ · literal</div>
+          <div className="text-[11px] text-zinc-400 mt-0.5">
+            Kiểm tra: speaker · văn phong · xưng hô · tên/thuật ngữ/cường độ
+            {' · '}
+            <span className={qcConfig.autoApplyText || qcConfig.autoApplySpeaker ? 'text-emerald-500' : 'text-amber-500'}>
+              {qcConfig.autoApplyText && qcConfig.autoApplySpeaker ? 'Auto-apply: bật'
+                : qcConfig.autoApplyText  ? 'Auto-apply: chỉ text'
+                : qcConfig.autoApplySpeaker ? 'Auto-apply: chỉ speaker'
+                : 'Auto-apply: tắt (duyệt thủ công)'}
+            </span>
+          </div>
         </div>
         {!running ? (
           <button onClick={handleRunQC} disabled={chunk.status !== 'done'}
@@ -613,10 +879,99 @@ function QCReviewPanel({
         ) : (
           <div className="flex items-center gap-2 text-[12px] text-blue-500 flex-shrink-0">
             <div className="w-3.5 h-3.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
-            <span className="font-mono">⏱ {elapsed}s</span>
+            <span className="font-mono">
+              ⏱ {elapsed}s
+              {qcEta > 0 && elapsed < qcEta && <span className="text-zinc-400"> / ~{qcEta}s</span>}
+            </span>
           </div>
         )}
       </div>
+
+      {/* Progress feedback khi đang chạy QC */}
+      {running && (
+        <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 overflow-hidden">
+          {/* Header chunk info */}
+          <div className="px-3 py-2 border-b border-blue-200/60 dark:border-blue-800/60 bg-blue-100/40 dark:bg-blue-900/20 flex items-center gap-2 text-[11px]">
+            <span className="font-semibold text-blue-700 dark:text-blue-300">
+              QC Chunk {chunk.index + 1}
+            </span>
+            <span className="text-zinc-500">·</span>
+            <span className="text-zinc-600 dark:text-zinc-400">{chunk.entries.length} dòng</span>
+            <span className="text-zinc-500">·</span>
+            <span className="text-zinc-600 dark:text-zinc-400 font-mono">{model}</span>
+            <span className="ml-auto text-[10px] font-mono text-blue-600 dark:text-blue-400">
+              {elapsed}s{qcEta > 0 && <span className="text-zinc-400"> / ~{qcEta}s</span>}
+            </span>
+          </div>
+
+          {/* Stage indicator — 4 chấm tròn */}
+          <div className="px-3 pt-2.5 flex items-center gap-1.5">
+            {(['qc_start', 'qc_calling', 'qc_responding', 'qc_done'] as const).map((s, i) => {
+              const ORDER = ['qc_starting', 'qc_start', 'qc_calling', 'qc_retrying', 'qc_responding', 'qc_done']
+              const curIdx = ORDER.indexOf(qcStage)
+              const stepIdx = ORDER.indexOf(s)
+              const done   = curIdx >= stepIdx
+              const active = qcStage === s || (s === 'qc_calling' && qcStage === 'qc_retrying')
+              return (
+                <React.Fragment key={s}>
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${
+                    active ? 'bg-blue-500 animate-pulse' :
+                    done   ? 'bg-blue-500' :
+                             'bg-blue-200 dark:bg-blue-900'
+                  }`} />
+                  {i < 3 && (
+                    <div className={`flex-1 h-0.5 rounded-full transition-colors ${
+                      done && curIdx > stepIdx ? 'bg-blue-500' : 'bg-blue-200 dark:bg-blue-900'
+                    }`} />
+                  )}
+                </React.Fragment>
+              )
+            })}
+          </div>
+
+          {/* Message + stage icon */}
+          <div className="px-3 py-2 flex items-center gap-2 text-[12px]">
+            <span className="text-base flex-shrink-0">
+              {qcStage === 'qc_starting'   ? '⚡' :
+               qcStage === 'qc_start'      ? '📋' :
+               qcStage === 'qc_calling'    ? '📡' :
+               qcStage === 'qc_retrying'   ? '🔁' :
+               qcStage === 'qc_responding' ? '⚙️' :
+               qcStage === 'qc_done'       ? '✅' : '🔍'}
+            </span>
+            <div className="flex-1 min-w-0">
+              <div className="font-medium text-blue-700 dark:text-blue-300">
+                {qcStage === 'qc_starting'   ? 'Bước 1/4 — Đang khởi tạo' :
+                 qcStage === 'qc_start'      ? 'Bước 1/4 — Đang chuẩn bị prompt' :
+                 qcStage === 'qc_calling'    ? 'Bước 2/4 — Đang gọi AI' :
+                 qcStage === 'qc_retrying'   ? 'Bước 2/4 — Đang thử lại (lỗi tạm thời)' :
+                 qcStage === 'qc_responding' ? 'Bước 3/4 — Đã nhận, đang phân tích' :
+                 qcStage === 'qc_done'       ? 'Bước 4/4 — Hoàn tất' :
+                                                'Đang xử lý...'}
+              </div>
+              <div className="text-[10px] text-zinc-500 dark:text-zinc-400 truncate mt-0.5">
+                {qcMessage || '...'}
+              </div>
+              {qcStage === 'qc_retrying' && (
+                <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
+                  ⚠ Đang đợi do lỗi tạm thời (rate limit / overload) — hệ thống sẽ tự thử lại
+                </div>
+              )}
+            </div>
+            <div className="w-3.5 h-3.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin flex-shrink-0" />
+          </div>
+
+          {/* Progress bar — chỉ hiện khi có ETA */}
+          {qcEta > 0 && (
+            <div className="h-1 bg-blue-100 dark:bg-blue-900/40">
+              <div
+                className="h-full bg-blue-500 transition-all duration-1000 ease-linear"
+                style={{ width: `${Math.min(100, (elapsed / qcEta) * 100)}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {chunk.status !== 'done' && (
         <div className="text-center text-zinc-400 text-[12px] py-8 border border-dashed border-zinc-200 dark:border-zinc-700 rounded-lg">
@@ -637,51 +992,122 @@ function QCReviewPanel({
             <span className="text-lg">{issueCount > 0 ? '⚠️' : '✅'}</span>
             <div className="flex-1">
               <span className={`font-semibold ${issueCount > 0 ? 'text-amber-700 dark:text-amber-400' : 'text-emerald-700 dark:text-emerald-400'}`}>
-                {issueCount > 0 ? `${issueCount} vấn đề` : 'Không có vấn đề'}
+                {issueCount > 0 ? `${issueCount}/${result.length} dòng có vấn đề` : 'Không có vấn đề'}
               </span>
+              {restoredFromDb && (
+                <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-zinc-500"
+                  title={`Kết quả review đã lưu trong DB${chunk.qcRunAt ? ` lúc ${new Date(chunk.qcRunAt).toLocaleString()}` : ''}${chunk.qcModel ? ` (model: ${chunk.qcModel})` : ''}`}>
+                  📌 Đã lưu
+                </span>
+              )}
               {tongKet?.danh_gia_chung && <span className="text-zinc-400 ml-2">· {tongKet.danh_gia_chung}</span>}
-              {fixCount > 0 && <span className="text-zinc-500 ml-2">· {fixCount} dòng đề xuất sửa</span>}
+              {appliedCount > 0 && (
+                <span className="text-emerald-600 dark:text-emerald-400 ml-2">
+                  · ✓ Đã áp dụng {appliedCount}/{fixCount}
+                </span>
+              )}
+              {/* Phân loại lỗi */}
+              {Object.keys(phanLoai).filter(k => phanLoai[k] > 0).length > 0 && (
+                <div className="text-[10px] text-zinc-500 mt-1 flex gap-2 flex-wrap">
+                  {Object.entries(phanLoai)
+                    .filter(([, n]) => (n as number) > 0)
+                    .map(([k, n]) => (
+                      <span key={k} className="px-1.5 py-0.5 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                        {LOAI_LOI_LABEL[k] || k}: {n as number}
+                      </span>
+                    ))}
+                </div>
+              )}
             </div>
-            {fixCount > 0 && (
-              <button onClick={handleApply}
-                className="btn text-[11px] text-emerald-600 border-emerald-300 dark:border-emerald-700 flex-shrink-0">
-                ✓ Áp dụng {fixCount} sửa đổi
+            {fixCount > appliedCount && (
+              <button onClick={handleApplyAll}
+                className="btn text-[11px] text-emerald-600 border-emerald-300 dark:border-emerald-700 flex-shrink-0"
+                title="Áp dụng các sửa đổi còn lại">
+                ↻ Áp dụng còn lại
               </button>
             )}
           </div>
 
-          <div className="border border-zinc-200 dark:border-zinc-700 rounded-xl overflow-hidden">
-            <table className="w-full border-collapse text-[11px]">
-              <thead className="bg-zinc-50 dark:bg-zinc-800 sticky top-0">
-                <tr>
-                  <th className="text-left px-3 py-2 text-zinc-400 font-semibold w-8">#</th>
-                  <th className="text-left px-3 py-2 text-zinc-400 font-semibold w-[25%]">Gốc</th>
-                  <th className="text-left px-3 py-2 text-zinc-400 font-semibold">Hiện tại</th>
-                  <th className="text-left px-3 py-2 text-zinc-400 font-semibold">Đề xuất sửa</th>
-                  <th className="text-left px-3 py-2 text-zinc-400 font-semibold w-36">Vấn đề</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.map((row, i) => {
-                  const hasIssue = row.issue && row.issue.trim()
-                  const hasFix   = row.fixed && row.fixed !== row.translated
-                  return (
-                    <tr key={i} className={`border-t border-zinc-100 dark:border-zinc-800 ${hasIssue ? 'bg-amber-50/40 dark:bg-amber-950/10' : ''}`}>
-                      <td className="px-3 py-2 font-mono text-zinc-400">{row.index}</td>
-                      <td className="px-3 py-2 font-mono text-[10px] text-zinc-400">{row.original}</td>
-                      <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">{row.translated}</td>
-                      <td className="px-3 py-2">
-                        {hasFix
-                          ? <span className="text-emerald-600 dark:text-emerald-400 font-medium">{row.fixed}</span>
-                          : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
-                      </td>
-                      <td className="px-3 py-2 text-amber-600 dark:text-amber-400 text-[10px] leading-snug">{hasIssue ? row.issue : ''}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          {issueCount === 0 ? (
+            <div className="text-center text-zinc-400 text-[12px] py-6 border border-dashed border-zinc-200 dark:border-zinc-700 rounded-lg">
+              ✓ Tất cả {result.length} dòng đều ổn — không cần sửa gì
+            </div>
+          ) : (
+            <div className="border border-zinc-200 dark:border-zinc-700 rounded-xl overflow-hidden">
+              <table className="w-full border-collapse text-[11px]">
+                <thead className="bg-zinc-50 dark:bg-zinc-800 sticky top-0">
+                  <tr>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold w-10">#</th>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold w-20">Loại</th>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold w-[22%]">Gốc</th>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold w-[22%]">Hiện tại</th>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold w-[22%]">Đề xuất</th>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold">Bằng chứng</th>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold w-16">Tin cậy</th>
+                    <th className="text-left px-2 py-2 text-zinc-400 font-semibold w-20"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {issueRows.map((row, i) => {
+                    const isSpeaker = row.loai_loi === 'speaker'
+                    const hasTextFix = !!(row.fixed && row.fixed !== row.translated)
+                    const hasSpeakerFix = isSpeaker && row.speaker_de_xuat_char_id != null
+                    const hasAnyFix = hasTextFix || hasSpeakerFix
+                    const isApplied = appliedSet.has(row.index)
+                    const tinCay = TIN_CAY_LABEL[row.do_tin_cay || ''] || { label: '—', cls: 'text-zinc-400' }
+                    return (
+                      <tr key={i} className={`border-t border-zinc-100 dark:border-zinc-800 align-top ${
+                        isApplied ? 'bg-emerald-50/40 dark:bg-emerald-950/10' : 'bg-amber-50/40 dark:bg-amber-950/10'
+                      }`}>
+                        <td className="px-2 py-2 font-mono text-zinc-400">{row.index}</td>
+                        <td className="px-2 py-2">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                            {LOAI_LOI_LABEL[row.loai_loi || ''] || row.loai_loi || '—'}
+                          </span>
+                        </td>
+                        <td className="px-2 py-2 font-mono text-[10px] text-zinc-400 break-words">{row.original}</td>
+                        <td className="px-2 py-2 text-zinc-600 dark:text-zinc-300 break-words">
+                          <div>{row.translated}</div>
+                          {row.speaker_hien_tai && (
+                            <div className="text-[10px] text-zinc-400 mt-1">👤 {row.speaker_hien_tai}</div>
+                          )}
+                        </td>
+                        <td className="px-2 py-2 break-words">
+                          {hasTextFix && (
+                            <div className="text-emerald-600 dark:text-emerald-400 font-medium">{row.fixed}</div>
+                          )}
+                          {hasSpeakerFix && (
+                            <div className={`text-[10px] mt-1 ${row.speaker_de_xuat_char_id ? 'text-blue-500' : 'text-zinc-400'}`}>
+                              👤 → {row.speaker_de_xuat}
+                              {row.speaker_de_xuat_char_id == null && (
+                                <span className="text-red-400 ml-1" title="Tên này không có trong danh sách nhân vật">⚠</span>
+                              )}
+                            </div>
+                          )}
+                          {!hasAnyFix && <span className="text-zinc-300 dark:text-zinc-600">—</span>}
+                        </td>
+                        <td className="px-2 py-2 text-zinc-500 dark:text-zinc-400 text-[10px] leading-snug break-words">
+                          {row.bang_chung || row.issue || ''}
+                        </td>
+                        <td className={`px-2 py-2 text-[10px] font-mono ${tinCay.cls}`}>{tinCay.label}</td>
+                        <td className="px-2 py-2">
+                          {isApplied ? (
+                            <span className="text-[10px] text-emerald-500 font-semibold">✓ Đã apply</span>
+                          ) : hasAnyFix ? (
+                            <button onClick={() => handleApplyRow(row)}
+                              className="text-[10px] px-2 py-1 rounded border border-emerald-300 dark:border-emerald-700 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/20"
+                              title="Áp dụng sửa đổi này">
+                              ✓ Apply
+                            </button>
+                          ) : null}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {rawResponse && (
             <details className="text-[11px]">
@@ -736,17 +1162,20 @@ const STATUS_DOT = {
 const STATUS_LABEL = { wait: 'Chờ', run: 'Đang dịch', done: 'Xong', err: 'Lỗi' }
 
 function Step2Panel({
-  state, pass1Bible, modelName, projectId, onStart, onStop, onRetryChunk, onEditCell, onApplyQCFixes,
+  state, pass1Bible, modelName, projectId, onStartRemaining, onStartAll, onStop, onRetryChunk, onDeleteChunk, onEditCell, onApplyQCFixes, onQCDone,
 }: {
   state: Pass3State
   pass1Bible: Bible | null
   modelName: string
   projectId: number
-  onStart: () => void
+  onStartRemaining: () => void
+  onStartAll: () => void
   onStop: () => void
   onRetryChunk: (index: number) => void
+  onDeleteChunk: (index: number) => void
   onEditCell: (chunkIndex: number, entryIndex: number, newText: string) => void
   onApplyQCFixes: (chunkIndex: number, entries: ChunkState['entries']) => void
+  onQCDone: (chunkIndex: number, info: { tokensIn: number; tokensOut: number; timingMs: number; model: string }) => void
 }) {
   const [selChunk, setSelChunk] = useState<number | null>(null)
   const [detailTab, setDetailTab] = useState<'table' | 'request' | 'response'>('table')
@@ -759,6 +1188,16 @@ function Step2Panel({
   const errCount   = chunks.filter(c => c.status === 'err').length
   const totalIn    = state.totalTokensIn
   const totalOut   = state.totalTokensOut
+
+  // chunk đang bận = status 'run' hoặc đang trong runningChunks (chờ chunk_start về)
+  const isChunkBusy = (idx: number) => {
+    const ch = chunks.find(c => c.index === idx)
+    return ch?.status === 'run' || state.runningChunks.has(idx)
+  }
+  // full-run đang chạy = state.running (do handleRunPass3/handleRunRemaining set)
+  const anyFullRunning = state.running
+  // có bất kỳ chunk nào đang chạy (kể cả single-retry)
+  const anyChunkRunning = state.running || chunks.some(c => c.status === 'run') || state.runningChunks.size > 0
 
   // Auto-select first done chunk khi chunks load/thay đổi
   useEffect(() => {
@@ -779,7 +1218,7 @@ function Step2Panel({
   return (
     <div className="flex flex-col flex-1 overflow-hidden min-h-0">
       {/* Banner trạng thái */}
-      {state.running && (
+      {anyChunkRunning && (
         <div className="flex items-center gap-3 px-4 py-2 bg-blue-50 dark:bg-blue-950/20 border-b border-blue-200 dark:border-blue-800 flex-shrink-0">
           <div className="w-3 h-3 rounded-full border-2 border-blue-500 border-t-transparent animate-spin flex-shrink-0" />
           <span className="text-[12px] text-blue-600 dark:text-blue-400 font-medium">
@@ -800,27 +1239,51 @@ function Step2Panel({
       <div className="w-64 flex-shrink-0 border-r border-zinc-200 dark:border-zinc-800 flex flex-col bg-zinc-50 dark:bg-zinc-900/50">
         {/* Header + run button */}
         <div className="border-b border-zinc-200 dark:border-zinc-800 flex-shrink-0 bg-white dark:bg-zinc-900">
-          <div className="px-3 py-2.5 flex items-center gap-2">
-            <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-bold text-zinc-700 dark:text-zinc-200">
-                {chunks.length > 0 ? `${chunks.length} chunks` : 'Chưa có chunk'}
+          <div className="px-3 pt-2.5 pb-1.5">
+            {/* Dòng 1: tên + đếm */}
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <div className="min-w-0">
+                <span className="text-[12px] font-bold text-zinc-700 dark:text-zinc-200">
+                  {chunks.length > 0 ? `${chunks.length} chunks` : 'Chưa có chunk'}
+                </span>
+                {chunks.length > 0 && (
+                  <span className="ml-2 text-[10px] text-zinc-400 font-mono">
+                    {doneCount}/{chunks.length} xong
+                    {errCount > 0 && <span className="text-red-400"> · {errCount} lỗi</span>}
+                    {state.running && <span className="text-blue-400"> · ⏱ <RunTimer running={state.running} /></span>}
+                  </span>
+                )}
               </div>
-              {chunks.length > 0 && (
-                <div className="text-[10px] text-zinc-400 font-mono">
-                  {doneCount}/{chunks.length} xong
-                  {errCount > 0 && <span className="text-red-400"> · {errCount} lỗi</span>}
-                  {state.running && <span className="text-blue-400"> · ⏱ <RunTimer running={state.running} /></span>}
-                </div>
+            </div>
+            {/* Dòng 2: nút hành động */}
+            <div className="flex items-center gap-1.5">
+              {!anyFullRunning && doneCount < chunks.length && chunks.length > 0 && (
+                <button onClick={onStartRemaining}
+                  className="btn-primary text-[11px] px-2.5 py-1 flex-1 min-w-0 truncate"
+                  title={doneCount > 0
+                    ? `Dịch ${chunks.length - doneCount} chunks còn lại`
+                    : `Bắt đầu dịch toàn bộ ${chunks.length} chunks`}>
+                  {doneCount > 0 ? `▶ Dịch tiếp (${chunks.length - doneCount})` : '▶ Dịch tất cả'}
+                </button>
+              )}
+              {!anyFullRunning && doneCount > 0 && (
+                <button onClick={onStartAll}
+                  className="btn text-[11px] px-2 py-1 text-amber-600 border-amber-300 dark:border-amber-700 flex-shrink-0"
+                  title="Dịch lại TẤT CẢ — ghi đè kết quả hiện tại (cần xác nhận)">
+                  🔄 Tất cả
+                </button>
+              )}
+              {!anyFullRunning && chunks.length === 0 && (
+                <button disabled className="btn-primary text-[11px] px-2.5 py-1 opacity-50 cursor-not-allowed flex-1">
+                  ▶ Dịch
+                </button>
+              )}
+              {anyFullRunning && (
+                <button onClick={onStop} className="btn text-[11px] px-2.5 py-1 text-red-400 border-red-200 dark:border-red-800 flex-1">
+                  ⏹ Dừng
+                </button>
               )}
             </div>
-            {!state.running && (
-              <button onClick={onStart} className="btn-primary text-[11px] px-2.5 py-1 flex-shrink-0">
-                {doneCount > 0 ? '🔄 Dịch lại' : '▶ Dịch'}
-              </button>
-            )}
-            {state.running && (
-              <button onClick={onStop} className="btn text-[11px] px-2.5 py-1 text-red-400 border-red-200 dark:border-red-800 flex-shrink-0">⏹ Dừng</button>
-            )}
           </div>
           {/* Progress bar tổng */}
           {chunks.length > 0 && (
@@ -835,7 +1298,7 @@ function Step2Panel({
 
         {/* Chunk items */}
         <div className="flex-1 overflow-y-auto">
-          {chunks.length === 0 && !state.running && (
+          {chunks.length === 0 && !anyFullRunning && (
             <div className="p-4 text-[12px] text-zinc-400 text-center">
               {pass1Bible ? 'Bấm Dịch để bắt đầu' : 'Cần chạy Pass 1 trước'}
             </div>
@@ -872,6 +1335,11 @@ function Step2Panel({
                     ↑{fmtTokens(chunk.tokensIn)} ↓{fmtTokens(chunk.tokensOut)} · {fmt(chunk.timingMs)}
                   </div>
                 )}
+                {chunk.status === 'done' && (chunk.qcTokensIn || 0) > 0 && (
+                  <div className="text-[9px] font-mono text-purple-300 dark:text-purple-700 mt-0.5">
+                    QC ↑{fmtTokens(chunk.qcTokensIn || 0)} ↓{fmtTokens(chunk.qcTokensOut || 0)} · {fmt(chunk.qcTimingMs || 0)}
+                  </div>
+                )}
               </div>
             </button>
           ))}
@@ -897,43 +1365,86 @@ function Step2Panel({
         {sel ? (
           <>
             {/* Detail header */}
-            <div className="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 flex items-center gap-3 flex-shrink-0 bg-white dark:bg-zinc-900">
-              <div className="flex-1 min-w-0">
-                <div className="text-[13px] font-bold text-zinc-700 dark:text-zinc-200">
-                  Chunk {sel.index + 1}
-                  <span className={`ml-2 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${STATUS_CLS[sel.status]}`}>
-                    {STATUS_LABEL[sel.status]}
-                  </span>
+            <div className="px-4 py-2.5 border-b border-zinc-200 dark:border-zinc-800 flex-shrink-0 bg-white dark:bg-zinc-900">
+              {/* Dòng 1: tên chunk + status + spinner */}
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[13px] font-bold text-zinc-700 dark:text-zinc-200">
+                      Chunk {sel.index + 1}
+                    </span>
+                    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${STATUS_CLS[sel.status]}`}>
+                      {STATUS_LABEL[sel.status]}
+                    </span>
+                    {sel.status === 'run' && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-blue-500">
+                        <div className="w-2.5 h-2.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
+                        <span className="font-mono">Đang gọi AI...</span>
+                        <ChunkTimer active={true} />
+                      </div>
+                    )}
+                  </div>
+                  {sel.tomTat && (
+                    <div className="text-[11px] text-zinc-400 mt-0.5 truncate">{sel.tomTat}</div>
+                  )}
                 </div>
-                {sel.tomTat && (
-                  <div className="text-[11px] text-zinc-400 mt-0.5 truncate">{sel.tomTat}</div>
-                )}
               </div>
-              {sel.status === 'run' && (
-                <div className="flex items-center gap-2 text-[12px] text-blue-500 flex-shrink-0">
-                  <div className="w-3 h-3 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
-                  <span className="font-mono">Đang gửi API...</span>
-                  <ChunkTimer active={true} />
+              {/* Dòng 2: token stats + nút hành động */}
+              {sel.status !== 'run' && (
+                <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                  {/* Token dịch */}
+                  {sel.tokensIn > 0 && (
+                    <div className="flex items-center gap-1.5 text-[10px] font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded px-2 py-0.5">
+                      <span className="text-blue-500">↑{fmtTokens(sel.tokensIn)}</span>
+                      <span className="text-emerald-500">↓{fmtTokens(sel.tokensOut)}</span>
+                      <span className="text-zinc-400">{fmt(sel.timingMs)}</span>
+                    </div>
+                  )}
+                  {/* Token QC */}
+                  {(sel.qcTokensIn || 0) > 0 && (
+                    <div className="flex items-center gap-1.5 text-[10px] font-mono bg-purple-50 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800 rounded px-2 py-0.5">
+                      <span className="text-purple-400 font-semibold">QC</span>
+                      <span className="text-purple-400">↑{fmtTokens(sel.qcTokensIn || 0)}</span>
+                      <span className="text-purple-500">↓{fmtTokens(sel.qcTokensOut || 0)}</span>
+                      <span className="text-zinc-400">{fmt(sel.qcTimingMs || 0)}</span>
+                    </div>
+                  )}
+                  {/* Spacer */}
+                  <div className="flex-1" />
+                  {/* Nút hành động */}
+                  {sel.status === 'done' && !isChunkBusy(sel.index) && (
+                    <>
+                      <button onClick={() => onRetryChunk(sel.index)}
+                        className="btn text-[11px] px-2.5 py-1 text-blue-500 border-blue-200 dark:border-blue-800"
+                        title="Dịch lại chunk này — sẽ ghi đè bản dịch hiện tại">
+                        🔄 Dịch lại
+                      </button>
+                      <button onClick={() => onDeleteChunk(sel.index)}
+                        className="btn text-[11px] px-2.5 py-1 text-red-500 border-red-200 dark:border-red-800"
+                        title="Xóa bản dịch chunk này">
+                        🗑 Xóa
+                      </button>
+                    </>
+                  )}
+                  {sel.status === 'err' && !isChunkBusy(sel.index) && (
+                    <>
+                      <button onClick={() => onRetryChunk(sel.index)}
+                        className="btn text-[11px] px-2.5 py-1 text-red-400 border-red-200 dark:border-red-800">
+                        🔄 Dịch lại
+                      </button>
+                      <button onClick={() => onDeleteChunk(sel.index)}
+                        className="btn text-[11px] px-2.5 py-1 text-zinc-400 border-zinc-200 dark:border-zinc-700">
+                        🗑 Xóa
+                      </button>
+                    </>
+                  )}
+                  {sel.status === 'wait' && !isChunkBusy(sel.index) && (
+                    <button onClick={() => onRetryChunk(sel.index)}
+                      className="btn text-[11px] px-2.5 py-1">
+                      ▶ Dịch chunk này
+                    </button>
+                  )}
                 </div>
-              )}
-              {sel.status === 'done' && (
-                <div className="flex items-center gap-3 text-[11px] font-mono flex-shrink-0">
-                  <span className="text-blue-500">↑{fmtTokens(sel.tokensIn)}</span>
-                  <span className="text-emerald-500">↓{fmtTokens(sel.tokensOut)}</span>
-                  <span className="text-zinc-400">{fmt(sel.timingMs)}</span>
-                </div>
-              )}
-              {sel.status === 'err' && !state.running && (
-                <button onClick={() => onRetryChunk(sel.index)}
-                  className="btn text-[11px] px-2.5 py-1 text-red-400 border-red-200 dark:border-red-800">
-                  🔄 Dịch lại chunk này
-                </button>
-              )}
-              {sel.status === 'wait' && !state.running && (
-                <button onClick={() => onRetryChunk(sel.index)}
-                  className="btn text-[11px] px-2.5 py-1">
-                  ▶ Dịch chunk này
-                </button>
               )}
             </div>
 
@@ -957,9 +1468,12 @@ function Step2Panel({
               {detailTab === 'table' && (
                 <div>
                   {sel.status === 'run' && (
-                    <div className="flex items-center gap-2 px-4 py-3 bg-blue-50 dark:bg-blue-950/20 border-b border-blue-100 dark:border-blue-900">
+                    <div className="flex items-center gap-3 px-4 py-3 bg-blue-50 dark:bg-blue-950/20 border-b border-blue-100 dark:border-blue-900">
                       <div className="w-3 h-3 rounded-full border-2 border-blue-500 border-t-transparent animate-spin flex-shrink-0" />
-                      <span className="text-[12px] text-blue-600 dark:text-blue-400">Đang dịch chunk này...</span>
+                      <div>
+                        <span className="text-[12px] text-blue-600 dark:text-blue-400 font-medium">Đang gọi AI dịch chunk này...</span>
+                        <span className="text-[11px] text-zinc-400 ml-2">Thinking đã tắt · thường 10–30s</span>
+                      </div>
                     </div>
                   )}
                   {sel.status === 'wait' && (
@@ -1113,7 +1627,7 @@ function Step2Panel({
                                     ? 'Prompt sẽ hiển thị sau khi chunk được dịch'
                                     : 'Prompt không lưu sau F5 — dịch lại để xem'}
                                 </span>
-                                {sel.status === 'done' && !state.running && (
+                                {sel.status === 'done' && !isChunkBusy(sel.index) && (
                                   <button onClick={() => onRetryChunk(sel.index)}
                                     className="text-[11px] px-3 py-1 rounded-lg border border-blue-200 dark:border-blue-800 text-blue-500 bg-blue-50 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-950/50 transition-colors flex-shrink-0">
                                     🔄 Dịch lại để xem
@@ -1186,7 +1700,7 @@ function Step2Panel({
                                   ? 'Response sẽ hiển thị sau khi chunk được dịch'
                                   : 'Response không lưu sau F5 — dịch lại để xem'}
                               </span>
-                              {sel.status === 'done' && !state.running && (
+                              {sel.status === 'done' && !isChunkBusy(sel.index) && (
                                 <button onClick={() => onRetryChunk(sel.index)}
                                   className="text-[11px] px-3 py-1 rounded-lg border border-blue-200 dark:border-blue-800 text-blue-500 bg-blue-50 dark:bg-blue-950/30 hover:bg-blue-100 transition-colors flex-shrink-0">
                                   🔄 Dịch lại để xem
@@ -1215,6 +1729,7 @@ function Step2Panel({
                   apiKey={getApiKey(loadConfig(), modelName)}
                   model={modelName}
                   onApplyFixes={onApplyQCFixes}
+                  onQCDone={onQCDone}
                 />
               )}
             </div>
@@ -1242,7 +1757,7 @@ export default function TranslatePage({ projectId, onBack }: Props) {
   const subtitles = useStore(s => s.subtitles)
   const loadProject = useStore(s => s.loadProject)
 
-  const config = useMemo(() => loadConfig(), [])
+  const [config, setConfig] = useState(() => loadConfig())
 
   const [step, setStep] = useState<StepId>(0)
 
@@ -1259,7 +1774,7 @@ export default function TranslatePage({ projectId, onBack }: Props) {
 
   // Step 2 state
   const [pass3, setPass3] = useState<Pass3State>({
-    running: false, done: false, chunks: [],
+    running: false, runningChunks: new Set(), done: false, chunks: [],
     totalTokensIn: 0, totalTokensOut: 0, totalTimingMs: 0, error: '',
   })
 
@@ -1295,8 +1810,8 @@ export default function TranslatePage({ projectId, onBack }: Props) {
       freshSubs = Array.isArray(r.data) ? r.data : (r.data?.subtitles || r.data || [])
     } catch {}
 
-    // Load saved chunks (prompt/response) từ DB
-    let savedChunks: Record<number, {prompt: string; response: string; tokens_in: number; tokens_out: number; timing_ms: number; model: string}> = {}
+    // Load saved chunks (status + prompt/response + QC snapshot) từ DB
+    let savedChunks: Record<number, any> = {}
     try {
       const cr = await api.get(`/projects/${projectId}/translate/chunks`)
       const arr = Array.isArray(cr.data) ? cr.data : []
@@ -1308,29 +1823,43 @@ export default function TranslatePage({ projectId, onBack }: Props) {
       const chunkSubs = freshSubs.filter(
         (s: Subtitle) => s.index >= scene.tu_dong && s.index <= scene.den_dong
       )
-      // Chỉ coi là "done" nếu có original_text (đã được dịch qua pipeline)
-      const hasDone = chunkSubs.some((s: Subtitle) => s.original_text && s.original_text.trim().length > 0)
+      // Trạng thái chunk lấy thẳng từ DB (translate_chunks.status), không phải đoán.
+      const saved      = savedChunks[i]
+      const dbStatus   = (saved?.status || '') as 'wait' | 'run' | 'done' | 'err' | ''
+      const hasResponse = !!(saved && (saved.response || '').trim().length > 0)
+      // Nếu DB không có status (row cũ trước migration) → fallback: có response = done
+      const status: 'wait' | 'run' | 'done' | 'err' =
+        dbStatus || (hasResponse ? 'done' : 'wait')
+
       const entries = chunkSubs.map((s: Subtitle) => ({
         index:      s.index,
         original:   s.original_text || '',
         translated: s.text || '',
         speaker:    (s as any).character?.name || '',
       }))
-      const saved = savedChunks[i]
       return {
         index:     i,
         startLine: scene.tu_dong,
         endLine:   scene.den_dong,
         lineCount: scene.den_dong - scene.tu_dong + 1,
-        status:    (hasDone ? 'done' : 'wait') as 'done' | 'wait',
+        status,
         tomTat:    scene.tom_tat || '',
         response:  saved?.response  || '',
         prompt:    saved?.prompt    || '',
         tokensIn:  saved?.tokens_in  || 0,
         tokensOut: saved?.tokens_out || 0,
         timingMs:  saved?.timing_ms  || 0,
-        error:     '',
-        entries:   hasDone ? entries : [],
+        error:     saved?.error || '',
+        // entries chỉ hiển thị khi status='done' (chunk đã thực sự được dịch)
+        entries:   (status === 'done' || status === 'run') ? entries : [],
+        // QC snapshot — nếu có sẽ tự restore khi user click vào chunk
+        qcVanDe:    saved?.qc_van_de    || null,
+        qcTongKet:  saved?.qc_tong_ket  || null,
+        qcTokensIn: saved?.qc_tokens_in || 0,
+        qcTokensOut:saved?.qc_tokens_out|| 0,
+        qcTimingMs: saved?.qc_timing_ms || 0,
+        qcModel:    saved?.qc_model     || '',
+        qcRunAt:    saved?.qc_run_at    || '',
       }
     })
 
@@ -1395,6 +1924,98 @@ export default function TranslatePage({ projectId, onBack }: Props) {
 
   // ── Pass 3 ──────────────────────────────────────────────────────────────────
 
+  // Helper: gắn SSE listener cho progress của Pass 3.
+  // Tách riêng để cả handleRunPass3 (full run) lẫn handleRetryChunk (dịch lại 1 chunk)
+  // đều dùng chung cơ chế stream progress.
+  const _attachPass3SSE = useCallback(() => {
+    // Đóng SSE cũ nếu còn — tránh duplicate listeners gây state corrupt
+    if (esRef.current) {
+      esRef.current.close()
+      esRef.current = null
+    }
+    const es = new EventSource(`/dub/api/projects/${projectId}/translate/progress`)
+    esRef.current = es
+
+    es.addEventListener('progress', async (e: MessageEvent) => {
+      const d = JSON.parse(e.data)
+
+      if (d.stage === 'chunk_start') {
+        setPass3(s => {
+          const rc = new Set(s.runningChunks)
+          rc.add(d.chunk_index)
+          return {
+            ...s,
+            runningChunks: rc,
+            chunks: s.chunks.map(ch =>
+              ch.index === d.chunk_index ? { ...ch, status: 'run' as const } : ch
+            ),
+          }
+        })
+      } else if (d.stage === 'chunk_done') {
+        const entries = (d.entries || []).map((e: any) => ({
+          index:      e.index,
+          original:   e.original   || '',
+          translated: e.translated || '',
+          speaker:    e.speaker    || '',
+        }))
+        setPass3(s => {
+          const rc = new Set(s.runningChunks)
+          rc.delete(d.chunk_index)
+          return {
+            ...s,
+            runningChunks: rc,
+            totalTokensIn:  s.totalTokensIn  + (d.tokens_in  || 0),
+            totalTokensOut: s.totalTokensOut + (d.tokens_out || 0),
+            totalTimingMs:  s.totalTimingMs  + (d.timing_ms  || 0),
+            chunks: s.chunks.map(ch =>
+              ch.index === d.chunk_index ? {
+                ...ch,
+                status:    'done' as const,
+                response:  d.response  || '',
+                prompt:    d.prompt    || '',
+                tokensIn:  d.tokens_in  || 0,
+                tokensOut: d.tokens_out || 0,
+                timingMs:  d.timing_ms  || 0,
+                error:     '',
+                entries,
+              } : ch
+            ),
+          }
+        })
+      } else if (d.stage === 'chunk_error') {
+        setPass3(s => {
+          const rc = new Set(s.runningChunks)
+          rc.delete(d.chunk_index)
+          return {
+            ...s,
+            runningChunks: rc,
+            chunks: s.chunks.map(ch =>
+              ch.index === d.chunk_index
+                ? { ...ch, status: 'err' as const, error: d.error || d.message || 'Lỗi' }
+                : ch
+            ),
+          }
+        })
+      } else if (d.stage === 'pass3') {
+        setPass3(s => ({ ...s }))
+      } else if (d.stage === 'done') {
+        es.close()
+        setPass3(s => ({ ...s, running: false, runningChunks: new Set(), done: s.chunks.every(c => c.status === 'done') }))
+        // KHÔNG gọi loadProject() ở đây — nó trigger buildChunksFromBible → reset toàn bộ
+        // chunk về wait (vì DB chưa kịp flush status=done cho tất cả chunks).
+        // State chunk đã được cập nhật đúng real-time qua chunk_done events ở trên.
+      } else if (d.stage === 'error') {
+        es.close()
+        setPass3(s => ({ ...s, running: false, runningChunks: new Set(), error: d.message || 'Lỗi không xác định' }))
+      }
+    })
+
+    es.onerror = () => {
+      es.close()
+      setPass3(s => ({ ...s, running: false, runningChunks: new Set(), error: 'Mất kết nối SSE' }))
+    }
+  }, [projectId])
+
   const handleRunPass3 = useCallback(async () => {
     const apiKey = getApiKey(config, config.model_pass3)
     if (!apiKey) { alert('Chưa có API key!'); return }
@@ -1408,77 +2029,63 @@ export default function TranslatePage({ projectId, onBack }: Props) {
         concurrency: config.concurrency,
         enable_qc:   false,
       })
-
-      const es = new EventSource(`/dub/api/projects/${projectId}/translate/progress`)
-      esRef.current = es
-
-      es.addEventListener('progress', async (e: MessageEvent) => {
-        const d = JSON.parse(e.data)
-
-        if (d.stage === 'chunk_start') {
-          setPass3(s => ({
-            ...s,
-            chunks: s.chunks.map(ch =>
-              ch.index === d.chunk_index ? { ...ch, status: 'run' as const } : ch
-            ),
-          }))
-        } else if (d.stage === 'chunk_done') {
-          // BE trả entries: [{index, original, translated, speaker}]
-          const entries = (d.entries || []).map((e: any) => ({
-            index:      e.index,
-            original:   e.original   || '',
-            translated: e.translated || '',
-            speaker:    e.speaker    || '',
-          }))
-          setPass3(s => ({
-            ...s,
-            totalTokensIn:  s.totalTokensIn  + (d.tokens_in  || 0),
-            totalTokensOut: s.totalTokensOut + (d.tokens_out || 0),
-            totalTimingMs:  s.totalTimingMs  + (d.timing_ms  || 0),
-            chunks: s.chunks.map(ch =>
-              ch.index === d.chunk_index ? {
-                ...ch,
-                status:    'done' as const,
-                response:  d.response  || '',
-                prompt:    d.prompt    || '',
-                tokensIn:  d.tokens_in  || 0,
-                tokensOut: d.tokens_out || 0,
-                timingMs:  d.timing_ms  || 0,
-                entries,
-              } : ch
-            ),
-          }))
-        } else if (d.stage === 'chunk_error') {
-          setPass3(s => ({
-            ...s,
-            chunks: s.chunks.map(ch =>
-              ch.index === d.chunk_index
-                ? { ...ch, status: 'err' as const, error: d.error || d.message || 'Lỗi' }
-                : ch
-            ),
-          }))
-        } else if (d.stage === 'pass3') {
-          // Legacy event — cập nhật message chung (không có chunk_index)
-          setPass3(s => ({ ...s }))
-        } else if (d.stage === 'done') {
-          es.close()
-          setPass3(s => ({ ...s, running: false, done: true }))
-          loadProject(projectId)
-          // Không rebuild chunks ở đây — giữ nguyên prompt/response/entries từ SSE
-        } else if (d.stage === 'error') {
-          es.close()
-          setPass3(s => ({ ...s, running: false, error: d.message || 'Lỗi không xác định' }))
-        }
-      })
-
-      es.onerror = () => {
-        es.close()
-        setPass3(s => ({ ...s, running: false, error: 'Mất kết nối SSE' }))
-      }
+      _attachPass3SSE()
     } catch (err: any) {
       setPass3(s => ({ ...s, running: false, error: err?.response?.data?.detail || err?.message || 'Lỗi Pass 3' }))
     }
-  }, [projectId, config, pass1.bible])
+  }, [projectId, config, pass1.bible, _attachPass3SSE])
+
+  // Dịch các chunk còn lại (wait + err), KHÔNG động vào chunks done.
+  // Đây là hành vi mặc định khi user click nút "Dịch tiếp" ở header.
+  const handleRunRemaining = useCallback(async () => {
+    const apiKey = getApiKey(config, config.model_pass3)
+    if (!apiKey) { alert('Chưa có API key!'); return }
+    if (!pass1.bible) { alert('Cần chạy Pass 1 trước!'); return }
+
+    // Lấy chunks chưa dịch (wait/err) từ state hiện tại
+    const remaining = pass3.chunks.filter(c => c.status === 'wait' || c.status === 'err')
+    if (remaining.length === 0) {
+      alert('Tất cả chunks đã dịch xong!\n\nNếu muốn dịch lại toàn bộ, dùng nút "🔄 Dịch lại tất cả".')
+      return
+    }
+    const chunkIndices = remaining.map(c => c.index)
+
+    // Reset các chunk được chọn về wait (chunks done giữ nguyên)
+    setPass3(s => ({
+      ...s,
+      running: true,
+      done: false,
+      error: '',
+      // KHÔNG reset chunks state ở đây — chunks wait/err không có data cần clear
+      // Chỉ đảm bảo running=true để header hiện nút Dừng
+    }))
+
+    try {
+      await api.post(`/projects/${projectId}/translate/run-chunks`, {
+        api_key:        apiKey,
+        model:          config.model_pass3,
+        concurrency:    config.concurrency,
+        chunk_indices:  chunkIndices,
+      })
+      _attachPass3SSE()
+    } catch (err: any) {
+      setPass3(s => ({ ...s, running: false, error: err?.response?.data?.detail || err?.message || 'Lỗi dịch' }))
+    }
+  }, [projectId, config, pass1.bible, pass3.chunks, _attachPass3SSE])
+
+  // Dịch LẠI toàn bộ chunks (kể cả đã done) — cần confirm vì sẽ ghi đè kết quả cũ.
+  const handleRunAll = useCallback(async () => {
+    const doneCount = pass3.chunks.filter(c => c.status === 'done').length
+    if (doneCount > 0) {
+      const ok = window.confirm(
+        `Dịch LẠI toàn bộ ${pass3.chunks.length} chunks?\n\n` +
+        `${doneCount} chunks đã dịch sẽ bị GHI ĐÈ — bản dịch hiện tại + QC review của các chunks này sẽ mất.\n\n` +
+        `Nếu chỉ muốn dịch các chunks chưa xong, dùng nút "▶ Dịch tiếp".\n\nTiếp tục?`
+      )
+      if (!ok) return
+    }
+    handleRunPass3()
+  }, [pass3.chunks, handleRunPass3])
 
   const handleStop = useCallback(() => {
     esRef.current?.close()
@@ -1486,15 +2093,76 @@ export default function TranslatePage({ projectId, onBack }: Props) {
     setPass3(s => ({ ...s, running: false }))
   }, [projectId])
 
-  const handleRetryChunk = useCallback((chunkIndex: number) => {
-    // Reset chunk về wait, sau đó chạy lại Pass 3 (BE sẽ skip các chunk đã done)
+  // Dịch lại 1 chunk cụ thể — gọi endpoint /translate/run-chunks
+  // để BE chỉ chạy đúng chunk đó (không phải full pass3).
+  const handleRetryChunk = useCallback(async (chunkIndex: number) => {
+    const apiKey = getApiKey(config, config.model_pass3)
+    if (!apiKey) { alert('Chưa có API key!'); return }
+    if (!pass1.bible) { alert('Cần chạy Pass 1 trước!'); return }
+
+    // Set chunk về 'run' ngay để UI spinner hiện đúng (không cần chờ SSE chunk_start)
     setPass3(s => ({
       ...s,
-      chunks: s.chunks.map(c => c.index === chunkIndex ? { ...c, status: 'wait', error: '', response: '', entries: [] } : c),
+      done: false,
+      error: '',
+      chunks: s.chunks.map(c => c.index === chunkIndex
+        ? { ...c, status: 'run' as const, error: '', response: '', prompt: '',
+            tokensIn: 0, tokensOut: 0, timingMs: 0, entries: [] }
+        : c),
     }))
-    // Trigger lại pass3 — BE tự skip chunk đã done
-    setTimeout(() => handleRunPass3(), 100)
-  }, [])  // handleRunPass3 sẽ được gọi sau khi state update
+
+    try {
+      await api.post(`/projects/${projectId}/translate/run-chunks`, {
+        api_key:        apiKey,
+        model:          config.model_pass3,
+        concurrency:    config.concurrency,
+        chunk_indices:  [chunkIndex],
+      })
+      _attachPass3SSE()
+    } catch (err: any) {
+      setPass3(s => ({ ...s, running: false, error: err?.response?.data?.detail || err?.message || 'Lỗi dịch lại chunk' }))
+    }
+  }, [projectId, config, pass1.bible, _attachPass3SSE])
+
+  // Xóa bản dịch của 1 chunk: reset chunk về 'wait', xóa row translate_chunks,
+  // xóa text dịch + character_id của các subtitle trong phạm vi chunk.
+  const handleDeleteChunk = useCallback(async (chunkIndex: number) => {
+    const ok = window.confirm(
+      `Xóa bản dịch chunk ${chunkIndex + 1}?\n\n` +
+      `Toàn bộ bản dịch + gán nhân vật + kết quả QC của chunk này sẽ bị xóa. ` +
+      `Bản gốc tiếng Trung được giữ nguyên.\n\nKhông thể hoàn tác.`
+    )
+    if (!ok) return
+
+    try {
+      await api.delete(`/projects/${projectId}/translate/chunks/${chunkIndex}`)
+      // Reset chunk trong state về wait, clear hết
+      setPass3(s => ({
+        ...s,
+        chunks: s.chunks.map(c => c.index !== chunkIndex ? c : {
+          ...c,
+          status:    'wait' as const,
+          response:  '',
+          prompt:    '',
+          tokensIn:  0,
+          tokensOut: 0,
+          timingMs:  0,
+          error:     '',
+          entries:   [],
+          qcVanDe:   null,
+          qcTongKet: null,
+          qcTokensIn: 0,
+          qcTokensOut: 0,
+          qcTimingMs: 0,
+          qcModel:    '',
+          qcRunAt:    '',
+        }),
+        done: false,
+      }))
+    } catch (err: any) {
+      alert('Lỗi khi xóa: ' + (err?.response?.data?.detail || err?.message || 'Không xác định'))
+    }
+  }, [projectId])
 
   const handleEditCell = useCallback((chunkIndex: number, entryIndex: number, newText: string) => {
     setPass3(s => ({
@@ -1572,7 +2240,10 @@ export default function TranslatePage({ projectId, onBack }: Props) {
 
       {showConfig && (
         <ConfigModal
-          onClose={() => setShowConfig(false)}
+          onClose={() => {
+            setShowConfig(false)
+            setConfig(loadConfig())  // reload config mới nhất từ localStorage
+          }}
           modelStatus="unknown"
           onToggleModel={() => {}}
         />
@@ -1621,9 +2292,21 @@ export default function TranslatePage({ projectId, onBack }: Props) {
                 ),
               }))
             }}
-            onStart={handleRunPass3}
+            onQCDone={(chunkIdx, info) => {
+              setPass3((s: Pass3State) => ({
+                ...s,
+                chunks: s.chunks.map((ch: ChunkState) =>
+                  ch.index === chunkIdx
+                    ? { ...ch, qcTokensIn: info.tokensIn, qcTokensOut: info.tokensOut, qcTimingMs: info.timingMs, qcModel: info.model }
+                    : ch
+                ),
+              }))
+            }}
+            onStartRemaining={handleRunRemaining}
+            onStartAll={handleRunAll}
             onStop={handleStop}
             onRetryChunk={handleRetryChunk}
+            onDeleteChunk={handleDeleteChunk}
             onEditCell={handleEditCell}
           />
         )}

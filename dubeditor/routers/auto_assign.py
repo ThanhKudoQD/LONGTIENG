@@ -366,7 +366,7 @@ async def _diarize_batch(audio_path: Path, job: dict, hf_token: str, batch_idx: 
             str(audio_path), hf_token,
             str(job["min_speakers"]), str(job["max_speakers"]),
             output_json
-        ], capture_output=True, text=True, timeout=600)
+        ], capture_output=True, text=True, timeout=1800)  # 30 phút — audio dài cần thời gian diarize
         if proc.returncode != 0:
             raise RuntimeError(f"Diarize batch {batch_idx} failed: {proc.stderr[-300:]}")
         with open(output_json) as f: segments = json.load(f)

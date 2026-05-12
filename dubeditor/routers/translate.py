@@ -22,6 +22,7 @@ from dubeditor.database import get_db, SessionLocal
 from dubeditor.models import Project, Subtitle, Character, TranslateChunk
 from dubeditor.schemas import (
     TranslateAnalyzeRequest, TranslateRunRequest, RetranslateRequest,
+    TranslateRunChunksRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,12 +201,35 @@ async def run_translation(pid: int, req: TranslateRunRequest,
         raise HTTPException(400, "Chưa có Bible. Hãy chạy Pass 1 trước.")
 
     bg.add_task(_run_pass3_bg, pid, req.api_key, req.model,
-                req.concurrency, req.enable_qc)
+                req.concurrency, req.enable_qc, None)
     return {"ok": True}
 
 
+@router.post("/projects/{pid}/translate/run-chunks")
+async def run_translation_chunks(pid: int, req: TranslateRunChunksRequest,
+                                  bg: BackgroundTasks, db: Session = Depends(get_db)):
+    """Dịch lại một số chunk cụ thể (theo index trong scene_map).
+
+    Dùng để cho phép FE bấm nút "Dịch lại chunk này" mà không phải
+    chạy lại toàn bộ Pass 3.
+    """
+    p = db.query(Project).filter(Project.id == pid).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+    if not p.bible_json:
+        raise HTTPException(400, "Chưa có Bible. Hãy chạy Pass 1 trước.")
+    if not req.chunk_indices:
+        raise HTTPException(400, "chunk_indices rỗng — không có chunk nào để dịch.")
+
+    only_set = set(int(i) for i in req.chunk_indices)
+    bg.add_task(_run_pass3_bg, pid, req.api_key, req.model,
+                req.concurrency, False, only_set)
+    return {"ok": True, "chunk_indices": sorted(only_set)}
+
+
 async def _run_pass3_bg(pid: int, api_key: str, model: str,
-                         concurrency: int, enable_qc: bool):
+                         concurrency: int, enable_qc: bool,
+                         only_indices: set | None = None):
     db = SessionLocal()
     try:
         t     = _load_translator()
@@ -217,9 +241,25 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
         ).order_by(Subtitle.index).all()
         srt_blocks = _subs_to_blocks(subs)
 
-        chunks = t.build_chunks_from_bible(srt_blocks, bible)
-        total  = len(chunks)
+        all_chunks = t.build_chunks_from_bible(srt_blocks, bible)
+
+        # Nếu chỉ định only_indices → giữ index gốc nhưng chỉ chạy các chunk được chọn.
+        # Quan trọng: chunk_idx truyền vào do_chunk phải khớp với index trong scene_map
+        # để FE update đúng chunk.
+        if only_indices is not None:
+            chunks_to_run = [(i, c) for i, c in enumerate(all_chunks) if i in only_indices]
+        else:
+            chunks_to_run = list(enumerate(all_chunks))
+
+        total  = len(chunks_to_run)
         done   = 0
+
+        if total == 0:
+            await _pub(pid, {
+                "stage": "done", "message": "Không có chunk nào để dịch.",
+                "percent": 100, "chunks_total": 0, "chunks_done": 0,
+            })
+            return
 
         await _pub(pid, {
             "stage": "pass3", "message": f"Bắt đầu dịch {total} chunks...",
@@ -241,6 +281,18 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
                     "chunk_index": chunk_idx,
                     "message": f"Đang dịch chunk {chunk_idx + 1}...",
                 })
+                # Pre-mark status='run' trong DB để khi user F5 thấy chunk đang chạy
+                try:
+                    tc_run = db.query(TranslateChunk).filter(
+                        TranslateChunk.project_id  == pid,
+                        TranslateChunk.chunk_index == chunk_idx,
+                    ).first()
+                    if tc_run:
+                        tc_run.status = "run"
+                        tc_run.error  = None
+                    db.commit()
+                except Exception:
+                    db.rollback()
                 try:
                     # pass3_translate_chunk trả tuple (entries, call_info)
                     entries, call_info = await t.pass3_translate_chunk(
@@ -302,19 +354,30 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
                                 if sub and not sub.character_id:
                                     sub.character_id = single_char_id
                                     entry["speaker"] = scene_nv_list[0]
-                    # Lưu prompt/response vào translate_chunks
+                    # Lưu prompt/response vào translate_chunks + đánh dấu status='done'
                     try:
                         tc = db.query(TranslateChunk).filter(
                             TranslateChunk.project_id  == pid,
                             TranslateChunk.chunk_index == chunk_idx,
                         ).first()
                         if tc:
+                            tc.status     = "done"
+                            tc.error      = None
                             tc.prompt     = call_info.get("prompt", "")
                             tc.response   = call_info.get("response", "")
                             tc.tokens_in  = call_info.get("tokens_in", 0)
                             tc.tokens_out = call_info.get("tokens_out", 0)
                             tc.timing_ms  = call_info.get("timing_ms", 0)
                             tc.model      = model
+                            # Bản dịch đã thay đổi → invalidate QC cũ (kết quả review
+                            # dựa trên bản dịch trước đó không còn đúng nữa).
+                            tc.qc_response   = None
+                            tc.qc_van_de     = None
+                            tc.qc_tong_ket   = None
+                            tc.qc_tokens_in  = 0
+                            tc.qc_tokens_out = 0
+                            tc.qc_timing_ms  = 0
+                            tc.qc_run_at     = None
                         else:
                             blocks = chunk.get("blocks") or []
                             s_line = blocks[0]["index"]  if blocks else 0
@@ -324,6 +387,7 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
                                 chunk_index = chunk_idx,
                                 start_line  = s_line,
                                 end_line    = e_line,
+                                status      = "done",
                                 prompt      = call_info.get("prompt", ""),
                                 response    = call_info.get("response", ""),
                                 tokens_in   = call_info.get("tokens_in", 0),
@@ -334,6 +398,7 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
                         db.commit()
                     except Exception as tc_err:
                         logger.warning(f"[TranslateChunk save] {tc_err}")
+                        db.rollback()
 
                     done += 1
                     await _pub(pid, {
@@ -352,6 +417,31 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
                     })
                 except Exception as e:
                     logger.error(f"[Pass3 pid={pid} chunk={chunk_idx}] {e}", exc_info=True)
+                    # Lưu status='err' + error message vào DB
+                    try:
+                        tc_err_row = db.query(TranslateChunk).filter(
+                            TranslateChunk.project_id  == pid,
+                            TranslateChunk.chunk_index == chunk_idx,
+                        ).first()
+                        if tc_err_row:
+                            tc_err_row.status = "err"
+                            tc_err_row.error  = str(e)[:500]
+                        else:
+                            blocks = chunk.get("blocks") or []
+                            s_line = blocks[0]["index"]  if blocks else 0
+                            e_line = blocks[-1]["index"] if blocks else 0
+                            db.add(TranslateChunk(
+                                project_id  = pid,
+                                chunk_index = chunk_idx,
+                                start_line  = s_line,
+                                end_line    = e_line,
+                                status      = "err",
+                                error       = str(e)[:500],
+                                model       = model,
+                            ))
+                        db.commit()
+                    except Exception:
+                        db.rollback()
                     done += 1
                     await _pub(pid, {
                         "stage":       "chunk_error",
@@ -363,7 +453,7 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
                         "error":       str(e)[:200],
                     })
 
-        await asyncio.gather(*[do_chunk(chunk, i) for i, chunk in enumerate(chunks)])
+        await asyncio.gather(*[do_chunk(chunk, idx) for idx, chunk in chunks_to_run])
 
         await _pub(pid, {
             "stage": "done",
@@ -394,7 +484,11 @@ async def progress_stream(pid: int):
                 try:
                     msg = await asyncio.wait_for(q.get(), timeout=5.0)
                     yield msg
-                    if '"done"' in msg or '"error"' in msg:
+                    # Chỉ đóng SSE khi gặp event 'done' / 'error' của Pass 3 (cấp pipeline).
+                    # Các stage QC như qc_done / chunk_done / qc_error KHÔNG đóng,
+                    # vì FE còn cần lắng nghe tiếp event sau đó (QC chunk khác,
+                    # hoặc tiếp tục Pass 3).
+                    if '"stage": "done"' in msg or '"stage": "error"' in msg:
                         break
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
@@ -499,21 +593,115 @@ async def reset(pid: int, db: Session = Depends(get_db)):
 
 @router.get("/projects/{pid}/translate/chunks")
 def get_translate_chunks(pid: int, db: Session = Depends(get_db)):
-    """Load prompt/response đã lưu cho tất cả chunks của project."""
+    """Load trạng thái + prompt/response + QC snapshot của tất cả chunks."""
     chunks = db.query(TranslateChunk).filter(
         TranslateChunk.project_id == pid
     ).order_by(TranslateChunk.chunk_index).all()
-    return [{
-        "chunk_index": c.chunk_index,
-        "start_line":  c.start_line,
-        "end_line":    c.end_line,
-        "prompt":      c.prompt or "",
-        "response":    c.response or "",
-        "tokens_in":   c.tokens_in,
-        "tokens_out":  c.tokens_out,
-        "timing_ms":   c.timing_ms,
-        "model":       c.model or "",
-    } for c in chunks]
+    out = []
+    for c in chunks:
+        # Parse QC JSON nếu có
+        qc_van_de   = None
+        qc_tong_ket = None
+        try:
+            if c.qc_van_de:
+                qc_van_de = json.loads(c.qc_van_de)
+        except Exception:
+            qc_van_de = None
+        try:
+            if c.qc_tong_ket:
+                qc_tong_ket = json.loads(c.qc_tong_ket)
+        except Exception:
+            qc_tong_ket = None
+
+        out.append({
+            "chunk_index":  c.chunk_index,
+            "start_line":   c.start_line,
+            "end_line":     c.end_line,
+            "status":       c.status or "wait",
+            "error":        c.error or "",
+            "prompt":       c.prompt or "",
+            "response":     c.response or "",
+            "tokens_in":    c.tokens_in,
+            "tokens_out":   c.tokens_out,
+            "timing_ms":    c.timing_ms,
+            "model":        c.model or "",
+            # QC snapshot
+            "qc_response":   c.qc_response or "",
+            "qc_van_de":     qc_van_de,
+            "qc_tong_ket":   qc_tong_ket,
+            "qc_tokens_in":  c.qc_tokens_in or 0,
+            "qc_tokens_out": c.qc_tokens_out or 0,
+            "qc_timing_ms":  c.qc_timing_ms or 0,
+            "qc_model":      c.qc_model or "",
+            "qc_run_at":     c.qc_run_at.isoformat() if c.qc_run_at else "",
+        })
+    return out
+
+
+@router.delete("/projects/{pid}/translate/chunks/{chunk_index}")
+def delete_translate_chunk(pid: int, chunk_index: int, db: Session = Depends(get_db)):
+    """Xóa bản dịch của 1 chunk:
+      - Xóa row trong translate_chunks (prompt, response, QC...)
+      - Reset Subtitle trong phạm vi chunk: clear text dịch, clear character_id
+        (giữ original_text vì đó là gốc tiếng Trung, không phải bản dịch).
+
+    Sau khi xóa: chunk sẽ về trạng thái 'wait' (chưa dịch).
+    """
+    p = db.query(Project).filter(Project.id == pid).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+
+    # Lấy phạm vi dòng từ scene_map (nếu có) hoặc từ row translate_chunks
+    bible = json.loads(p.bible_json) if p.bible_json else {}
+    scene_map = bible.get("scene_map") or []
+
+    start_line = end_line = None
+    if 0 <= chunk_index < len(scene_map):
+        scene = scene_map[chunk_index]
+        start_line = scene.get("tu_dong")
+        end_line   = scene.get("den_dong")
+
+    # Fallback: lấy từ row translate_chunks
+    tc = db.query(TranslateChunk).filter(
+        TranslateChunk.project_id  == pid,
+        TranslateChunk.chunk_index == chunk_index,
+    ).first()
+    if tc and (start_line is None or end_line is None):
+        start_line = tc.start_line
+        end_line   = tc.end_line
+
+    if start_line is None or end_line is None:
+        raise HTTPException(400, "Không xác định được phạm vi dòng của chunk này")
+
+    # Reset subtitles trong phạm vi chunk
+    subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.index >= start_line,
+        Subtitle.index <= end_line,
+    ).all()
+    reset_count = 0
+    for s in subs:
+        # Restore text về original (gốc tiếng Trung) nếu đã có original_text,
+        # ngược lại để text rỗng. KHÔNG xóa original_text vì đó là gốc, không phải bản dịch.
+        if s.original_text:
+            s.text = s.original_text
+        else:
+            s.text = ""
+        s.character_id = None
+        reset_count += 1
+
+    # Xóa row translate_chunks (hoặc reset về wait nếu muốn giữ history)
+    if tc:
+        db.delete(tc)
+
+    db.commit()
+    return {
+        "ok": True,
+        "chunk_index": chunk_index,
+        "start_line":  start_line,
+        "end_line":    end_line,
+        "subs_reset":  reset_count,
+    }
 
 
 
@@ -547,9 +735,10 @@ async def fix_speaker_text(pid: int, db: Session = Depends(get_db)):
 # ─── QC Review endpoint ────────────────────────────────────────────────────────
 
 class ReviewEntry(BaseModel):
-    index: int
-    original: str
+    index:      int
+    original:   str
     translated: str
+    speaker:    str = ""    # tên Hán Việt của nhân vật đang được gán cho dòng này
 
 class ReviewChunkRequest(BaseModel):
     api_key:     str
@@ -559,7 +748,25 @@ class ReviewChunkRequest(BaseModel):
 
 @router.post("/projects/{pid}/translate/review-chunk")
 async def review_chunk(pid: int, req: ReviewChunkRequest, db: Session = Depends(get_db)):
-    """QC Review 1 chunk — dùng pass4_review_chunk từ translator."""
+    """QC Review 1 chunk — dùng pass4_review_chunk từ translator.
+
+    Publish SSE events trong các stage để FE hiển thị trạng thái rõ ràng:
+      - qc_start:      bắt đầu (đã build prompt, ước tính ETA)
+      - qc_calling:    đang gọi API
+      - qc_retrying:   gặp retry (kèm wait & error)
+      - qc_responding: đã nhận response, đang parse
+      - qc_done:       hoàn tất (kèm tokens, timing)
+      - qc_error:      lỗi
+
+    Output mỗi entry FE: {
+      index, original, translated,
+      fixed, issue,                        # backward-compat (cho bảng cũ)
+      loai_loi,                            # speaker|van_phong|xung_ho|...
+      speaker_hien_tai, speaker_de_xuat,
+      speaker_de_xuat_char_id,             # resolve qua bảng Characters
+      bang_chung, do_tin_cay,
+    }
+    """
     p = db.query(Project).filter(Project.id == pid).first()
     if not p or not p.bible_json:
         raise HTTPException(400, "Project chưa có Bible")
@@ -571,45 +778,200 @@ async def review_chunk(pid: int, req: ReviewChunkRequest, db: Session = Depends(
 
     bible = json.loads(p.bible_json)
 
-    # Build chunk object đơn giản để truyền vào pass4
+    # Lookup scene_info thật từ Bible.scene_map theo chunk_index.
+    scene_map = bible.get("scene_map") or []
+    scene_info = None
+    if 0 <= req.chunk_index < len(scene_map):
+        scene_info = scene_map[req.chunk_index]
+
     chunk = {
         "index":      req.chunk_index,
         "blocks":     [],
-        "scene_info": None,
-        "tom_tat":    "",
+        "scene_info": scene_info,
+        "tom_tat":    (scene_info or {}).get("tom_tat", ""),
     }
-    # entries format cho pass4: [{index, original_text, translated_text}]
     entries_for_p4 = [
-        {"index": e.index, "original_text": e.original, "translated_text": e.translated}
+        {
+            "index":           e.index,
+            "original_text":   e.original,
+            "translated_text": e.translated,
+            "speaker":         e.speaker,
+        }
         for e in req.entries
     ]
 
-    result = await t.pass4_review_chunk(
-        chunk=chunk,
-        bible=bible,
-        entries=entries_for_p4,
-        api_key=req.api_key,
-        model=req.model,
-    )
+    # ETA dự đoán: dựa trên số dòng × hệ số kinh nghiệm (model output ~10-15 token/giây
+    # cho Gemini Flash, ~5 token/giây cho Pro). Mỗi dòng ~30 token output → 2-6s/dòng.
+    n_lines = len(req.entries)
+    is_pro_model = "pro" in (req.model or "").lower() or "gpt-4" in (req.model or "").lower() or "gpt-5" in (req.model or "").lower()
+    eta_seconds = int(n_lines * (4.5 if is_pro_model else 2.0)) + 5  # +5s overhead
+
+    # SSE: qc_start
+    await _pub(pid, {
+        "stage":       "qc_start",
+        "chunk_index": req.chunk_index,
+        "message":     f"Đang chuẩn bị Pass 4 cho {n_lines} dòng...",
+        "n_lines":     n_lines,
+        "model":       req.model,
+        "eta_seconds": eta_seconds,
+    })
+
+    # Callback từ translator khi retry — forward thành event qc_retrying
+    async def on_retry(attempt: int, max_retry: int, wait: int, err: str):
+        await _pub(pid, {
+            "stage":       "qc_retrying",
+            "chunk_index": req.chunk_index,
+            "attempt":     attempt,
+            "max_retry":   max_retry,
+            "wait":        wait,
+            "error":       str(err)[:200],
+            "message":     f"Retry {attempt}/{max_retry} sau {wait}s ({str(err)[:60]})",
+        })
+
+    # SSE: qc_calling
+    await _pub(pid, {
+        "stage":       "qc_calling",
+        "chunk_index": req.chunk_index,
+        "message":     f"Đang gọi {req.model}... (ETA ~{eta_seconds}s)",
+        "eta_seconds": eta_seconds,
+    })
+
+    try:
+        result = await t.pass4_review_chunk(
+            chunk=chunk,
+            bible=bible,
+            entries=entries_for_p4,
+            api_key=req.api_key,
+            model=req.model,
+            on_retry=on_retry,
+        )
+    except Exception as e:
+        logger.error(f"pass4 error: {e}", exc_info=True)
+        await _pub(pid, {
+            "stage":       "qc_error",
+            "chunk_index": req.chunk_index,
+            "message":     f"Lỗi: {str(e)[:200]}",
+            "error":       str(e),
+        })
+        raise HTTPException(500, f"Pass 4 lỗi: {e}")
+
     if not result:
+        await _pub(pid, {
+            "stage":       "qc_error",
+            "chunk_index": req.chunk_index,
+            "message":     "Pass 4 không trả về kết quả",
+        })
         raise HTTPException(500, "Pass 4 không trả về kết quả")
 
-    # Chuyển format pass4 → FE format
-    # pass4 trả: {tong_ket, van_de: [{dong, goc, dich_hien_tai, loai_loi, mo_ta, goi_y_sua}]}
-    van_de = result.get("van_de") or []
+    # SSE: qc_responding — đã nhận response, đang xử lý
+    await _pub(pid, {
+        "stage":       "qc_responding",
+        "chunk_index": req.chunk_index,
+        "message":     "Đã nhận phản hồi, đang phân tích...",
+        "tokens_out":  result.get("_tokens_out", 0),
+    })
+
+    van_de   = result.get("van_de") or []
     tong_ket = result.get("tong_ket") or {}
 
+    # Resolve speaker_de_xuat → character_id
+    chars = db.query(Character).filter(Character.project_id == pid).all()
+    name_to_id = {c.name: c.id for c in chars}
+
+    issue_map = {v.get("dong"): v for v in van_de if v.get("dong") is not None}
     fe_entries = []
-    issue_map = {v["dong"]: v for v in van_de}
     for e in req.entries:
         issue = issue_map.get(e.index)
+        if not issue:
+            fe_entries.append({
+                "index":                    e.index,
+                "original":                 e.original,
+                "translated":               e.translated,
+                "speaker":                  e.speaker,
+                "fixed":                    e.translated,
+                "issue":                    "",
+                "loai_loi":                 "",
+                "speaker_hien_tai":         e.speaker,
+                "speaker_de_xuat":          "",
+                "speaker_de_xuat_char_id":  None,
+                "bang_chung":               "",
+                "do_tin_cay":               "",
+            })
+            continue
+
+        loai_loi     = (issue.get("loai_loi") or "").strip()
+        speaker_de_x = (issue.get("speaker_de_xuat") or "").strip()
+        char_id      = name_to_id.get(speaker_de_x) if speaker_de_x else None
+        goi_y        = (issue.get("goi_y_sua") or "").strip() or e.translated
+        bang_chung   = (issue.get("bang_chung") or issue.get("mo_ta") or "").strip()
+        do_tin_cay   = (issue.get("do_tin_cay") or "").strip().lower()
+        issue_text   = f"[{loai_loi}] {bang_chung}" if loai_loi else bang_chung
+
         fe_entries.append({
-            "index":      e.index,
-            "original":   e.original,
-            "translated": e.translated,
-            "fixed":      issue["goi_y_sua"] if issue else e.translated,
-            "issue":      f"[{issue.get('loai_loi','')}] {issue.get('mo_ta','')}" if issue else "",
+            "index":                    e.index,
+            "original":                 e.original,
+            "translated":               e.translated,
+            "speaker":                  e.speaker,
+            "fixed":                    goi_y,
+            "issue":                    issue_text,
+            "loai_loi":                 loai_loi,
+            "speaker_hien_tai":         (issue.get("speaker_hien_tai") or e.speaker or ""),
+            "speaker_de_xuat":          speaker_de_x,
+            "speaker_de_xuat_char_id":  char_id,
+            "bang_chung":               bang_chung,
+            "do_tin_cay":               do_tin_cay,
         })
+
+    # SSE: qc_done
+    await _pub(pid, {
+        "stage":          "qc_done",
+        "chunk_index":    req.chunk_index,
+        "message":        f"Xong! {len(van_de)} vấn đề phát hiện.",
+        "tokens_in":      result.get("_tokens_in", 0),
+        "tokens_out":     result.get("_tokens_out", 0),
+        "timing_ms":      result.get("_timing_ms", 0),
+        "dong_co_van_de": len(van_de),
+    })
+
+    # Snapshot kết quả QC vào DB để khi user chuyển chunk khác rồi quay lại
+    # (hoặc F5) vẫn còn — không phải chạy lại Pass 4 tốn tiền.
+    try:
+        from datetime import datetime
+        tc_qc = db.query(TranslateChunk).filter(
+            TranslateChunk.project_id  == pid,
+            TranslateChunk.chunk_index == req.chunk_index,
+        ).first()
+        # van_de lưu kèm các field đã resolve (char_id) để FE không phải resolve lại
+        van_de_to_save = []
+        for e in fe_entries:
+            if e.get("loai_loi"):
+                van_de_to_save.append({
+                    "index":                    e["index"],
+                    "loai_loi":                 e["loai_loi"],
+                    "speaker_hien_tai":         e["speaker_hien_tai"],
+                    "speaker_de_xuat":          e["speaker_de_xuat"],
+                    "speaker_de_xuat_char_id":  e["speaker_de_xuat_char_id"],
+                    "bang_chung":               e["bang_chung"],
+                    "do_tin_cay":               e["do_tin_cay"],
+                    "fixed":                    e["fixed"],
+                    "original":                 e["original"],
+                    "translated":               e["translated"],
+                    "speaker":                  e["speaker"],
+                    "issue":                    e["issue"],
+                })
+        if tc_qc:
+            tc_qc.qc_response   = json.dumps(result, ensure_ascii=False)
+            tc_qc.qc_van_de     = json.dumps(van_de_to_save, ensure_ascii=False)
+            tc_qc.qc_tong_ket   = json.dumps(tong_ket, ensure_ascii=False)
+            tc_qc.qc_tokens_in  = result.get("_tokens_in", 0)
+            tc_qc.qc_tokens_out = result.get("_tokens_out", 0)
+            tc_qc.qc_timing_ms  = result.get("_timing_ms", 0)
+            tc_qc.qc_model      = req.model
+            tc_qc.qc_run_at     = datetime.utcnow()
+            db.commit()
+    except Exception as save_err:
+        logger.warning(f"[QC snapshot save] {save_err}")
+        db.rollback()
 
     return {
         "entries":      fe_entries,
