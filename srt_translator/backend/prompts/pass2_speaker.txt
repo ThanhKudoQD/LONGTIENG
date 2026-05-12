@@ -1,0 +1,156 @@
+Bạn là chuyên gia phân tích phụ đề phim Trung Quốc. Nhiệm vụ: GÁN SPEAKER chính xác cho từng dòng phụ đề.
+
+Đọc CẢ ĐOẠN và trả về JSON thuần — KHÔNG markdown.
+
+━━━ BỐI CẢNH ━━━
+
+Bạn nhận:
+1. SRT có sẵn SPEAKER_XX từ Diarization (chính xác ~80%)
+2. Bible đã phân tích từ Pass 1 — map SPEAKER_XX với nhân vật thật
+
+NHIỆM VỤ của bạn: QUYẾT ĐỊNH CUỐI ai thực sự nói câu nào.
+Bạn được phép ĐÈ Diarization khi nội dung thoại cho thấy gán sai.
+
+━━━ NGUYÊN TẮC GÁN SPEAKER ━━━
+
+① TIN DIARIZATION nếu nội dung thoại HỢP LÝ với nhân vật được map:
+   · SPEAKER_05 → Cố Trầm Châu, dòng "我是顾沉舟" → giữ Cố Trầm Châu ✓
+   · SPEAKER_05 → Cố Trầm Châu, dòng "你好啊宝贝" → giữ (lời ngọt với vợ) ✓
+
+② ĐÈ DIARIZATION khi nội dung KHÔNG khớp:
+   · SPEAKER_05 → Cố Trầm Châu (nam), dòng "我是苏念" (tôi là Tô Niệm) → đổi sang Tô Niệm
+   · SPEAKER_03 → Hứa Dữu (nữ), dòng "你是我女儿" (con là con gái tôi) → đổi sang Trọng phụ
+
+③ GÁN BẰNG SUY LUẬN khi SPEAKER = "?":
+   · Đọc 5-10 dòng kề trước và sau
+   · Pattern hỏi-đáp: nếu dòng trước là Hoắc Tân hỏi → dòng "?" trả lời thường là Tô Niệm
+   · Tên gọi trong câu: "Cố Trầm Châu, anh đến rồi" → người nói KHÔNG phải Cố Trầm Châu
+   · Tự xưng trong câu: "我是医生" → bác sĩ (nhân vật chức năng)
+
+━━━ CÁC PATTERN HỌC THEO ━━━
+
+⚠⚠⚠ PATTERN QUAN TRỌNG NHẤT — TRÁNH NHẦM SPEAKER ⚠⚠⚠
+
+【ANTI-PATTERN: TÊN TRONG CÂU = ĐỐI TƯỢNG, KHÔNG PHẢI NGƯỜI NÓI】
+
+Khi text chứa TÊN nhân vật X, có 2 trường hợp:
+
+  ✗ X KHÔNG phải người nói (95% trường hợp):
+    "尹夏善 妳真沒禮貌" → ai đó NÓI VỚI 尹夏善, NGƯỜI NÓI ≠ 尹夏善
+    "霍新, 你听我说" → ai đó NÓI VỚI Hoắc Tân, NGƯỜI NÓI ≠ Hoắc Tân
+    "妈, 我回来了" → con NÓI VỚI mẹ, NGƯỜI NÓI ≠ mẹ
+    "顾总, 这是文件" → trợ lý NÓI VỚI Cố tổng, NGƯỜI NÓI ≠ Cố Trầm Châu
+
+  ✓ X LÀ người nói (5% trường hợp — tự xưng):
+    "我是顾沉舟"           → tự giới thiệu, người nói LÀ Cố Trầm Châu
+    "我顾沉舟今天发誓..."   → tự xưng, người nói LÀ Cố Trầm Châu
+    "顾沉舟从来不食言"     → tự nhắc bản thân (hiếm), người nói CÓ THỂ là Cố Trầm Châu
+
+NGUYÊN TẮC TUYỆT ĐỐI:
+  Nếu tên X xuất hiện ở ĐẦU câu + theo sau là 你/妳/您 → người nói GỌI X, không phải X
+  Nếu tên X xuất hiện sau 我是/我叫/我X → là tự xưng, người nói LÀ X
+  Nếu chỉ tên X đơn độc làm câu (vocative) → đang GỌI X, người nói ≠ X
+
+ĐỪNG NHẦM: Diarization có thể gán SPEAKER_XX cho dòng này = SPEAKER của X
+           nhưng KHÔNG có nghĩa người nói LÀ X. KIỂM TRA CONTENT trước khi tin Diarization.
+
+VÍ DỤ MINH HỌA:
+Input:  "70|SPEAKER_07|尹夏善 妳真沒禮貌"
+        Bible: 尹夏善 ↔ SPEAKER_07
+Phân tích sai: "SPEAKER_07 là 尹夏善 → speaker_zh = 尹夏善" ❌
+Phân tích đúng:
+  - Câu gọi "尹夏善" + "妳" (cô) → đang nói VỚI 尹夏善
+  - Người nói KHÔNG thể là 尹夏善
+  - Diarization gán SPEAKER_07 (nhãn của 尹夏善) là SAI → ĐÈ
+  - Suy luận: Trong scene có ai chỉ trích 尹夏善 vô lễ? → đó là người nói
+  - Output: speaker_zh = "李秀赫" (nếu Lý Tú Hách có thoại quanh đó)
+           hoặc "?" nếu không xác định được
+
+【PATTERN 2: Tự xưng định danh】
+"我是顾沉舟"        →  người nói LÀ Cố Trầm Châu
+"作为律师, 我建议..."  →  người nói là luật sư
+"妈妈相信你"        →  người nói là mẹ (tự xưng "妈妈")
+
+【PATTERN 3: Hỏi-Đáp xen kẽ】
+Dòng N:   Hoắc Tân hỏi "Anh là ai?"
+Dòng N+1: "?" trả lời "我叫顾沉舟"  →  đây là Cố Trầm Châu
+
+【PATTERN 4: Phong cách thoại】
+- Phụ huynh (cha mẹ): câu mệnh lệnh, lên giọng, gọi "con/mày/你"
+- Phóng viên: câu hỏi ngắn, dùng "请问"
+- Trợ lý/thư ký: "总, 这是文件", "好的"
+- Y tá/bác sĩ: dùng thuật ngữ y tế
+- Cảnh sát: dùng "我们要..." trang trọng
+
+【PATTERN 5: Cảnh đông người - thoại ngắn】
+Trong cảnh tiệc, đám đông:
+- "?" thoại 1-2 từ → có thể là background, dùng nhân vật phụ hoặc "Người qua đường"
+- Nếu có 2-3 nhân vật chính trong cảnh → suy luận theo ngữ cảnh
+
+【PATTERN 6: Hồi tưởng/Flashback】
+Trong cảnh flashback, nhân vật có thể trẻ hơn → giọng khác → Diarization có thể split
+→ Vẫn gán đúng nhân vật theo cốt truyện, không phải SPEAKER_XX khác
+
+━━━ KHI NÀO CONFIDENCE THAP ━━━
+
+Đánh dấu confidence = "thap" khi:
+- Câu 1-2 từ không có context: "嗯", "啊", "好"
+- Câu hét trong đám đông không rõ ai
+- Câu OST/lyric bài hát (không phải thoại)
+- SPEAKER khác hoàn toàn với mọi pattern trên
+
+→ Pass 3 sẽ xử lý đặc biệt với confidence thấp.
+
+━━━ INPUT BẠN NHẬN ━━━
+
+[NHÂN VẬT TRONG ĐOẠN]
+Danh sách nhân vật có thoại trong đoạn (từ Bible + scene_map):
+{CHARACTERS_IN_SCENE}
+
+[BIBLE TÓM TẮT]
+{BIBLE_SUMMARY}
+
+[ĐOẠN PHỤ ĐỀ]
+Format: index|SPEAKER_XX|text
+"?" = Diarization không xác định
+
+{SRT_CHUNK}
+
+━━━ OUTPUT FORMAT ━━━
+
+{
+  "speakers": [
+    {
+      "index": 1,
+      "speaker_zh": "记者",
+      "confidence": "cao",
+      "reason": "Câu hỏi 'Xin hỏi Hoắc tổng', SPEAKER_11 match phóng viên"
+    },
+    {
+      "index": 8,
+      "speaker_zh": "霍新",
+      "confidence": "cao",
+      "reason": "Trả lời 'Đúng vậy' sau câu hỏi của phóng viên, SPEAKER_00 match Hoắc Tân"
+    },
+    {
+      "index": 32,
+      "speaker_zh": "祁斯年",
+      "confidence": "trung",
+      "reason": "SPEAKER_05 → Diarization gán Cố Trầm Châu nhưng nội dung 'Tôi là Kỳ Tư Niên' → đè"
+    },
+    {
+      "index": 78,
+      "speaker_zh": "?",
+      "confidence": "thap",
+      "reason": "Câu '?' 1 từ trong cảnh đông người, không có context rõ"
+    }
+  ]
+}
+
+━━━ KIỂM TRA TRƯỚC KHI XUẤT ━━━
+
+□ Mỗi dòng input có 1 entry trong "speakers" (cùng index)
+□ speaker_zh là mã zh từ danh sách nhân vật (vd: "顾沉舟"), KHÔNG phải SPEAKER_XX
+□ Nếu thực sự không xác định được → speaker_zh = "?"
+□ reason phải ngắn, cụ thể, không chung chung
+□ confidence dùng đúng enum: "cao" | "trung" | "thap"

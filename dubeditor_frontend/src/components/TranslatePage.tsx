@@ -14,7 +14,7 @@ import ConfigModal from './ConfigModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type StepId = 0 | 1 | 2
+type StepId = 0 | 1 | 2 | 3 | 4
 
 interface Pass0Issue {
   index: number
@@ -26,8 +26,23 @@ interface Pass0State {
   scanned: boolean
   issues: Pass0Issue[]
   running: boolean
-  report: Array<{ index: number; original: string; fixed: string; deleted?: boolean }>
+  // Schema mới khớp backend: action="clean"|"delete", cleaned (text mới khi clean), reason (lý do AI)
+  report: Array<{
+    index: number
+    action: 'clean' | 'delete'
+    original: string
+    cleaned: string   // text sau khi clean, rỗng nếu action=delete
+    reason: string    // lý do AI quyết định
+  }>
   cleaned: boolean
+}
+
+interface Pass1SubResult {
+  prompt: string
+  response: string
+  tokens_in: number
+  tokens_out: number
+  timing_ms: number
 }
 
 interface Pass1State {
@@ -39,6 +54,31 @@ interface Pass1State {
   timingMs: number
   bible: Bible | null
   error: string
+  // Chi tiết từng sub-pass — để FE hiển thị tab API call
+  pass1a: Pass1SubResult | null
+  pass1b: Pass1SubResult | null
+  // Tiến trình 2 bước
+  stage: 'idle' | 'pass1a' | 'pass1b' | 'merging' | 'done'
+  stageMessage: string
+  // Stats từng bước (để hiện ngay khi 1A xong, không đợi 1B)
+  pass1aStats: { nhan_vat: number; time_ms: number } | null
+  pass1bStats: { scene_count: number; time_ms: number } | null
+}
+
+interface Pass2SpeakerState {
+  running:     boolean
+  done:        boolean
+  total:       number   // tổng số dòng phụ đề
+  updated:     number   // số dòng AI cập nhật character_id
+  unknown:     number   // số dòng AI báo "?"
+  tokensIn:    number
+  tokensOut:   number
+  timingMs:    number
+  sceneCount:  number   // số scene đã xử lý
+  doneScenes:  number   // số scene đã xong (live update từ SSE)
+  totalScenes: number
+  error:       string
+  stageMessage: string
 }
 
 interface ChunkState {
@@ -92,29 +132,64 @@ function fmtTokens(n: number): string {
 
 // Pass 0: scan local — detect dòng rác không cần gọi AI
 function scanAbnormal(subs: Subtitle[]): Pass0Issue[] {
+  // ⚠ LOGIC NÀY PHẢI KHỚP với detect_abnormal_entries() ở backend
+  // (srt_translator/backend/translator.py:1383). Khi sửa, sửa cả 2 nơi.
+  const isCJK = (c: string) => {
+    const code = c.codePointAt(0) || 0
+    return code >= 0x4E00 && code <= 0x9FFF
+  }
+
   const issues: Pass0Issue[] = []
   for (const s of subs) {
-    const t = s.original_text || s.text || ''
-    if (!t.trim()) continue
-    // Ký tự nhạc thuần túy
-    if (/^[♪♫\s]+$/.test(t)) {
-      issues.push({ index: s.index, text: t, reason: 'Ký tự nhạc thuần túy' })
-      continue
+    const t = (s.original_text || s.text || '').trim()
+    if (!t) continue
+
+    const reasons: string[] = []
+
+    // 1. Text quá dài: >25 ký tự CJK hoặc >50 ký tự tổng
+    const cjkLen = [...t].filter(isCJK).length
+    if (cjkLen > 25 || t.length > 50) {
+      reasons.push('Quá dài')
     }
-    // Tag dạng [Music] [Applause]
-    if (/^\[.{1,20}\]$/.test(t.trim())) {
-      issues.push({ index: s.index, text: t, reason: 'Tag âm thanh không cần dịch' })
-      continue
+
+    // 2. Có chuỗi Latin ≥3 ký tự liên tiếp
+    if (/[A-Za-z]{3,}/.test(t)) {
+      reasons.push('Có Latin (có thể logo)')
     }
-    // Lặp ký tự bất thường (>= 5 lần liên tiếp)
+
+    // 3. Có xuống dòng thật
+    if (/\n/.test(t)) {
+      reasons.push('Multi-line')
+    }
+
+    // 4. Có 2+ cụm CJK ≥3 ký tự cách nhau bằng dấu cách (multi-region OCR)
+    const parts = t.split(/\s+/).filter(p => [...p].filter(isCJK).length >= 3)
+    if (parts.length >= 2) {
+      reasons.push('Multi-region OCR')
+    }
+
+    // 5. Lặp 1 ký tự ≥5 lần liên tiếp (OCR glitch)
     if (/(.)\1{4,}/.test(t)) {
-      issues.push({ index: s.index, text: t, reason: 'Lặp ký tự bất thường' })
-      continue
+      reasons.push('Lặp ký tự bất thường')
     }
-    // Chỉ có ký tự đặc biệt / số thuần
-    if (/^[\d\s.,!?…·•\-–—]+$/.test(t) && t.length < 4) {
-      issues.push({ index: s.index, text: t, reason: 'Quá ngắn / chỉ ký tự đặc biệt' })
-      continue
+
+    // 6. Ký tự nhạc thuần túy ♪♫
+    if (/^[\u266a-\u266f\s]+$/.test(t)) {
+      reasons.push('Ký tự nhạc')
+    }
+
+    // 7. Tag âm thanh [Music], [Applause]
+    if (/^\[.{1,20}\]$/.test(t)) {
+      reasons.push('Tag âm thanh')
+    }
+
+    // 8. Mix Latin/số dài giữa CJK
+    if (cjkLen >= 1 && /[A-Za-z0-9]{4,}/.test(t)) {
+      reasons.push('Lẫn chuỗi Latin/số')
+    }
+
+    if (reasons.length > 0) {
+      issues.push({ index: s.index, text: t, reason: reasons.join(' · ') })
     }
   }
   return issues
@@ -228,27 +303,81 @@ function Step0Panel({
       )}
 
       {/* Report sau khi clean */}
-      {state.cleaned && state.report.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <div className="panel-label">Kết quả làm sạch — {state.report.length} dòng</div>
-          <div className="flex flex-col divide-y divide-zinc-100 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
-            {state.report.map((r, i) => (
-              <div key={i} className="flex items-start gap-3 px-4 py-2.5">
-                <span className="text-[10px] font-mono text-zinc-400 w-8 flex-shrink-0 pt-0.5">
-                  #{r.index}
-                </span>
-                <div className="flex-1 min-w-0 flex flex-col gap-1">
-                  <div className="text-[11px] font-mono text-zinc-400 line-through truncate">{r.original}</div>
-                  {r.deleted
-                    ? <div className="text-[11px] text-red-500 font-mono">→ [Đã xóa]</div>
-                    : <div className="text-[11px] text-emerald-500 font-mono truncate">→ {r.fixed}</div>
-                  }
-                </div>
+      {state.cleaned && state.report.length > 0 && (() => {
+        const deletedCount = state.report.filter(r => r.action === 'delete').length
+        const cleanedCount = state.report.filter(r => r.action === 'clean').length
+        return (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-3">
+              <div className="panel-label">Kết quả làm sạch — {state.report.length} dòng</div>
+              <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+                {cleanedCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                    ✏️ Sửa {cleanedCount}
+                  </span>
+                )}
+                {deletedCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800">
+                    🗑️ Xóa {deletedCount}
+                  </span>
+                )}
               </div>
-            ))}
+            </div>
+            <div className="flex flex-col divide-y divide-zinc-100 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-xl overflow-hidden max-h-80 overflow-y-auto">
+              {state.report.map((r, i) => {
+                const isDelete = r.action === 'delete'
+                return (
+                  <div key={i} className="flex items-start gap-3 px-4 py-3 hover:bg-zinc-50 dark:hover:bg-zinc-800/30">
+                    <span className="text-[10px] font-mono text-zinc-400 w-10 flex-shrink-0 pt-1">
+                      #{r.index}
+                    </span>
+                    <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+                      {/* Header: badge action + lý do */}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {isDelete ? (
+                          <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-red-100 dark:bg-red-950/40 text-red-700 dark:text-red-400 uppercase tracking-wider">
+                            🗑️ Xóa
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
+                            ✏️ Sửa
+                          </span>
+                        )}
+                        {r.reason && (
+                          <span className="text-[10px] text-zinc-500 dark:text-zinc-400 italic">
+                            {r.reason}
+                          </span>
+                        )}
+                      </div>
+                      {/* Body: before / after */}
+                      <div className="flex flex-col gap-0.5">
+                        <div className="text-[11px] font-mono text-zinc-400 line-through truncate" title={r.original}>
+                          {r.original}
+                        </div>
+                        {isDelete ? (
+                          <div className="text-[11px] text-red-500 font-mono italic">
+                            → Đã xóa dòng này khỏi phụ đề
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-emerald-600 dark:text-emerald-400 font-mono truncate" title={r.cleaned}>
+                            → {r.cleaned}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            {/* Thông báo về reindex nếu có xóa */}
+            {deletedCount > 0 && (
+              <div className="text-[11px] text-amber-600 dark:text-amber-400 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800">
+                ⚠ Đã xóa {deletedCount} dòng → số thứ tự phụ đề đã được đánh lại từ đầu. Bible cũ (nếu có) đã bị xóa, cần chạy lại Pass 1.
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* Actions */}
       <div className="flex items-center gap-3 pt-2">
@@ -413,13 +542,597 @@ function BibleSection({ bible }: { bible: Bible }) {
           </div>
         )}
 
-        {/* Raw JSON */}
-        {bibleTab === 'raw' && (
-          <pre className="text-[10px] font-mono text-zinc-500 dark:text-zinc-400 leading-relaxed whitespace-pre-wrap break-all">
-            {JSON.stringify(bible, null, 2)}
-          </pre>
+        {/* Raw JSON — với nút Copy & Download */}
+        {bibleTab === 'raw' && (() => {
+          const jsonStr = JSON.stringify(bible, null, 2)
+          const sizeKB  = (new Blob([jsonStr]).size / 1024).toFixed(1)
+          const lineCount = jsonStr.split('\n').length
+          return (
+            <div className="flex flex-col gap-2">
+              {/* Toolbar */}
+              <div className="flex items-center gap-2 px-2 py-1.5 bg-zinc-100 dark:bg-zinc-800/50 rounded-lg">
+                <span className="text-[11px] text-zinc-500 font-mono">
+                  {lineCount.toLocaleString()} dòng · {sizeKB} KB
+                </span>
+                <div className="flex-1" />
+                <button
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(jsonStr)
+                      const btn = document.activeElement as HTMLButtonElement
+                      if (btn) {
+                        const orig = btn.innerText
+                        btn.innerText = '✓ Đã copy'
+                        setTimeout(() => { btn.innerText = orig }, 1500)
+                      }
+                    } catch {
+                      alert('Không copy được. Vui lòng dùng Download.')
+                    }
+                  }}
+                  className="px-3 py-1 text-[11px] font-medium rounded bg-blue-500 hover:bg-blue-600 text-white transition-colors"
+                >
+                  📋 Copy JSON
+                </button>
+                <button
+                  onClick={() => {
+                    const blob = new Blob([jsonStr], { type: 'application/json' })
+                    const url  = URL.createObjectURL(blob)
+                    const a    = document.createElement('a')
+                    a.href     = url
+                    a.download = `bible_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`
+                    document.body.appendChild(a)
+                    a.click()
+                    document.body.removeChild(a)
+                    URL.revokeObjectURL(url)
+                  }}
+                  className="px-3 py-1 text-[11px] font-medium rounded border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors"
+                >
+                  ⬇ Download
+                </button>
+              </div>
+              {/* JSON content */}
+              <pre className="text-[10px] font-mono text-zinc-600 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap break-all bg-zinc-50 dark:bg-zinc-900/50 p-3 rounded-lg border border-zinc-200 dark:border-zinc-700 max-h-[60vh] overflow-y-auto select-all">
+                {jsonStr}
+              </pre>
+            </div>
+          )
+        })()}
+      </div>
+    </div>
+  )
+}
+
+function Step1ProgressItem({
+  stepNo, label, icon, status, detail,
+}: {
+  stepNo: number
+  label: string
+  icon: string
+  status: 'wait' | 'running' | 'done'
+  detail: string
+}) {
+  return (
+    <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white dark:bg-zinc-900/50 border border-blue-100 dark:border-blue-900">
+      {/* Status indicator */}
+      <div className="flex-shrink-0 w-6 h-6 flex items-center justify-center">
+        {status === 'wait' && (
+          <div className="w-5 h-5 rounded-full border-2 border-zinc-200 dark:border-zinc-700 flex items-center justify-center">
+            <span className="text-[10px] font-bold text-zinc-400">{stepNo}</span>
+          </div>
+        )}
+        {status === 'running' && (
+          <div className="w-5 h-5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
+        )}
+        {status === 'done' && (
+          <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center">
+            <span className="text-[11px] text-white font-bold">✓</span>
+          </div>
         )}
       </div>
+
+      {/* Label + detail */}
+      <span className="text-base flex-shrink-0">{icon}</span>
+      <div className="flex-1 min-w-0">
+        <div className={`text-[12px] font-semibold ${
+          status === 'done'    ? 'text-emerald-600 dark:text-emerald-400'
+          : status === 'running' ? 'text-blue-600 dark:text-blue-400'
+          : 'text-zinc-400'
+        }`}>
+          Bước {stepNo}/2: {label}
+        </div>
+        {detail && (
+          <div className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate">
+            {detail}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── DiarizePanel ────────────────────────────────────────────────────────────
+// Step 1: Gán speaker bằng Diarization (Pyannote)
+// Pipeline backend đã có: cut audio → diarize → tạo Character SPEAKER_00...
+//                         → gán subtitle.character_id
+// UI này tận dụng endpoint /projects/{id}/auto-assign/*
+
+interface DiarizeJob {
+  status:        'idle' | 'running' | 'done' | 'error' | 'cancelled'
+  progress:      number
+  total_lines:   number
+  done_lines:    number
+  speaker_count: number
+  logs:          string[]
+  error?:        string
+}
+
+const EMPTY_DIARIZE_JOB: DiarizeJob = {
+  status: 'idle', progress: 0,
+  total_lines: 0, done_lines: 0, speaker_count: 0, logs: [],
+}
+
+interface SrtRow {
+  index:   number
+  speaker: string
+  text:    string
+}
+
+function DiarizePanel({
+  projectId, hasVideo, onSkip, onDone,
+}: {
+  projectId: number
+  hasVideo:  boolean
+  onSkip:    () => void
+  onDone:    () => void
+}) {
+  const [job,        setJob]        = useState<DiarizeJob>(EMPTY_DIARIZE_JOB)
+  const [minSpk,     setMinSpk]     = useState(2)
+  const [maxSpk,     setMaxSpk]     = useState(15)
+  const [useDemucs,  setUseDemucs]  = useState(false)
+  const [starting,   setStarting]   = useState(false)
+  const [srtPreview, setSrtPreview] = useState<{
+    rows:    SrtRow[]
+    stats:   Record<string, number>
+    content: string
+  } | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const logRef  = useRef<HTMLDivElement>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Auto-scroll log
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [job.logs])
+
+  // Fetch status
+  const fetchStatus = useCallback(async () => {
+    try {
+      const res = await api.get(`/projects/${projectId}/auto-assign/status`)
+      const d = res.data
+      setJob({
+        status:        d.status,
+        progress:      d.progress       || 0,
+        total_lines:   d.total_lines    || 0,
+        done_lines:    d.done_lines     || 0,
+        speaker_count: d.speaker_count  || 0,
+        logs:          d.logs           || [],
+        error:         d.error,
+      })
+      return d.status
+    } catch (err: any) {
+      if (err.response?.status === 404) return 'idle'
+      return null
+    }
+  }, [projectId])
+
+  // Polling khi running
+  const startPolling = useCallback(() => {
+    if (pollRef.current) return
+    pollRef.current = setInterval(async () => {
+      const status = await fetchStatus()
+      if (status !== 'running') {
+        if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+        if (status === 'done') {
+          // Tự load preview khi xong
+          await loadPreview()
+          onDone()
+        }
+      }
+    }, 1500)
+  }, [fetchStatus])
+
+  // Load SRT preview (có speaker)
+  const loadPreview = useCallback(async () => {
+    setPreviewLoading(true)
+    try {
+      const res = await api.get(`/projects/${projectId}/translate/srt-with-speakers`)
+      setSrtPreview({
+        rows:    [],  // build sau từ content nếu cần
+        stats:   res.data.stats || {},
+        content: res.data.content || '',
+      })
+    } catch (err) {
+      console.error('Load preview lỗi:', err)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }, [projectId])
+
+  // Init: check status
+  useEffect(() => {
+    fetchStatus().then(status => {
+      if (status === 'running') startPolling()
+      else if (status === 'done') loadPreview()  // Đã chạy xong → load preview
+    })
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [])
+
+  // Start
+  const handleStart = async () => {
+    if (!hasVideo) {
+      alert('Project chưa có video. Upload video trong Editor trước.')
+      return
+    }
+    setStarting(true)
+    try {
+      await api.post(`/projects/${projectId}/auto-assign/start`, {
+        project_id:   projectId,
+        batch_size:   50,
+        min_speakers: minSpk,
+        max_speakers: maxSpk,
+        match_existing: true,
+        use_demucs:   useDemucs,
+      })
+      setJob(j => ({ ...j, status: 'running', logs: [] }))
+      startPolling()
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || 'Không khởi động được Diarization')
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  // Cancel
+  const handleCancel = async () => {
+    try {
+      await api.post(`/projects/${projectId}/auto-assign/cancel`)
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+      setJob(j => ({ ...j, status: 'cancelled' }))
+    } catch (err) {}
+  }
+
+  // Reset
+  const handleReset = async () => {
+    if (!confirm('Reset Diarization? Sẽ xóa speaker đã gán và bắt đầu lại.')) return
+    try {
+      await api.delete(`/projects/${projectId}/auto-assign/reset`)
+      setJob(EMPTY_DIARIZE_JOB)
+      setSrtPreview(null)
+    } catch (err) {}
+  }
+
+  // Copy SRT preview
+  const handleCopy = async () => {
+    if (!srtPreview) return
+    try {
+      await navigator.clipboard.writeText(srtPreview.content)
+      alert('Đã copy SRT có speaker vào clipboard')
+    } catch {
+      alert('Copy thất bại. Dùng Download.')
+    }
+  }
+
+  // Download SRT preview
+  const handleDownload = () => {
+    if (!srtPreview) return
+    const blob = new Blob([srtPreview.content], { type: 'text/plain;charset=utf-8' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `srt_speakers_${projectId}_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.txt`
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <div className="flex flex-col gap-4 p-6 max-w-4xl mx-auto w-full">
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="text-[15px] font-bold text-zinc-800 dark:text-zinc-100 mb-1">
+            Gán speaker — Diarization
+          </div>
+          <div className="text-[12px] text-zinc-400">
+            Pyannote nhận diện giọng nói trong video · gán mỗi dòng phụ đề với SPEAKER_00, SPEAKER_01...
+          </div>
+        </div>
+        {job.status === 'idle' && (
+          <button onClick={onSkip} className="btn text-[12px]">
+            Bỏ qua bước này →
+          </button>
+        )}
+        {job.status === 'done' && (
+          <div className="flex items-center gap-2">
+            <button onClick={handleReset} className="btn text-[12px]">
+              🔄 Chạy lại
+            </button>
+            <button onClick={onDone} className="btn-primary text-[12px]">
+              Tiếp theo → Phân tích
+            </button>
+          </div>
+        )}
+      </div>
+
+      {!hasVideo && (
+        <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-[12px] text-amber-700 dark:text-amber-400">
+          ⚠ Project chưa có video. Hãy upload video trong Editor trước khi chạy Diarization.
+        </div>
+      )}
+
+      {/* Cấu hình (chỉ hiện khi idle) */}
+      {job.status === 'idle' && hasVideo && (
+        <div className="flex flex-col gap-3 p-4 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-900/30">
+          <div className="text-[12px] font-semibold text-zinc-700 dark:text-zinc-300">
+            Cấu hình Diarization
+          </div>
+          <div className="flex items-center gap-6 flex-wrap">
+            <label className="flex items-center gap-2 text-[12px]">
+              <span className="text-zinc-500">Tối thiểu speaker:</span>
+              <input type="number" min={1} max={20} value={minSpk}
+                onChange={e => setMinSpk(Math.max(1, +e.target.value))}
+                className="w-16 px-2 py-1 rounded border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800" />
+            </label>
+            <label className="flex items-center gap-2 text-[12px]">
+              <span className="text-zinc-500">Tối đa speaker:</span>
+              <input type="number" min={2} max={30} value={maxSpk}
+                onChange={e => setMaxSpk(Math.max(2, +e.target.value))}
+                className="w-16 px-2 py-1 rounded border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800" />
+            </label>
+            <label className="flex items-center gap-2 text-[12px] cursor-pointer">
+              <input type="checkbox" checked={useDemucs}
+                onChange={e => setUseDemucs(e.target.checked)} />
+              <span className="text-zinc-500">Demucs tách vocals trước (chậm hơn, chính xác hơn cho phim có nhạc nền)</span>
+            </label>
+          </div>
+          <button onClick={handleStart} disabled={starting}
+            className="btn-primary self-start gap-2">
+            {starting ? '⏳ Đang khởi động...' : '🎙️ Bắt đầu Diarization'}
+          </button>
+        </div>
+      )}
+
+      {/* Running state */}
+      {job.status === 'running' && (
+        <div className="flex flex-col gap-3 p-4 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20">
+          <div className="flex items-center gap-3">
+            <div className="w-3.5 h-3.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin" />
+            <span className="text-[13px] font-semibold text-blue-700 dark:text-blue-300">
+              Đang chạy... {job.progress}%
+            </span>
+            <span className="ml-auto text-[11px] text-blue-400">
+              {job.done_lines}/{job.total_lines} dòng
+            </span>
+            <button onClick={handleCancel} className="btn text-[11px] text-red-500 border-red-200 dark:border-red-800">
+              Hủy
+            </button>
+          </div>
+          {/* Progress bar */}
+          <div className="h-1.5 rounded-full bg-blue-100 dark:bg-blue-900 overflow-hidden">
+            <div className="h-full bg-blue-500 rounded-full transition-all"
+              style={{ width: `${job.progress}%` }} />
+          </div>
+          {/* Log */}
+          <div ref={logRef}
+            className="max-h-40 overflow-y-auto bg-white dark:bg-zinc-900/50 rounded p-2 text-[10px] font-mono text-zinc-600 dark:text-zinc-400 leading-relaxed">
+            {job.logs.length === 0 && <div className="text-zinc-400 italic">Đang khởi động...</div>}
+            {job.logs.map((line, i) => <div key={i}>{line}</div>)}
+          </div>
+          <p className="text-[11px] text-blue-500 dark:text-blue-400">
+            Pipeline: Cắt audio → Demucs (nếu bật) → Pyannote diarize → Match SRT → Gán DB
+          </p>
+        </div>
+      )}
+
+      {/* Error */}
+      {job.status === 'error' && (
+        <div className="p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-[12px] text-red-500 font-mono">
+          ❌ {job.error || 'Lỗi không xác định'}
+          <button onClick={handleReset} className="btn text-[11px] ml-3">Thử lại</button>
+        </div>
+      )}
+
+      {/* Cancelled */}
+      {job.status === 'cancelled' && (
+        <div className="p-3 rounded-lg bg-zinc-100 dark:bg-zinc-800 text-[12px] text-zinc-500">
+          Đã hủy.
+          <button onClick={handleReset} className="btn text-[11px] ml-3">Chạy lại</button>
+        </div>
+      )}
+
+      {/* Done - Stats + Preview SRT */}
+      {job.status === 'done' && (
+        <>
+          <div className="flex items-center gap-4 px-4 py-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 text-[12px]">
+            <span className="text-emerald-600 font-semibold">✅ Diarization xong</span>
+            <span className="text-zinc-400">·</span>
+            <span className="text-zinc-700 dark:text-zinc-300">
+              {job.speaker_count} speakers · {job.done_lines}/{job.total_lines} dòng đã gán
+            </span>
+          </div>
+
+          {/* Preview SRT có speaker */}
+          {srtPreview && (
+            <div className="flex flex-col gap-2 border border-zinc-200 dark:border-zinc-700 rounded-xl overflow-hidden">
+              {/* Toolbar */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-zinc-50 dark:bg-zinc-800/60 border-b border-zinc-200 dark:border-zinc-700">
+                <div className="text-[12px] font-semibold text-zinc-700 dark:text-zinc-300">
+                  SRT có speaker
+                </div>
+                <div className="flex items-center gap-1.5 ml-2">
+                  {Object.entries(srtPreview.stats).map(([spk, count]) => (
+                    <span key={spk}
+                      className={`px-2 py-0.5 text-[10px] font-mono rounded-full ${
+                        spk === '?'
+                          ? 'bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400'
+                          : 'bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-400'
+                      }`}>
+                      {spk}: {count}
+                    </span>
+                  ))}
+                </div>
+                <div className="flex-1" />
+                <button onClick={handleCopy} className="btn text-[11px] gap-1">
+                  📋 Copy
+                </button>
+                <button onClick={handleDownload} className="btn text-[11px] gap-1">
+                  ⬇ Download .txt
+                </button>
+              </div>
+              {/* Preview */}
+              <pre className="text-[11px] font-mono text-zinc-700 dark:text-zinc-300 leading-relaxed p-3 bg-white dark:bg-zinc-900/50 max-h-[50vh] overflow-y-auto whitespace-pre-wrap">
+                {previewLoading ? 'Đang tải...' : (srtPreview.content || '(rỗng)')}
+              </pre>
+            </div>
+          )}
+          {!srtPreview && !previewLoading && (
+            <button onClick={loadPreview} className="btn self-start text-[12px]">
+              📋 Hiển thị SRT có speaker
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Pass2SpeakerPanel ───────────────────────────────────────────────────────
+// Step 3: AI gán speaker chính thức (quyết định cuối).
+// AI dùng SPEAKER_XX từ Diarization làm gợi ý, nhưng quyết định dựa vào content.
+
+function Pass2SpeakerPanel({
+  state, modelLabel, hasBible, onRun, onSkip,
+}: {
+  state:      Pass2SpeakerState
+  modelLabel: string
+  hasBible:   boolean
+  onRun:      () => void
+  onSkip:     () => void
+}) {
+  const [elapsed, setElapsed] = useState(0)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    if (state.running) {
+      setElapsed(0)
+      timerRef.current = setInterval(() => setElapsed(e => e + 100), 100)
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current) }
+  }, [state.running])
+
+  const progressPct = state.totalScenes > 0
+    ? Math.round((state.doneScenes / state.totalScenes) * 100)
+    : 0
+
+  return (
+    <div className="flex flex-col gap-4 p-6 max-w-4xl mx-auto w-full">
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="text-[15px] font-bold text-zinc-800 dark:text-zinc-100 mb-1">
+            Gán speaker — AI quyết định cuối (Pass 2)
+          </div>
+          <div className="text-[12px] text-zinc-400">
+            AI đọc nội dung thoại + gợi ý từ Diarization → quyết định CUỐI ai nói câu nào.
+            Sau bước này, mỗi dòng được gán speaker chính xác để Pass 3 dịch + xưng hô đúng.
+          </div>
+        </div>
+        {state.done && (
+          <button onClick={onSkip} className="btn-primary text-[12px]">
+            Tiếp theo → Dịch thuật
+          </button>
+        )}
+      </div>
+
+      {!hasBible && (
+        <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-[12px] text-amber-700 dark:text-amber-400">
+          ⚠ Chưa có Bible. Hãy chạy Pass 1 (Phân tích) trước.
+        </div>
+      )}
+
+      {/* Idle: nút run */}
+      {!state.running && !state.done && hasBible && (
+        <div className="flex flex-col gap-3 p-4 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-zinc-50/50 dark:bg-zinc-900/30">
+          <div className="text-[12px] text-zinc-600 dark:text-zinc-300">
+            Pass 2 sẽ chạy SONG SONG theo từng <strong>đoạn kịch bản</strong> (scene). Mỗi scene 1 API call,
+            AI nhận:
+          </div>
+          <ul className="text-[11px] text-zinc-500 dark:text-zinc-400 pl-4 list-disc space-y-0.5">
+            <li>Danh sách nhân vật trong scene (từ Bible)</li>
+            <li>SRT của scene có sẵn SPEAKER_XX từ Diarization</li>
+            <li>Speaker mapping summary (SPEAKER_XX ↔ tên nhân vật)</li>
+          </ul>
+          <div className="text-[12px] text-zinc-600 dark:text-zinc-300 mt-1">
+            AI quyết định cuối → backend cập nhật <code className="text-[11px] bg-zinc-200 dark:bg-zinc-800 px-1 rounded">subtitle.character_id</code>
+          </div>
+          <button onClick={onRun}
+            className="btn-primary self-start gap-2 mt-1">
+            🎯 Bắt đầu gán speaker
+          </button>
+        </div>
+      )}
+
+      {/* Running */}
+      {state.running && (
+        <div className="flex flex-col gap-3 p-4 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20">
+          <div className="flex items-center gap-3">
+            <div className="w-3.5 h-3.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin flex-shrink-0" />
+            <span className="text-[13px] font-semibold text-blue-700 dark:text-blue-300">
+              Đang chạy: {state.doneScenes}/{state.totalScenes} scene ({progressPct}%)
+            </span>
+            <span className="ml-auto text-[12px] font-mono text-blue-400">
+              ⏱ {(elapsed / 1000).toFixed(1)}s
+            </span>
+          </div>
+          <div className="h-1.5 rounded-full bg-blue-100 dark:bg-blue-900 overflow-hidden">
+            <div className="h-full bg-blue-500 rounded-full transition-all"
+              style={{ width: `${progressPct}%` }} />
+          </div>
+          <p className="text-[11px] text-blue-500 dark:text-blue-400">
+            {state.stageMessage || `Pass 2 chạy song song theo scene (concurrency=3) · Model: ${modelLabel}`}
+          </p>
+        </div>
+      )}
+
+      {/* Error */}
+      {state.error && (
+        <div className="p-3 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 text-[12px] text-red-500 font-mono whitespace-pre-wrap">
+          ❌ {state.error}
+        </div>
+      )}
+
+      {/* Done */}
+      {state.done && (
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-4 px-4 py-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 text-[12px]">
+            <span className="text-emerald-600 font-semibold">✅ Pass 2 xong</span>
+            <span className="text-zinc-400">·</span>
+            <span className="text-zinc-700 dark:text-zinc-300">
+              {state.total} dòng · {state.updated} cập nhật · {state.unknown} không xác định
+            </span>
+            <span className="text-zinc-400">·</span>
+            <span className="font-mono text-blue-500">↑ {fmtTokens(state.tokensIn)} in</span>
+            <span className="font-mono text-emerald-500">↓ {fmtTokens(state.tokensOut)} out</span>
+            <span className="text-zinc-400">·</span>
+            <span className="text-zinc-500">{fmt(state.timingMs)}</span>
+          </div>
+          <div className="text-[11px] text-zinc-500 dark:text-zinc-400 px-1">
+            Mỗi subtitle giờ có speaker chính xác do AI quyết định. Pass 3 sẽ dùng speaker này để dịch + xưng hô đúng.
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -469,25 +1182,57 @@ function Step1Panel({
         )}
       </div>
 
-      {/* Running state */}
+      {/* Running state — 2 bước Pass 1A + Pass 1B */}
       {state.running && (
-        <div className="flex flex-col gap-3 p-4 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20">
+        <div className="flex flex-col gap-3 p-5 rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20">
           <div className="flex items-center gap-3">
-            <div className="w-3.5 h-3.5 rounded-full border-2 border-blue-500 border-t-transparent animate-spin flex-shrink-0" />
-            <span className="text-[13px] font-semibold text-blue-600 dark:text-blue-400">
-              Đang gửi {totalSubs} dòng lên {modelLabel}...
+            <span className="text-[13px] font-semibold text-blue-700 dark:text-blue-300">
+              Đang phân tích {totalSubs} dòng với {modelLabel}
             </span>
             <span className="ml-auto text-[12px] font-mono text-blue-400">
               ⏱ {(elapsed / 1000).toFixed(1)}s
             </span>
           </div>
-          {/* Animated bar */}
-          <div className="h-1 rounded-full bg-blue-100 dark:bg-blue-900 overflow-hidden">
-            <div className="h-full bg-blue-500 rounded-full animate-[indeterminate_1.5s_ease-in-out_infinite]"
-              style={{ width: '40%', animation: 'indeterminate 1.5s ease-in-out infinite' }} />
+
+          {/* 2 bước — mỗi bước có icon, label, sub-message, time */}
+          <div className="flex flex-col gap-2 mt-1">
+            {/* Bước 1A */}
+            <Step1ProgressItem
+              stepNo={1}
+              label="Phân tích nhân vật & xưng hô"
+              icon="🧑"
+              status={
+                state.stage === 'pass1a' ? 'running'
+                : (state.pass1aStats || state.stage === 'pass1b' || state.stage === 'merging' || state.stage === 'done') ? 'done'
+                : 'wait'
+              }
+              detail={
+                state.pass1aStats
+                  ? `${state.pass1aStats.nhan_vat} nhân vật · ${(state.pass1aStats.time_ms / 1000).toFixed(1)}s`
+                  : (state.stage === 'pass1a' ? state.stageMessage : '')
+              }
+            />
+
+            {/* Bước 1B */}
+            <Step1ProgressItem
+              stepNo={2}
+              label="Phân tích cốt truyện & phân đoạn"
+              icon="🎬"
+              status={
+                state.stage === 'pass1b' ? 'running'
+                : (state.pass1bStats || state.stage === 'merging' || state.stage === 'done') ? 'done'
+                : 'wait'
+              }
+              detail={
+                state.pass1bStats
+                  ? `${state.pass1bStats.scene_count} đoạn · ${(state.pass1bStats.time_ms / 1000).toFixed(1)}s`
+                  : (state.stage === 'pass1b' ? state.stageMessage : '')
+              }
+            />
           </div>
-          <p className="text-[11px] text-blue-400">
-            Pass 1 thường mất 15–60s tuỳ độ dài phim và model. Không đóng tab này.
+
+          <p className="text-[11px] text-blue-500 dark:text-blue-400 mt-1">
+            Pass 1 thường mất 60-120s tuỳ độ dài phim. Không đóng tab này.
           </p>
         </div>
       )}
@@ -499,21 +1244,43 @@ function Step1Panel({
         </div>
       )}
 
-      {/* Done — stats */}
+      {/* Done — stats tổng + chi tiết 2 pass */}
       {state.done && (
-        <div className="flex items-center gap-4 px-4 py-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 text-[12px]">
-          <span className="text-emerald-600 font-semibold">✅ Phân tích xong</span>
-          <span className="text-zinc-400">·</span>
-          <span className="font-mono text-blue-500">↑ {fmtTokens(state.tokensIn)} in</span>
-          <span className="font-mono text-emerald-500">↓ {fmtTokens(state.tokensOut)} out</span>
-          <span className="text-zinc-400">·</span>
-          <span className="text-zinc-500">{fmt(state.timingMs)}</span>
-          <span className="text-zinc-400 ml-auto">Model: <span className="font-mono">{modelLabel}</span></span>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-4 px-4 py-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800 text-[12px]">
+            <span className="text-emerald-600 font-semibold">✅ Phân tích xong</span>
+            <span className="text-zinc-400">·</span>
+            <span className="font-mono text-blue-500">↑ {fmtTokens(state.tokensIn)} in</span>
+            <span className="font-mono text-emerald-500">↓ {fmtTokens(state.tokensOut)} out</span>
+            <span className="text-zinc-400">·</span>
+            <span className="text-zinc-500">{fmt(state.timingMs)}</span>
+            <span className="text-zinc-400 ml-auto">Model: <span className="font-mono">{modelLabel}</span></span>
+          </div>
+          {/* Chi tiết 2 pass */}
+          {(state.pass1a || state.pass1b) && (
+            <div className="flex items-center gap-2 text-[11px]">
+              {state.pass1a && (
+                <span className="px-2 py-1 rounded-md bg-blue-50 dark:bg-blue-950/20 border border-blue-100 dark:border-blue-900 text-blue-600 dark:text-blue-400">
+                  🧑 Pass 1A: ↑{fmtTokens(state.pass1a.tokens_in)} ↓{fmtTokens(state.pass1a.tokens_out)} · {fmt(state.pass1a.timing_ms)}
+                </span>
+              )}
+              {state.pass1b && (
+                <span className="px-2 py-1 rounded-md bg-purple-50 dark:bg-purple-950/20 border border-purple-100 dark:border-purple-900 text-purple-600 dark:text-purple-400">
+                  🎬 Pass 1B: ↑{fmtTokens(state.pass1b.tokens_in)} ↓{fmtTokens(state.pass1b.tokens_out)} · {fmt(state.pass1b.timing_ms)}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       {/* Bible */}
       {state.bible && <BibleSection bible={state.bible} />}
+
+      {/* API Call detail — Pass 1A & Pass 1B */}
+      {state.done && (state.pass1a || state.pass1b) && (
+        <Pass1ApiCallSection pass1a={state.pass1a} pass1b={state.pass1b} />
+      )}
 
       {/* Empty state */}
       {!state.running && !state.done && !state.error && (
@@ -521,6 +1288,120 @@ function Step1Panel({
           Bấm "Bắt đầu phân tích" để AI đọc toàn bộ phim và xây dựng Bible.
         </div>
       )}
+    </div>
+  )
+}
+
+// ─── Pass1ApiCallSection ─────────────────────────────────────────────────────
+// Hiển thị prompt + response của Pass 1A và Pass 1B để debug khi cần.
+// Có nút Copy + Download cho từng phần.
+
+function Pass1ApiCallSection({
+  pass1a, pass1b,
+}: {
+  pass1a: Pass1SubResult | null
+  pass1b: Pass1SubResult | null
+}) {
+  const [activeTab, setActiveTab] = useState<'1a' | '1b'>('1a')
+  const [section,   setSection]   = useState<'prompt' | 'response'>('response')
+
+  const current = activeTab === '1a' ? pass1a : pass1b
+  if (!current) return null
+
+  const content = section === 'prompt' ? current.prompt : current.response
+  const sizeKB = (new Blob([content]).size / 1024).toFixed(1)
+  const lineCount = content.split('\n').length
+
+  return (
+    <div className="flex flex-col gap-0 border border-zinc-200 dark:border-zinc-700 rounded-xl overflow-hidden mt-2">
+      {/* Tab bar — chọn Pass 1A hay 1B */}
+      <div className="flex border-b border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60">
+        {(['1a', '1b'] as const).map(key => {
+          const sub = key === '1a' ? pass1a : pass1b
+          if (!sub) return null
+          const label = key === '1a' ? '🧑 Pass 1A — Nhân vật' : '🎬 Pass 1B — Scene map'
+          return (
+            <button
+              key={key}
+              onClick={() => setActiveTab(key)}
+              className={`px-4 py-2 text-[12px] font-semibold border-b-2 transition-all -mb-px ${
+                activeTab === key
+                  ? 'border-blue-500 text-blue-600 dark:text-blue-400 bg-white dark:bg-zinc-900'
+                  : 'border-transparent text-zinc-400 hover:text-zinc-600'
+              }`}
+            >
+              {label}
+            </button>
+          )
+        })}
+        <div className="flex-1" />
+        {/* Stats */}
+        <div className="flex items-center gap-3 px-4 text-[11px] font-mono text-zinc-500">
+          <span className="text-blue-500">↑ {fmtTokens(current.tokens_in)}</span>
+          <span className="text-emerald-500">↓ {fmtTokens(current.tokens_out)}</span>
+          <span className="text-zinc-400">{fmt(current.timing_ms)}</span>
+        </div>
+      </div>
+
+      {/* Sub-tab Prompt/Response */}
+      <div className="flex items-center gap-2 px-3 py-2 bg-zinc-50 dark:bg-zinc-800/30 border-b border-zinc-200 dark:border-zinc-700">
+        {(['response', 'prompt'] as const).map(s => (
+          <button
+            key={s}
+            onClick={() => setSection(s)}
+            className={`px-3 py-1 text-[11px] font-medium rounded transition-colors ${
+              section === s
+                ? 'bg-blue-500 text-white'
+                : 'text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+            }`}
+          >
+            {s === 'response' ? '📥 Response' : '📤 Prompt'}
+          </button>
+        ))}
+        <span className="text-[11px] text-zinc-400 ml-2">
+          {lineCount.toLocaleString()} dòng · {sizeKB} KB
+        </span>
+        <div className="flex-1" />
+        <button
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(content)
+              const btn = document.activeElement as HTMLButtonElement
+              if (btn) {
+                const orig = btn.innerText
+                btn.innerText = '✓ Đã copy'
+                setTimeout(() => { btn.innerText = orig }, 1500)
+              }
+            } catch {
+              alert('Không copy được. Dùng Download.')
+            }
+          }}
+          className="px-3 py-1 text-[11px] font-medium rounded bg-blue-500 hover:bg-blue-600 text-white transition-colors"
+        >
+          📋 Copy
+        </button>
+        <button
+          onClick={() => {
+            const blob = new Blob([content], { type: 'text/plain' })
+            const url  = URL.createObjectURL(blob)
+            const a    = document.createElement('a')
+            a.href     = url
+            a.download = `pass${activeTab}_${section}_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.txt`
+            document.body.appendChild(a)
+            a.click()
+            document.body.removeChild(a)
+            URL.revokeObjectURL(url)
+          }}
+          className="px-3 py-1 text-[11px] font-medium rounded border border-zinc-300 dark:border-zinc-600 hover:bg-zinc-200 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 transition-colors"
+        >
+          ⬇ Download
+        </button>
+      </div>
+
+      {/* Content */}
+      <pre className="text-[10px] font-mono text-zinc-600 dark:text-zinc-300 leading-relaxed whitespace-pre-wrap break-all bg-zinc-50 dark:bg-zinc-900/50 p-3 max-h-[50vh] overflow-y-auto select-all">
+        {content || '(rỗng)'}
+      </pre>
     </div>
   )
 }
@@ -1770,9 +2651,21 @@ export default function TranslatePage({ projectId, onBack }: Props) {
   const [pass1, setPass1] = useState<Pass1State>({
     running: false, done: false, elapsedMs: 0,
     tokensIn: 0, tokensOut: 0, timingMs: 0, bible: null, error: '',
+    pass1a: null, pass1b: null,
+    stage: 'idle', stageMessage: '',
+    pass1aStats: null, pass1bStats: null,
   })
 
-  // Step 2 state
+  // Step 3 state — Pass 2 Speaker (AI quyết định cuối)
+  const [pass2Speaker, setPass2Speaker] = useState<Pass2SpeakerState>({
+    running: false, done: false,
+    total: 0, updated: 0, unknown: 0,
+    tokensIn: 0, tokensOut: 0, timingMs: 0,
+    sceneCount: 0, doneScenes: 0, totalScenes: 0,
+    error: '', stageMessage: '',
+  })
+
+  // Step 4 state — Pass 3 dịch
   const [pass3, setPass3] = useState<Pass3State>({
     running: false, runningChunks: new Set(), done: false, chunks: [],
     totalTokensIn: 0, totalTokensOut: 0, totalTimingMs: 0, error: '',
@@ -1788,9 +2681,9 @@ export default function TranslatePage({ projectId, onBack }: Props) {
       try {
         const r = await api.get(`/projects/${projectId}/bible`)
         if (r.data?.bible) {
-          setPass1(s => ({ ...s, done: true, bible: r.data.bible }))
+          setPass1(s => ({ ...s, done: true, bible: r.data.bible, stage: 'done' }))
           await buildChunksFromBible(r.data.bible)
-          setStep(1)
+          setStep(2)  // Đã có Bible → nhảy đến step Phân tích
         }
       } catch {}
     }
@@ -1900,28 +2793,170 @@ export default function TranslatePage({ projectId, onBack }: Props) {
     const apiKey = getApiKey(config, config.model_pass1)
     if (!apiKey) { alert('Chưa có API key! Vào Cấu hình để nhập.'); return }
 
-    setPass1({ running: true, done: false, elapsedMs: 0, tokensIn: 0, tokensOut: 0, timingMs: 0, bible: null, error: '' })
+    setPass1({
+      running: true, done: false, elapsedMs: 0,
+      tokensIn: 0, tokensOut: 0, timingMs: 0,
+      bible: null, error: '', pass1a: null, pass1b: null,
+      stage: 'pass1a', stageMessage: 'Đang chuẩn bị...',
+      pass1aStats: null, pass1bStats: null,
+    })
+
+    // Mở SSE listener — backend sẽ publish event pass1a_start/done, pass1b_start/done
+    // qua channel /translate/progress của project.
+    // Đóng SSE cũ nếu còn (tránh duplicate listener).
+    if (esRef.current) {
+      esRef.current.close()
+      esRef.current = null
+    }
+    const es = new EventSource(`/dub/api/projects/${projectId}/translate/progress`)
+    esRef.current = es
+    const pass1aStartTime = Date.now()
+    let pass1bStartTime = 0
+
+    es.addEventListener('progress', (e: MessageEvent) => {
+      try {
+        const d = JSON.parse(e.data)
+        if (d.stage === 'pass1a_start') {
+          setPass1(s => ({ ...s, stage: 'pass1a', stageMessage: d.message || 'Đang phân tích nhân vật...' }))
+        } else if (d.stage === 'pass1a_done') {
+          const elapsedMs = Date.now() - pass1aStartTime
+          pass1bStartTime = Date.now()
+          setPass1(s => ({
+            ...s,
+            stage: 'pass1b',
+            stageMessage: d.message || 'Pass 1A xong, đang phân tích cốt truyện...',
+            // Parse số nhân vật từ message: "phát hiện 15 nhân vật"
+            pass1aStats: {
+              nhan_vat: parseInt((d.message || '').match(/(\d+)\s*nhân vật/)?.[1] || '0', 10),
+              time_ms:  elapsedMs,
+            },
+          }))
+        } else if (d.stage === 'pass1b_start') {
+          pass1bStartTime = Date.now()
+          setPass1(s => ({ ...s, stage: 'pass1b', stageMessage: d.message || '' }))
+        } else if (d.stage === 'pass1b_done') {
+          const elapsedMs = Date.now() - pass1bStartTime
+          setPass1(s => ({
+            ...s,
+            stage: 'merging',
+            stageMessage: d.message || 'Đang tổng hợp Bible...',
+            pass1bStats: {
+              scene_count: parseInt((d.message || '').match(/(\d+)\s*đoạn/)?.[1] || '0', 10),
+              time_ms:     elapsedMs,
+            },
+          }))
+        }
+      } catch (err) {
+        console.error('SSE parse error:', err)
+      }
+    })
+
     try {
       const res = await api.post(`/projects/${projectId}/translate/analyze`, {
         api_key:     apiKey,
         model:       config.model_pass1,
         source_lang: 'zh',
       })
+      // Đóng SSE khi API trả về xong
+      if (esRef.current) {
+        esRef.current.close()
+        esRef.current = null
+      }
       setPass1(s => ({
         ...s,
-        running:  false, done: true,
+        running: false, done: true,
+        stage:   'done',
+        stageMessage: 'Hoàn tất',
         bible:    res.data.bible,
         tokensIn:  res.data.tokens_in  || 0,
         tokensOut: res.data.tokens_out || 0,
         timingMs:  res.data.timing_ms  || 0,
+        pass1a:    res.data.pass1a || null,
+        pass1b:    res.data.pass1b || null,
       }))
-      // Sau Pass 1: build chunks fresh (chưa có data dịch)
       await buildChunksFromBible(res.data.bible)
     } catch (err: any) {
-      setPass1(s => ({ ...s, running: false, error: err?.response?.data?.detail || err?.message || 'Lỗi Pass 1' }))
+      if (esRef.current) {
+        esRef.current.close()
+        esRef.current = null
+      }
+      setPass1(s => ({
+        ...s, running: false,
+        stage: 'idle',
+        error: err?.response?.data?.detail || err?.message || 'Lỗi Pass 1',
+      }))
     }
   }, [projectId, config])
 
+  // ── Pass 2 Speaker ──────────────────────────────────────────────────────────
+
+  const handleRunPass2Speaker = useCallback(async () => {
+    const apiKey = getApiKey(config, config.model_pass1)
+    if (!apiKey) { alert('Chưa có API key! Vào Cấu hình để nhập.'); return }
+    if (!pass1.bible) { alert('Chưa có Bible. Hãy chạy Pass 1 trước.'); return }
+
+    const sceneCount = pass1.bible.scene_map?.length || 0
+    setPass2Speaker({
+      running: true, done: false,
+      total: 0, updated: 0, unknown: 0,
+      tokensIn: 0, tokensOut: 0, timingMs: 0,
+      sceneCount, doneScenes: 0, totalScenes: sceneCount,
+      error: '', stageMessage: `Đang chuẩn bị ${sceneCount} scene...`,
+    })
+
+    // Mở SSE để nhận progress per-scene
+    if (esRef.current) { esRef.current.close(); esRef.current = null }
+    const es = new EventSource(`/dub/api/projects/${projectId}/translate/progress`)
+    esRef.current = es
+
+    es.addEventListener('progress', (e: MessageEvent) => {
+      try {
+        const d = JSON.parse(e.data)
+        if (d.stage === 'pass2_start') {
+          setPass2Speaker(s => ({ ...s, stageMessage: d.message || '' }))
+        } else if (d.stage === 'pass2_scene_done') {
+          setPass2Speaker(s => ({
+            ...s,
+            doneScenes: s.doneScenes + 1,
+            stageMessage: d.message || '',
+          }))
+        } else if (d.stage === 'pass2_scene_err') {
+          setPass2Speaker(s => ({ ...s, stageMessage: `⚠ ${d.message}` }))
+        } else if (d.stage === 'pass2_done') {
+          setPass2Speaker(s => ({ ...s, stageMessage: d.message || '' }))
+        }
+      } catch {}
+    })
+
+    try {
+      const res = await api.post(`/projects/${projectId}/translate/pass2-speaker`, {
+        api_key: apiKey,
+        model:   config.model_pass1,
+        concurrency: 3,
+      })
+      if (esRef.current) { esRef.current.close(); esRef.current = null }
+      setPass2Speaker(s => ({
+        ...s,
+        running: false, done: true,
+        total:     res.data.total     || 0,
+        updated:   res.data.updated   || 0,
+        unknown:   res.data.unknown   || 0,
+        tokensIn:  res.data.tokens_in || 0,
+        tokensOut: res.data.tokens_out|| 0,
+        timingMs:  res.data.timing_ms || 0,
+        doneScenes: sceneCount,
+        stageMessage: 'Hoàn tất',
+      }))
+      // Reload subtitles để Pass 3 dùng character_id mới
+      await loadProject(projectId)
+    } catch (err: any) {
+      if (esRef.current) { esRef.current.close(); esRef.current = null }
+      setPass2Speaker(s => ({
+        ...s, running: false,
+        error: err?.response?.data?.detail || err?.message || 'Lỗi Pass 2',
+      }))
+    }
+  }, [projectId, config, pass1.bible])
   // ── Pass 3 ──────────────────────────────────────────────────────────────────
 
   // Helper: gắn SSE listener cho progress của Pass 3.
@@ -2187,9 +3222,11 @@ export default function TranslatePage({ projectId, onBack }: Props) {
   const model3Label = config.model_pass3.split('-').slice(-2).join('-') || config.model_pass3
 
   const STEPS = [
-    { id: 0 as StepId, icon: '🧹', label: 'Làm sạch',    sublabel: 'Loại bỏ dòng rác' },
-    { id: 1 as StepId, icon: '🔍', label: 'Phân tích',   sublabel: `Pass 1 · ${model1Label}` },
-    { id: 2 as StepId, icon: '🌐', label: 'Dịch thuật',  sublabel: `Pass 3 · ${model3Label}` },
+    { id: 0 as StepId, icon: '🧹', label: 'Làm sạch',     sublabel: 'Loại bỏ dòng rác' },
+    { id: 1 as StepId, icon: '🎙️', label: 'Diarization', sublabel: 'Nhận diện giọng nói' },
+    { id: 2 as StepId, icon: '🔍', label: 'Phân tích',    sublabel: `Pass 1 · ${model1Label}` },
+    { id: 3 as StepId, icon: '🎯', label: 'Gán speaker',  sublabel: `Pass 2 · ${model1Label}` },
+    { id: 4 as StepId, icon: '🌐', label: 'Dịch thuật',   sublabel: `Pass 3 · ${model3Label}` },
   ]
 
   return (
@@ -2223,8 +3260,8 @@ export default function TranslatePage({ projectId, onBack }: Props) {
         <div className="flex-1" />
 
         {/* Quick next step hint */}
-        {!pass1.done && step < 1 && (
-          <button onClick={() => setStep(1)} className="btn text-[11px] text-blue-500 border-blue-200 dark:border-blue-800">
+        {!pass1.done && step < 2 && (
+          <button onClick={() => setStep(2)} className="btn text-[11px] text-blue-500 border-blue-200 dark:border-blue-800">
             Bỏ qua → Phân tích ngay
           </button>
         )}
@@ -2268,6 +3305,17 @@ export default function TranslatePage({ projectId, onBack }: Props) {
 
         {step === 1 && (
           <div className="flex-1 overflow-y-auto pb-6">
+            <DiarizePanel
+              projectId={projectId}
+              hasVideo={!!project?.video_path}
+              onSkip={() => setStep(2)}
+              onDone={() => setStep(2)}
+            />
+          </div>
+        )}
+
+        {step === 2 && (
+          <div className="flex-1 overflow-y-auto pb-6">
             <Step1Panel
               state={pass1}
               modelLabel={config.model_pass1}
@@ -2278,7 +3326,19 @@ export default function TranslatePage({ projectId, onBack }: Props) {
           </div>
         )}
 
-        {step === 2 && (
+        {step === 3 && (
+          <div className="flex-1 overflow-y-auto pb-6">
+            <Pass2SpeakerPanel
+              state={pass2Speaker}
+              modelLabel={config.model_pass1}
+              hasBible={!!pass1.bible}
+              onRun={handleRunPass2Speaker}
+              onSkip={() => setStep(4)}
+            />
+          </div>
+        )}
+
+        {step === 4 && (
           <Step2Panel
             state={pass3}
             pass1Bible={pass1.bible}

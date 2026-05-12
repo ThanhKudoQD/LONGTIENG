@@ -58,16 +58,26 @@ def _sec_to_srt_time(s: float) -> str:
     return f"{h:02d}:{m:02d}:{int(sec):02d},{ms:03d}"
 
 
-def _subs_to_blocks(subs: list[Subtitle]) -> list[dict]:
-    return [
-        {
-            "index": s.index,
-            "start": _sec_to_srt_time(s.start_time),
-            "end":   _sec_to_srt_time(s.end_time),
-            "text":  s.original_text or s.text or "",
-        }
-        for s in sorted(subs, key=lambda x: x.index)
-    ]
+def _subs_to_blocks(subs: list[Subtitle], char_map: dict | None = None) -> list[dict]:
+    """Convert subtitles thành blocks cho translator.
+
+    Nếu truyền char_map (id → name), block sẽ có field "speaker" = tên Character
+    (thường là SPEAKER_XX từ Diarization, hoặc tên đã đổi sau Pass 1A).
+    Nếu không có character_id → speaker = None.
+    """
+    result = []
+    for s in sorted(subs, key=lambda x: x.index):
+        speaker = None
+        if char_map and s.character_id:
+            speaker = char_map.get(s.character_id)
+        result.append({
+            "index":   s.index,
+            "start":   _sec_to_srt_time(s.start_time),
+            "end":     _sec_to_srt_time(s.end_time),
+            "text":    s.original_text or s.text or "",
+            "speaker": speaker,  # None nếu chưa gán
+        })
+    return result
 
 
 def _load_translator():
@@ -130,7 +140,14 @@ def get_bible(pid: int, db: Session = Depends(get_db)):
 
 @router.post("/projects/{pid}/translate/analyze")
 async def analyze(pid: int, req: TranslateAnalyzeRequest, db: Session = Depends(get_db)):
-    """Pass 1 — phân tích phim, xây Bible, tự tạo Characters."""
+    """Pass 1 — phân tích phim 2 bước (1A nhân vật, 1B scene_map), tự tạo Characters.
+
+    Stream progress qua SSE channel của project để FE hiển thị:
+      - pass1a_start  → "Bước 1/2: Phân tích nhân vật..."
+      - pass1a_done   → "Pass 1A xong, N nhân vật"
+      - pass1b_start  → "Bước 2/2: Phân tích cảnh..."
+      - pass1b_done   → "Pass 1B xong, M đoạn"
+    """
     p = db.query(Project).filter(Project.id == pid).first()
     if not p:
         raise HTTPException(404, "Project not found")
@@ -147,46 +164,495 @@ async def analyze(pid: int, req: TranslateAnalyzeRequest, db: Session = Depends(
     except RuntimeError as e:
         raise HTTPException(503, str(e))
 
-    srt_blocks = _subs_to_blocks(subs)
+    # Load Characters → map id → name (SPEAKER_XX hoặc tên đã đổi)
+    chars = db.query(Character).filter(Character.project_id == pid).all()
+    char_map = {c.id: c.name for c in chars}
+    srt_blocks = _subs_to_blocks(subs, char_map=char_map)
+
+    # Thông báo: có dùng diarization không
+    speakers_assigned = sum(1 for b in srt_blocks if b.get("speaker"))
+    if speakers_assigned > 0:
+        logger.info(
+            f"[Pass1 pid={pid}] Pass 1A có dữ liệu Diarization: "
+            f"{speakers_assigned}/{len(srt_blocks)} dòng có speaker"
+        )
+
+    # Callback để stream progress qua SSE
+    async def _on_progress(stage: str, message: str):
+        await _pub(pid, {
+            "stage":   stage,
+            "message": message,
+            "percent": 50 if stage == "pass1a_done" else (
+                       25 if stage == "pass1a_start" else
+                       75 if stage == "pass1b_start" else
+                       100 if stage == "pass1b_done" else 0),
+        })
 
     try:
+        # pass1_analyze giờ là wrapper gọi 1A → 1B → merge
         bible, api_result = await t.pass1_analyze(
             srt_blocks=srt_blocks,
             api_key=req.api_key,
             model=req.model,
+            on_progress=_on_progress,
         )
     except Exception as e:
         logger.error(f"Pass1 pid={pid}: {e}", exc_info=True)
+        await _pub(pid, {"stage": "error", "message": f"Pass 1 lỗi: {e}", "percent": 0})
         raise HTTPException(500, f"Pass 1 lỗi: {e}")
 
-    # Lưu Bible
+    # ── Lưu Bible ────────────────────────────────────────────────────────────
     p.bible_json  = json.dumps(bible, ensure_ascii=False)
     p.source_lang = req.source_lang
     db.commit()
 
-    # Tạo Characters từ nhan_vat trong Bible
-    existing_names = {c.name for c in db.query(Character).filter(Character.project_id == pid).all()}
-    created = []
-    for i, nv in enumerate(bible.get("nhan_vat") or []):
-        name = (nv.get("vi") or "").strip()
-        if not name or name in existing_names:
+    # ⚠ Bible mới → scene_map mới. Xóa translate_chunks cũ.
+    # KHÔNG reset subtitle.character_id (giữ gán từ Diarization).
+    # Chỉ clear bản dịch tiếng Việt (nếu có) để Pass 3 chạy lại.
+    deleted_chunks = db.query(TranslateChunk).filter(
+        TranslateChunk.project_id == pid
+    ).delete(synchronize_session=False)
+
+    subs_to_reset = db.query(Subtitle).filter(Subtitle.project_id == pid).all()
+    reset_subs_count = 0
+    for s in subs_to_reset:
+        # Reset BẢN DỊCH (text) nhưng GIỮ character_id (từ Diarization).
+        if s.original_text and s.text and s.text != s.original_text:
+            s.text         = ""
+            # KHÔNG reset character_id — giữ từ Diarization
+            s.tts_done     = False
+            s.audio_path   = None
+            s.wav_duration = None
+            reset_subs_count += 1
+    db.commit()
+
+    if deleted_chunks > 0 or reset_subs_count > 0:
+        logger.info(
+            f"[Pass1 reset pid={pid}] Xóa {deleted_chunks} translate_chunks cũ, "
+            f"clear {reset_subs_count} bản dịch cũ"
+        )
+
+    # ── Map SPEAKER_XX → tên Việt (đổi tên Character) ────────────────────────
+    # Pass 1A trả về speaker_ids: list các SPEAKER_XX khớp với nhân vật này.
+    # Backend đổi tên Character "SPEAKER_XX" → "Cố Trầm Châu".
+    # Trường hợp 1 nhân vật khớp với nhiều SPEAKER:
+    #   - SPEAKER đầu tiên (chính) → đổi tên thành tên Việt
+    #   - SPEAKER còn lại → merge: chuyển subtitle.character_id về SPEAKER đầu,
+    #     rồi xóa SPEAKER thừa
+    existing_chars = db.query(Character).filter(Character.project_id == pid).all()
+    char_by_name   = {c.name: c for c in existing_chars}
+    renamed = []
+    merged_count = 0
+
+    for nv in (bible.get("nhan_vat") or []):
+        vi = (nv.get("vi") or "").strip()
+        if not vi:
             continue
-        db.add(Character(
-            project_id=pid,
-            name=name,
-            description=nv.get("than_phan", ""),
-            color=CHAR_COLORS[i % len(CHAR_COLORS)],
-        ))
-        existing_names.add(name)
-        created.append(name)
+        spk_ids = nv.get("speaker_ids") or []
+        if not spk_ids:
+            # Nhân vật không match speaker nào → tạo Character mới (như cũ)
+            # nhưng skip tier chuc_nang
+            tier = (nv.get("tier") or "").strip().lower()
+            if tier == "chuc_nang":
+                continue
+            if vi in char_by_name:
+                continue  # đã tồn tại, không tạo trùng
+            new_char = Character(
+                project_id=pid,
+                name=vi,
+                description=nv.get("than_phan", ""),
+                color=CHAR_COLORS[len(char_by_name) % len(CHAR_COLORS)],
+            )
+            db.add(new_char)
+            db.flush()
+            char_by_name[vi] = new_char
+            renamed.append({"action": "create_new", "vi": vi})
+            continue
+
+        # Có speaker_ids → đổi tên Character đầu, merge các Character sau
+        primary_spk = spk_ids[0]
+        primary_char = char_by_name.get(primary_spk)
+        if not primary_char:
+            logger.warning(
+                f"[Pass1 pid={pid}] {vi} mapping với {primary_spk} nhưng "
+                f"không tìm thấy Character đó. Bỏ qua."
+            )
+            continue
+
+        # Đổi tên Character primary
+        old_name = primary_char.name
+        primary_char.name = vi
+        if nv.get("than_phan"):
+            primary_char.description = nv["than_phan"]
+        renamed.append({"action": "rename", "from": old_name, "to": vi})
+
+        # Merge các SPEAKER thứ 2+ vào primary
+        for extra_spk in spk_ids[1:]:
+            extra_char = char_by_name.get(extra_spk)
+            if not extra_char:
+                continue
+            # Chuyển subtitle.character_id từ extra → primary
+            updated = db.query(Subtitle).filter(
+                Subtitle.project_id == pid,
+                Subtitle.character_id == extra_char.id
+            ).update({"character_id": primary_char.id}, synchronize_session=False)
+            merged_count += updated
+            # Xóa Character thừa
+            db.delete(extra_char)
+            renamed.append({"action": "merge_into", "from": extra_spk, "into": vi, "lines": updated})
+
+    db.commit()
+
+    if renamed:
+        logger.info(
+            f"[Pass1 pid={pid}] Speaker mapping: "
+            f"đổi tên/tạo {len(renamed)} Characters, merge {merged_count} dòng"
+        )
+
+    return {
+        "bible":            bible,
+        "speaker_mapping":  renamed,
+        "merged_count":     merged_count,
+        "tokens_in":        api_result.get("tokens_in", 0),
+        "tokens_out":       api_result.get("tokens_out", 0),
+        "timing_ms":        api_result.get("timing_ms", 0),
+        # Chi tiết 2 sub-pass — FE có thể hiển thị nếu muốn
+        "pass1a":           api_result.get("pass1a", {}),
+        "pass1b":           api_result.get("pass1b", {}),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PASS 0 — LÀM SẠCH SRT (loại bỏ logo kênh, watermark, text OCR thừa)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Pass0CleanRequest(BaseModel):
+    api_key: str
+    model:   str
+
+
+@router.post("/projects/{pid}/translate/pass0-clean")
+async def pass0_clean(pid: int, req: Pass0CleanRequest, db: Session = Depends(get_db)):
+    """Pass 0 — quét subtitles, gửi AI xác định text thừa, áp dụng fix vào DB.
+
+    Quy trình:
+      1. Detect các dòng bất thường (text quá dài, latin noise, multi-region OCR)
+      2. Build windows context (mỗi dòng ⚠ + 10 dòng kề)
+      3. Gửi từng window lên AI song song
+      4. AI quyết định: clean (giữ thoại, bỏ thừa) hoặc delete (cả dòng là thừa)
+      5. Áp dụng fixes vào DB:
+         - clean → update Subtitle.text
+         - delete → xóa Subtitle khỏi DB, reindex các dòng sau
+      6. Trả về report cho FE hiển thị
+    """
+    p = db.query(Project).filter(Project.id == pid).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+
+    subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid
+    ).order_by(Subtitle.index).all()
+
+    if not subs:
+        raise HTTPException(400, "Project chưa có subtitle nào.")
+
+    try:
+        t = _load_translator()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+    # Chuyển subtitles DB sang format mà pass0 hiểu:
+    # entries = [{"index", "start", "end", "text"}]
+    entries = []
+    for s in subs:
+        entries.append({
+            "index": s.index,
+            "start": s.start_time,
+            "end":   s.end_time,
+            # Pass 0 nhìn vào text gốc (TQ). Nếu đã có original_text → đây là
+            # bản gốc, ưu tiên dùng. Nếu chưa → s.text chính là tiếng Trung.
+            "text":  (s.original_text or s.text or "").strip(),
+        })
+
+    # Detect dòng bất thường
+    try:
+        abnormal = t.detect_abnormal_entries(entries)
+    except Exception as e:
+        logger.error(f"[Pass0 pid={pid}] detect_abnormal_entries lỗi: {e}", exc_info=True)
+        raise HTTPException(500, f"Detect bất thường lỗi: {e}")
+
+    if not abnormal:
+        return {
+            "ok":       True,
+            "report":   [],
+            "message":  "Không phát hiện dòng bất thường nào.",
+            "scanned":  len(entries),
+            "abnormal": 0,
+            "fixed":    0,
+        }
+
+    logger.info(f"[Pass0 pid={pid}] Phát hiện {len(abnormal)} dòng nghi ngờ trong {len(entries)} subs")
+
+    # Build windows context
+    windows = t.build_pass0_windows(entries, abnormal, window=10, merge_gap=5)
+
+    # Gửi song song lên AI
+    try:
+        tasks = [
+            t.pass0_clean_window(w, abnormal, req.api_key, req.model)
+            for w in windows
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        logger.error(f"[Pass0 pid={pid}] Gọi AI lỗi: {e}", exc_info=True)
+        raise HTTPException(500, f"Gọi AI lỗi: {e}")
+
+    # Gom tất cả fixes (bỏ qua window lỗi)
+    all_fixes = []
+    for r in results:
+        if isinstance(r, dict):
+            all_fixes.extend(r.get("fixes", []))
+        elif isinstance(r, Exception):
+            logger.warning(f"[Pass0 pid={pid}] 1 window lỗi: {r}")
+
+    if not all_fixes:
+        return {
+            "ok":       True,
+            "report":   [],
+            "message":  f"Đã quét {len(abnormal)} dòng nghi ngờ nhưng AI không tìm thấy text thừa.",
+            "scanned":  len(entries),
+            "abnormal": len(abnormal),
+            "fixed":    0,
+        }
+
+    logger.info(f"[Pass0 pid={pid}] AI đề xuất {len(all_fixes)} fixes")
+
+    # Áp dụng fixes vào DB
+    fix_map = {f["index"]: f for f in all_fixes if "index" in f}
+    indices_to_delete = []
+    report = []
+    fixed_count = 0
+
+    for s in subs:
+        fix = fix_map.get(s.index)
+        if not fix:
+            continue
+
+        action = fix.get("action", "")
+        original_text = s.original_text or s.text or ""
+
+        if action == "delete":
+            indices_to_delete.append(s.index)
+            report.append({
+                "index":    s.index,
+                "action":   "delete",
+                "original": original_text,
+                "cleaned":  "",
+                "reason":   fix.get("reason", ""),
+            })
+            fixed_count += 1
+
+        elif action == "clean":
+            cleaned = (fix.get("cleaned") or "").strip()
+            if not cleaned:
+                # cleaned rỗng → coi như delete
+                indices_to_delete.append(s.index)
+                report.append({
+                    "index":    s.index,
+                    "action":   "delete",
+                    "original": original_text,
+                    "cleaned":  "",
+                    "reason":   fix.get("reason", "") + " (cleaned rỗng)",
+                })
+            else:
+                # Update text. Quan trọng: cập nhật cả s.text VÀ s.original_text
+                # (nếu original_text đã tồn tại, đây là gốc TQ — phải sửa luôn để
+                # Pass 3 sau này không thấy text thừa).
+                s.text = cleaned
+                if s.original_text:
+                    s.original_text = cleaned
+                report.append({
+                    "index":    s.index,
+                    "action":   "clean",
+                    "original": original_text,
+                    "cleaned":  cleaned,
+                    "reason":   fix.get("reason", ""),
+                })
+            fixed_count += 1
+
+    # Xóa các subtitle bị delete, reindex các dòng còn lại
+    if indices_to_delete:
+        # Xóa
+        db.query(Subtitle).filter(
+            Subtitle.project_id == pid,
+            Subtitle.index.in_(indices_to_delete),
+        ).delete(synchronize_session=False)
+        db.commit()
+
+        # Reindex: lấy lại danh sách subtitles còn lại theo thứ tự index cũ,
+        # gán index mới liên tục 1..N
+        remaining = db.query(Subtitle).filter(
+            Subtitle.project_id == pid
+        ).order_by(Subtitle.index).all()
+        for new_idx, s in enumerate(remaining, start=1):
+            if s.index != new_idx:
+                s.index = new_idx
+        db.commit()
+
+        logger.info(
+            f"[Pass0 pid={pid}] Đã xóa {len(indices_to_delete)} dòng, "
+            f"reindex còn {len(remaining)} dòng"
+        )
+
+    # Bible cũ không còn hợp lệ vì số dòng đã đổi → xóa Bible + chunks
+    # để buộc user chạy lại Pass 1.
+    if indices_to_delete:
+        p.bible_json = None
+        db.query(TranslateChunk).filter(
+            TranslateChunk.project_id == pid
+        ).delete(synchronize_session=False)
+        db.commit()
+
+    # Commit cuối cho các fix kiểu clean (chưa commit ở trên)
     db.commit()
 
     return {
-        "bible":         bible,
-        "chars_created": created,
-        "tokens_in":     api_result.get("tokens_in", 0),
-        "tokens_out":    api_result.get("tokens_out", 0),
-        "timing_ms":     api_result.get("timing_ms", 0),
+        "ok":       True,
+        "report":   report,
+        "message":  f"Đã làm sạch {fixed_count} dòng (xóa {len(indices_to_delete)}, sửa {fixed_count - len(indices_to_delete)}).",
+        "scanned":  len(entries),
+        "abnormal": len(abnormal),
+        "fixed":    fixed_count,
+        "deleted":  len(indices_to_delete),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PASS 2 SPEAKER — AI QUYẾT ĐỊNH CUỐI AI NÓI DÒNG NÀO
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Pass2SpeakerRequest(BaseModel):
+    api_key:    str
+    model:      str
+    concurrency: int = 3
+
+
+@router.post("/projects/{pid}/translate/pass2-speaker")
+async def pass2_speaker(pid: int, req: Pass2SpeakerRequest, db: Session = Depends(get_db)):
+    """Pass 2 Speaker — AI gán speaker chính thức cho mọi dòng phụ đề.
+
+    Chạy song song theo scene_map. AI dùng SPEAKER_XX (Diarization) làm gợi ý,
+    nhưng QUYẾT ĐỊNH CUỐI dựa vào nội dung thoại.
+
+    Sau Pass 2:
+      - subtitle.character_id được cập nhật trỏ về Character đúng (theo speaker_zh)
+      - Pass 3 chỉ cần dịch, không phải đoán speaker
+    """
+    p = db.query(Project).filter(Project.id == pid).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+    if not p.bible_json:
+        raise HTTPException(400, "Chưa có Bible. Hãy chạy Pass 1 trước.")
+
+    bible = json.loads(p.bible_json)
+
+    subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid
+    ).order_by(Subtitle.index).all()
+    if not subs:
+        raise HTTPException(400, "Project chưa có subtitle nào.")
+
+    try:
+        t = _load_translator()
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+
+    # Build srt_blocks có sẵn speaker (SPEAKER_XX hoặc tên đã đổi sau Pass 1)
+    chars = db.query(Character).filter(Character.project_id == pid).all()
+    char_map = {c.id: c.name for c in chars}
+    srt_blocks = _subs_to_blocks(subs, char_map=char_map)
+
+    # Lookup zh → Character id (để gán sau)
+    # Từ bible.nhan_vat: zh → vi → Character với name=vi
+    char_by_name = {c.name: c for c in chars}
+    zh_to_char_id: dict[str, int] = {}
+    for nv in (bible.get("nhan_vat") or []):
+        zh = nv.get("zh")
+        vi = nv.get("vi")
+        if not zh or not vi:
+            continue
+        char = char_by_name.get(vi)
+        if char:
+            zh_to_char_id[zh] = char.id
+
+    logger.info(f"[Pass2 pid={pid}] zh→char_id map: {len(zh_to_char_id)} entries")
+
+    # Progress callback qua SSE
+    async def _on_progress(stage: str, message: str):
+        await _pub(pid, {"stage": stage, "message": message})
+
+    # Chạy Pass 2 Speaker
+    try:
+        speakers, api_result = await t.pass2_speaker_analyze(
+            bible       = bible,
+            srt_blocks  = srt_blocks,
+            api_key     = req.api_key,
+            model       = req.model,
+            on_progress = _on_progress,
+            concurrency = req.concurrency,
+        )
+    except Exception as e:
+        logger.error(f"[Pass2 pid={pid}] Lỗi: {e}", exc_info=True)
+        await _pub(pid, {"stage": "error", "message": f"Pass 2 lỗi: {e}"})
+        raise HTTPException(500, f"Pass 2 lỗi: {e}")
+
+    # Áp dụng kết quả: cập nhật subtitle.character_id
+    updated_count = 0
+    unknown_count = 0
+    by_index = {s.index: s for s in subs}
+
+    for entry in speakers:
+        idx = entry.get("index")
+        speaker_zh = entry.get("speaker_zh", "?")
+        if not idx or idx not in by_index:
+            continue
+
+        sub = by_index[idx]
+        if speaker_zh == "?" or not speaker_zh:
+            # Không xác định → để character_id null (hoặc giữ Diarization?)
+            # Chính sách: clear character_id để biết AI không xác định được
+            if sub.character_id is not None:
+                sub.character_id = None
+            unknown_count += 1
+            continue
+
+        char_id = zh_to_char_id.get(speaker_zh)
+        if char_id and sub.character_id != char_id:
+            sub.character_id = char_id
+            updated_count += 1
+        elif not char_id:
+            # speaker_zh AI trả về không match Character nào — lỗi prompt
+            logger.warning(
+                f"[Pass2 pid={pid}] line {idx}: speaker_zh='{speaker_zh}' "
+                f"không match Character nào"
+            )
+
+    db.commit()
+
+    logger.info(
+        f"[Pass2 pid={pid}] Cập nhật {updated_count} dòng, "
+        f"unknown {unknown_count}, total {len(speakers)} entries"
+    )
+
+    return {
+        "ok":              True,
+        "total":           len(speakers),
+        "updated":         updated_count,
+        "unknown":         unknown_count,
+        "tokens_in":       api_result.get("tokens_in", 0),
+        "tokens_out":      api_result.get("tokens_out", 0),
+        "timing_ms":       api_result.get("timing_ms", 0),
+        "scene_count":     api_result.get("scene_count", 0),
     }
 
 
@@ -239,7 +705,28 @@ async def _run_pass3_bg(pid: int, api_key: str, model: str,
         subs      = db.query(Subtitle).filter(
             Subtitle.project_id == pid
         ).order_by(Subtitle.index).all()
-        srt_blocks = _subs_to_blocks(subs)
+
+        # Build srt_blocks với speaker_zh
+        # Pipeline mới: subtitle.character_id → Character.name (tiếng Việt)
+        # Bible: nhân vật có cả zh và vi. Lookup vi → zh
+        chars = db.query(Character).filter(Character.project_id == pid).all()
+        char_id_to_vi = {c.id: c.name for c in chars}
+        vi_to_zh: dict[str, str] = {}
+        for nv in (bible.get("nhan_vat") or []):
+            vi = nv.get("vi")
+            zh = nv.get("zh")
+            if vi and zh:
+                vi_to_zh[vi] = zh
+
+        srt_blocks = _subs_to_blocks(subs, char_map=char_id_to_vi)
+        # Thêm speaker_zh cho mỗi block (Pass 3 build_pass3_prompt sẽ dùng)
+        for b in srt_blocks:
+            vi_name = b.get("speaker")
+            if vi_name and vi_name in vi_to_zh:
+                b["speaker_zh"] = vi_to_zh[vi_name]
+            elif vi_name:
+                # Có speaker nhưng không match Bible (Character chưa đổi tên?) → fallback dùng nguyên
+                b["speaker_zh"] = vi_name
 
         all_chunks = t.build_chunks_from_bible(srt_blocks, bible)
 

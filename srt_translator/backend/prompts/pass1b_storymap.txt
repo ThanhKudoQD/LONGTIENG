@@ -1,0 +1,206 @@
+Bạn là chuyên gia phân tích kịch bản phim Trung Quốc. Đây là BƯỚC 2/2 trong quy trình phân tích — tập trung CỐT TRUYỆN và PHÂN ĐOẠN.
+
+Đọc TOÀN BỘ phụ đề và trả về JSON thuần — KHÔNG markdown, KHÔNG giải thích.
+
+━━━ NHIỆM VỤ CỦA PASS NÀY ━━━
+
+CHỈ làm 3 việc:
+1. Viết tóm tắt cốt truyện toàn phim (story_arc)
+2. Xác định turning points xưng hô (khoảnh khắc đổi xưng hô quan trọng)
+3. Chia phim thành các ĐOẠN KỊCH BẢN (scene_map)
+
+Bạn ĐÃ CÓ kết quả Pass 1A — danh sách nhân vật và xưng hô. Sử dụng để chính xác hơn, KHÔNG cần phân tích lại.
+
+━━━ KẾT QUẢ PASS 1A (đã có sẵn) ━━━
+
+{PASS1A_RESULT}
+
+━━━ JSON SCHEMA ━━━
+
+{
+  "story_arc": {
+    "tom_tat_phim": "6-8 câu cốt truyện chính: mở đầu, biến cố, phát triển, cao trào, kết",
+    "chu_de_chinh": "1 câu chủ đề"
+  },
+
+  "turning_points_xung_ho": [
+    {
+      "dong": 412,
+      "ai_voi_ai": "苏念 → 顾沉舟",
+      "tu_gi_sang_gi": "anh - em → tôi - anh",
+      "ly_do": "Tô Niệm phát hiện hợp đồng hôn nhân, cảm thấy bị lừa dối"
+    }
+  ],
+
+  "scene_map": [
+    {
+      "stt": 1,
+      "tu_dong": 1,
+      "den_dong": 180,
+      "muc_dich_ke_chuyen": "Setup — giới thiệu hôn nhân hợp đồng + biến cố đầu tiên",
+      "dia_diem": "Văn phòng Cố thị → Quán cà phê → Biệt thự",
+      "nhan_vat": ["顾沉舟", "苏念", "苏母", "记者"],
+      "tom_tat": "4-6 câu kể TIẾN TRÌNH đoạn: mở thế nào → diễn biến chính → kết thế nào",
+      "tone": ["lanh_lung", "bi_thuong"],
+      "matrix_xung_ho": {
+        "顾沉舟 -> 苏念": "tôi - cô (khách sáo)",
+        "苏念 -> 顾沉舟": "tôi - anh (giữ khoảng cách)"
+      },
+      "ghi_chu": "Lưu ý đặc biệt cho Pass 3 (rỗng nếu không có)"
+    }
+  ]
+}
+
+━━━ CHIA ĐOẠN — QUY TẮC CỐT LÕI ━━━
+
+ĐƠN VỊ phân tích là ĐOẠN KỊCH BẢN (story beat / sequence), KHÔNG phải scene quay phim.
+
+ĐOẠN KỊCH BẢN = một "câu chuyện nhỏ" hoàn chỉnh trong phim, có:
+  · Mục đích kể chuyện rõ ràng
+  · Mở đầu — diễn biến — kết thúc của riêng nó
+  · Có thể chứa NHIỀU cảnh vật lý (đổi địa điểm, nhóm NV) MIỄN LÀ cùng mục đích cốt truyện
+
+VÍ DỤ MỘT ĐOẠN ĐIỂN HÌNH:
+"Đoạn 2 — Nữ chính phát hiện chồng ngoại tình":
+  Cảnh 2a: Đi làm về sớm, thấy điện thoại chồng (20 dòng)
+  Cảnh 2b: Mở tin nhắn (15 dòng)
+  Cảnh 2c: Đối chất qua điện thoại (40 dòng)
+  Cảnh 2d: Một mình khóc (25 dòng)
+  Cảnh 2e: Gặp bạn thân tâm sự (60 dòng)
+→ TOÀN BỘ là 1 đoạn (160 dòng), không tách dù có 5 địa điểm.
+
+CẤU TRÚC THƯỜNG GẶP TRONG PHIM SHORT-DRAMA TQ:
+
+Phim ngắn (300-1500 dòng) — 3-6 đoạn:
+  1. Mở phim — status quo
+  2. Inciting incident — biến cố châm ngòi
+  3. Phản ứng + lập kế hoạch
+  4. Xung đột leo thang
+  5. Cao trào — vạch mặt
+  6. Kết — trạng thái mới
+
+Phim trung (1500-3000 dòng) — 5-10 đoạn:
+  + Midpoint twist, All is lost, Sub-plot
+
+Phim dài (3000-6000 dòng) — 8-15 đoạn:
+  Multi-arc lồng vào nhau
+
+DẤU HIỆU NHẬN BIẾT ĐOẠN MỚI:
+
+① ĐỔI MỤC ĐÍCH KỂ CHUYỆN:
+   ✓ Đang giới thiệu nhân vật → bắt đầu xung đột
+   ✓ Đang lập kế hoạch → bắt đầu thực hiện
+   ✓ Cao trào kết thúc → hậu quả/hòa giải
+
+② STATUS NHÂN VẬT CHÍNH ĐỔI HẲN:
+   ✓ Từ "không biết sự thật" → "biết sự thật"
+   ✓ Từ "yêu chồng" → "quyết tâm trả thù"
+
+③ TIME SKIP RÕ RÀNG:
+   ✓ "3 năm sau", "1 tuần trôi qua"
+
+④ THAY ĐỔI ARC (vào cao trào / kết):
+   ✓ Sau midpoint twist, all is lost moment
+
+KHÔNG TẠO ĐOẠN MỚI KHI:
+✗ Chỉ đổi địa điểm trong cùng câu chuyện → giữ trong đoạn
+✗ Nhân vật khác xen vào → giữ trong đoạn
+✗ Đổi tone trong cùng cuộc thoại → giữ
+✗ Flashback ngắn <15 dòng → giữ trong đoạn hiện tại
+
+ĐỘ DÀI ĐOẠN MONG ĐỢI:
+- Đoạn ngắn (mở phim/kết phim): 80-150 dòng
+- Đoạn thường: 150-350 dòng
+- Đoạn cao trào: 250-500 dòng
+
+QUY TẮC TỐI THIỂU:
+- Mỗi đoạn TỐI THIỂU 60 dòng (trừ phim <200 dòng)
+- Số đoạn ƯỚC LƯỢNG = tổng_dòng / 250
+  · Phim 500 dòng: 2-3 đoạn
+  · Phim 1500 dòng: 5-7 đoạn
+  · Phim 3000 dòng: 8-12 đoạn
+  · Phim 6000 dòng: 15-25 đoạn
+
+━━━ HƯỚNG DẪN VIẾT TỪNG TRƯỜNG ━━━
+
+【muc_dich_ke_chuyen】 ⭐ QUAN TRỌNG NHẤT
+1 câu ngắn. Mỗi đoạn PHẢI có 1 trong các mục đích:
+  · "Setup — giới thiệu [gì]"
+  · "Inciting incident — [biến cố gì]"
+  · "Rising action — [leo thang thế nào]"
+  · "Midpoint twist — [đảo chiều gì]"
+  · "All is lost — [tưởng thua thế nào]"
+  · "Climax — [cao trào gì]"
+  · "Resolution — [kết quả gì]"
+  · "Sub-plot — [line phụ gì]"
+  · "Transition — [chuyển tiếp gì]"
+
+NẾU không viết được muc_dich_ke_chuyen rõ → đoạn này KHÔNG nên tồn tại độc lập, GỘP với đoạn kề.
+
+【dia_diem】
+Liệt kê tất cả địa điểm trong đoạn, cách nhau "→":
+  Vd: "Văn phòng → Quán cà phê → Biệt thự"
+Hồi tưởng: "Hồi tưởng — X năm trước, [địa điểm]"
+
+【nhan_vat】 (list mã zh)
+⚠ CHỈ DÙNG mã zh TỪ DANH SÁCH NHÂN VẬT Ở PASS 1A.
+KHÔNG bịa tên mới. Nếu thấy nhân vật chưa có trong 1A → bỏ qua trong scene_map (đáng lẽ 1A phải có, đây là lỗi 1A).
+
+Liệt kê tất cả nhân vật CÓ THOẠI trong đoạn — bao gồm cả tier chức năng (phóng viên, trợ lý...).
+
+【tom_tat】
+4-6 câu kể TỔNG QUÁT diễn biến:
+  · Đoạn mở thế nào (ai làm gì, ở đâu)
+  · Diễn biến chính
+  · Đoạn kết thế nào (status mới)
+KHÔNG kể chi tiết từng câu thoại. KHÔNG bình luận.
+
+【tone】 — BẮT BUỘC dùng enum, chọn 1-2 tag:
+  • "bi_thuong"   — đau, khóc, mất mát, cay đắng
+  • "can_thang"   — đối đầu, cãi, đe dọa, áp lực
+  • "hai_huoc"   — đùa, tán tỉnh, ngượng, vui
+  • "am_ap"       — yêu thương, gia đình, ấm áp
+  • "lanh_lung"   — bá đạo, kiêu ngạo, business
+  • "trung_tinh"  — bình thường, trao đổi thông tin
+
+Mix tối đa 2 tag: ["lanh_lung", "bi_thuong"].
+
+【matrix_xung_ho】
+CHỈ ghi cặp có TRẠNG THÁI ĐẶC BIỆT trong đoạn này:
+  · Cặp đang giận → gian_duc cụ thể
+  · Cặp chuyển trạng thái xuyên đoạn → "bắt đầu: X → cuối: Y"
+  · Cặp lần đầu gặp → ghi đủ
+  · Cặp ở mac_dinh bình thường → KHÔNG ghi (Pass 3 tra xung_ho_toan_phim)
+
+Mỗi cặp ghi cụ thể "tôi - anh", KHÔNG "kính trọng".
+
+【ghi_chu】
+Lưu ý đặc biệt cho Pass 3 khi dịch đoạn này:
+  · Phong cách cần tránh
+  · Sắc thái ngầm
+  · Bối cảnh văn hóa
+  · Có turning point xưng hô ở dòng nào (nếu có) → ghi rõ
+
+Nếu không có gì đặc biệt: để rỗng "".
+
+━━━ TURNING POINTS XƯNG HÔ ━━━
+
+Liệt kê 2-6 khoảnh khắc trong phim mà xưng hô THAY ĐỔI rõ rệt.
+Mỗi turning point ghi đủ: dong (số dòng), ai_voi_ai, tu_gi_sang_gi, ly_do.
+
+Đây là source of truth — sai chỗ này phim hỏng cảm xúc.
+
+━━━ KIỂM TRA TRƯỚC KHI XUẤT JSON ━━━
+
+□ Mỗi đoạn có muc_dich_ke_chuyen RÕ RÀNG
+□ Số đoạn ≈ tổng_dòng / 250
+□ Không có đoạn nào < 60 dòng (trừ phim ngắn <200 dòng)
+□ Khi nghi ngờ "đoạn mới hay không?" → ƯU TIÊN GỘP
+□ Tổng dòng tất cả đoạn = tổng dòng SRT gốc
+□ Mỗi đoạn có đủ: muc_dich_ke_chuyen, dia_diem, nhan_vat, tom_tat, tone
+□ nhan_vat dùng mã zh TỪ Pass 1A — không bịa tên mới
+□ tone chỉ dùng enum cho phép
+□ turning_points_xung_ho có dong (số dòng), không phải string
+
+━━━ PHỤ ĐỀ ĐẦU VÀO ━━━
+{SRT_INPUT}

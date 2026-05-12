@@ -325,8 +325,180 @@ async def _call_openai_compat(
 
 
 # ─────────────────────────────────────────────
-# PASS 1 — PHÂN TÍCH PHim
+# PASS 1 — PHÂN TÍCH PHIM (2 sub-pass: 1A nhân vật, 1B scene_map)
 # ─────────────────────────────────────────────
+
+def _parse_json_with_fallback(text: str, pass_name: str, finish_reason: str = "",
+                                tokens_out: int = 0) -> dict:
+    """Parse JSON, fallback bóc markdown code fence nếu cần."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+        raise RuntimeError(
+            f"{pass_name} không trả JSON hợp lệ: {e}\n"
+            f"finish_reason={finish_reason}, tokens_out={tokens_out}\n"
+            f"Đầu response:\n{text[:500]}\n...\nCuối response:\n{text[-500:]}"
+        )
+
+
+async def pass1a_analyze(
+    srt_blocks: list[dict],
+    api_key: str,
+    model: str,
+    on_retry=None,
+) -> tuple[dict, dict]:
+    """
+    Pass 1A — Phân tích NHÂN VẬT + XƯNG HÔ + THUẬT NGỮ + THỂ LOẠI.
+
+    Input srt_blocks có thể có field "speaker" (SPEAKER_XX từ Diarization).
+    Nếu có → render format: index|SPEAKER_XX|text
+    Nếu không → render format cũ: index|text (backward compat)
+
+    AI sẽ map mỗi nhân vật với 1+ SPEAKER_XX phù hợp.
+
+    Trả về (data, api_result).
+    """
+    # Render SRT input — có speaker nếu có
+    lines = []
+    has_any_speaker = any(b.get("speaker") for b in srt_blocks)
+    for b in srt_blocks:
+        if has_any_speaker:
+            spk = b.get("speaker") or "?"
+            lines.append(f"{b['index']}|{spk}|{b['text']}")
+        else:
+            lines.append(f"{b['index']}|{b['text']}")
+    srt_compact = "\n".join(lines)
+
+    prompt_tpl  = (PROMPTS_DIR / "pass1a_characters.txt").read_text(encoding="utf-8")
+    prompt      = prompt_tpl.replace("{SRT_INPUT}", srt_compact)
+
+    # max_output cao vì Gemini 2.5 dùng thinking tokens TÍNH VÀO max_output.
+    result = await _call_api(
+        prompt, api_key, model,
+        temperature=0.2,
+        response_json=True,
+        max_output=32768,
+        on_retry=on_retry,
+        thinking_budget=8192,
+    )
+
+    text = result["text"]
+    finish_reason = result.get("finish_reason", "")
+
+    if finish_reason == "MAX_TOKENS":
+        raise RuntimeError(
+            f"Pass 1A bị cắt token. tokens_out={result['tokens_out']}, "
+            f"max_output=32768. Có thể model dùng quá nhiều thinking tokens.\n"
+            f"Text trả về:\n{text[:2000]}\n"
+            f"... (còn {max(0, len(text)-2000)} ký tự nữa)"
+        )
+    if finish_reason and finish_reason not in ("STOP", "MODEL_LENGTH", ""):
+        raise RuntimeError(
+            f"Pass 1A dừng bất thường (finishReason={finish_reason}). "
+            f"Có thể do safety filter.\nText trả về:\n{text[:2000]}"
+        )
+
+    data = _parse_json_with_fallback(text, "Pass 1A", finish_reason, result["tokens_out"])
+    result["prompt"] = prompt
+    return data, result
+
+
+async def pass1b_analyze(
+    srt_blocks: list[dict],
+    pass1a_data: dict,
+    api_key: str,
+    model: str,
+    on_retry=None,
+) -> tuple[dict, dict]:
+    """
+    Pass 1B — Phân tích CỐT TRUYỆN + TURNING POINTS + SCENE MAP.
+
+    Input: SRT + kết quả Pass 1A làm context.
+    Output (~5-6k token): story_arc + turning_points + scene_map đầy đủ.
+
+    AI dùng danh sách nhân vật từ 1A để gán scene.nhan_vat chính xác,
+    không bịa tên mới.
+
+    Trả về (data, api_result).
+    """
+    srt_compact = "\n".join(f"{b['index']}|{b['text']}" for b in srt_blocks)
+    prompt_tpl  = (PROMPTS_DIR / "pass1b_storymap.txt").read_text(encoding="utf-8")
+
+    # Render Pass 1A result để inject làm context cho 1B.
+    # Compact 1A: chỉ giữ phần cần thiết, bỏ kieu_noi_examples (dài, không cần cho 1B).
+    pass1a_compact = {
+        "the_loai":           pass1a_data.get("the_loai", {}),
+        "nhan_vat":           [
+            {k: v for k, v in nv.items() if k != "kieu_noi_examples"}
+            for nv in (pass1a_data.get("nhan_vat") or [])
+        ],
+        "quan_he_noi_bat":    pass1a_data.get("quan_he_noi_bat", []),
+        "thuat_ngu":          pass1a_data.get("thuat_ngu", {}),
+        "xung_ho_toan_phim":  pass1a_data.get("xung_ho_toan_phim", {}),
+    }
+    pass1a_str = json.dumps(pass1a_compact, ensure_ascii=False, indent=2)
+
+    prompt = (prompt_tpl
+              .replace("{PASS1A_RESULT}", pass1a_str)
+              .replace("{SRT_INPUT}",     srt_compact))
+
+    # max_output cao vì 1B sinh nhiều hơn 1A (story + turning + 12 scenes ~6k)
+    # Cộng thinking ~15k → tổng ~24k. Đặt 48k để dư an toàn.
+    result = await _call_api(
+        prompt, api_key, model,
+        temperature=0.2,
+        response_json=True,
+        max_output=49152,
+        on_retry=on_retry,
+        thinking_budget=12288,
+    )
+
+    text = result["text"]
+    finish_reason = result.get("finish_reason", "")
+
+    if finish_reason == "MAX_TOKENS":
+        raise RuntimeError(
+            f"Pass 1B bị cắt token. tokens_out={result['tokens_out']}, "
+            f"max_output=49152. Phim quá dài hoặc thinking quá nhiều.\n"
+            f"Text trả về:\n{text[:2000]}\n"
+            f"... (còn {max(0, len(text)-2000)} ký tự nữa)"
+        )
+    if finish_reason and finish_reason not in ("STOP", "MODEL_LENGTH", ""):
+        raise RuntimeError(
+            f"Pass 1B dừng bất thường (finishReason={finish_reason}).\n"
+            f"Text trả về:\n{text[:2000]}"
+        )
+
+    data = _parse_json_with_fallback(text, "Pass 1B", finish_reason, result["tokens_out"])
+    result["prompt"] = prompt
+    return data, result
+
+
+def merge_pass1_results(pass1a: dict, pass1b: dict) -> dict:
+    """
+    Gộp kết quả Pass 1A + 1B thành Bible hoàn chỉnh tương thích với
+    schema cũ (pass3, pass4 không cần biết Bible đến từ đâu).
+    """
+    bible = {
+        # Từ 1A:
+        "the_loai":           pass1a.get("the_loai", {}),
+        "nhan_vat":           pass1a.get("nhan_vat", []),
+        "quan_he_noi_bat":    pass1a.get("quan_he_noi_bat", []),
+        "thuat_ngu":          pass1a.get("thuat_ngu", {}),
+        "xung_ho_toan_phim":  pass1a.get("xung_ho_toan_phim", {}),
+        # Từ 1B:
+        "story_arc":              pass1b.get("story_arc", {}),
+        "turning_points_xung_ho": pass1b.get("turning_points_xung_ho", []),
+        "scene_map":              pass1b.get("scene_map", []),
+    }
+    return bible
+
 
 async def pass1_analyze(
     srt_blocks: list[dict],
@@ -334,81 +506,318 @@ async def pass1_analyze(
     model: str,
     pid: int = None,
     on_retry=None,
-) -> dict:
+    on_progress=None,  # async callback(stage_name, message) — optional
+) -> tuple[dict, dict]:
     """
-    Gửi toàn bộ SRT (compact: số|text) lên Gemini.
-    Nhận về Bible + scene_map có tom_tat từng đoạn.
-    """
-    srt_compact = "\n".join(f"{b['index']}|{b['text']}" for b in srt_blocks)
-    prompt_tpl = (PROMPTS_DIR / "pass1_macro.txt").read_text(encoding="utf-8")
-    prompt = prompt_tpl.replace("{SRT_INPUT}", srt_compact)
+    Pass 1 = Pass 1A → Pass 1B → merge.
 
-    # Lưu prompt vào DB TRƯỚC khi gọi API — để FE hiển thị được request dù lỗi
-    if pid is not None:
+    Backward-compatible: trả về (bible, api_result) giống monolithic cũ.
+    api_result là dict gộp tokens/timing của cả 2 pass.
+
+    on_progress: callable async, nhận (stage, message). Để frontend hiển thị
+    tiến trình "Bước 1/2 - Phân tích nhân vật" rồi "Bước 2/2 - Phân tích cảnh".
+    """
+    # ── PASS 1A ──────────────────────────────────────────────────────────────
+    logger.info(f"[Pass1 pid={pid}] === BƯỚC 1/2: Pass 1A — phân tích nhân vật ===")
+    if on_progress:
         try:
-            from database import save_pass1_call
-            await save_pass1_call(pid, prompt, "", 0, 0, 0)
+            await on_progress("pass1a_start", "Bước 1/2: Phân tích nhân vật & xưng hô...")
         except Exception:
             pass
+
+    pass1a_data, result_1a = await pass1a_analyze(
+        srt_blocks, api_key, model, on_retry=on_retry,
+    )
+
+    nv_count = len(pass1a_data.get("nhan_vat") or [])
+    logger.info(
+        f"[Pass1 pid={pid}] Pass 1A XONG — {nv_count} nhân vật, "
+        f"in={result_1a['tokens_in']}, out={result_1a['tokens_out']}, "
+        f"time={result_1a['timing_ms']}ms"
+    )
+    if on_progress:
+        try:
+            await on_progress(
+                "pass1a_done",
+                f"Pass 1A xong — phát hiện {nv_count} nhân vật. Sang Bước 2/2...",
+            )
+        except Exception:
+            pass
+
+    # ── PASS 1B ──────────────────────────────────────────────────────────────
+    logger.info(f"[Pass1 pid={pid}] === BƯỚC 2/2: Pass 1B — phân tích scene map ===")
+    if on_progress:
+        try:
+            await on_progress("pass1b_start", "Bước 2/2: Phân tích cốt truyện & phân đoạn...")
+        except Exception:
+            pass
+
+    pass1b_data, result_1b = await pass1b_analyze(
+        srt_blocks, pass1a_data, api_key, model, on_retry=on_retry,
+    )
+
+    scene_count = len(pass1b_data.get("scene_map") or [])
+    logger.info(
+        f"[Pass1 pid={pid}] Pass 1B XONG — {scene_count} đoạn, "
+        f"in={result_1b['tokens_in']}, out={result_1b['tokens_out']}, "
+        f"time={result_1b['timing_ms']}ms"
+    )
+    if on_progress:
+        try:
+            await on_progress(
+                "pass1b_done",
+                f"Pass 1B xong — chia {scene_count} đoạn kịch bản.",
+            )
+        except Exception:
+            pass
+
+    # ── MERGE ────────────────────────────────────────────────────────────────
+    bible = merge_pass1_results(pass1a_data, pass1b_data)
+
+    # Gộp api_result để FE hiển thị tổng tokens/timing
+    merged_result = {
+        "text":         json.dumps(bible, ensure_ascii=False, indent=2),
+        "tokens_in":    result_1a["tokens_in"]  + result_1b["tokens_in"],
+        "tokens_out":   result_1a["tokens_out"] + result_1b["tokens_out"],
+        "timing_ms":    result_1a["timing_ms"]  + result_1b["timing_ms"],
+        "finish_reason": "STOP",
+        # Chi tiết từng pass — FE muốn debug có thể xem
+        "pass1a": {
+            "prompt":     result_1a.get("prompt", ""),
+            "response":   result_1a.get("text", ""),
+            "tokens_in":  result_1a["tokens_in"],
+            "tokens_out": result_1a["tokens_out"],
+            "timing_ms":  result_1a["timing_ms"],
+        },
+        "pass1b": {
+            "prompt":     result_1b.get("prompt", ""),
+            "response":   result_1b.get("text", ""),
+            "tokens_in":  result_1b["tokens_in"],
+            "tokens_out": result_1b["tokens_out"],
+            "timing_ms":  result_1b["timing_ms"],
+        },
+    }
+    return bible, merged_result
+
+
+# ─────────────────────────────────────────────
+# PASS 2 SPEAKER — AI QUYẾT ĐỊNH CUỐI AI NÓI DÒNG NÀO
+# ─────────────────────────────────────────────
+
+def _render_bible_summary_for_speaker(bible: dict) -> str:
+    """Compact Bible cho Pass 2 Speaker — chỉ phần cần thiết."""
+    lines = []
+    nv_list = bible.get("nhan_vat") or []
+
+    lines.append("NHÂN VẬT TRONG PHIM:")
+    for nv in nv_list:
+        zh = nv.get("zh", "?")
+        vi = nv.get("vi", "?")
+        vai = nv.get("vai", nv.get("tier", "?"))
+        spk_ids = nv.get("speaker_ids") or []
+        spk_str = ",".join(spk_ids) if spk_ids else "(không match)"
+        tu_xung = nv.get("tu_xung", "?")
+        than_phan = nv.get("than_phan", "")
+        lines.append(f"  · {zh} ({vi}) - {vai} - tự xưng: {tu_xung} - SPEAKER: {spk_str}")
+        if than_phan:
+            lines.append(f"    {than_phan}")
+
+    # Speaker mapping summary để AI biết SPEAKER nào tương ứng ai
+    sms = bible.get("speaker_mapping_summary") or {}
+    if sms:
+        lines.append("")
+        lines.append("SPEAKER MAPPING (Diarization):")
+        for spk_id, info in sms.items():
+            matched = info.get("matched_to", "?")
+            conf    = info.get("confidence", "?")
+            count   = info.get("line_count", 0)
+            note    = info.get("note", "")
+            lines.append(f"  · {spk_id} → {matched} (confidence={conf}, {count} dòng){' - ' + note if note else ''}")
+
+    return "\n".join(lines)
+
+
+def _render_scene_characters(scene: dict, bible: dict) -> str:
+    """Render danh sách nhân vật của 1 scene cho Pass 2 Speaker."""
+    nhan_vat_zh = scene.get("nhan_vat") or []
+    all_nv = bible.get("nhan_vat") or []
+    by_zh = {nv.get("zh"): nv for nv in all_nv}
+
+    lines = []
+    for zh in nhan_vat_zh:
+        nv = by_zh.get(zh)
+        if not nv:
+            lines.append(f"  · {zh} (không tìm thấy trong Bible)")
+            continue
+        vi = nv.get("vi", "?")
+        spk_ids = nv.get("speaker_ids") or []
+        spk_str = ",".join(spk_ids) if spk_ids else "(?)"
+        lines.append(f"  · {zh} → {vi} (SPEAKER: {spk_str})")
+    return "\n".join(lines) if lines else "  (Không có nhân vật trong scene)"
+
+
+async def pass2_speaker_for_scene(
+    scene: dict,
+    bible: dict,
+    srt_blocks: list[dict],
+    api_key: str,
+    model: str,
+    on_retry=None,
+) -> tuple[list[dict], dict]:
+    """
+    Pass 2 Speaker cho 1 scene — AI gán speaker chính thức cho từng dòng.
+
+    Input:
+      scene: 1 entry từ scene_map (có tu_dong, den_dong, nhan_vat)
+      bible: Bible đầy đủ (nhân vật + speaker_mapping_summary)
+      srt_blocks: subtitles có sẵn speaker từ Diarization (field "speaker")
+
+    Output:
+      ([{"index", "speaker_zh", "confidence", "reason"}], api_result)
+    """
+    tu_dong = scene.get("tu_dong", 0)
+    den_dong = scene.get("den_dong", 0)
+
+    # Lấy subtitles trong scene
+    scene_blocks = [b for b in srt_blocks if tu_dong <= b["index"] <= den_dong]
+    if not scene_blocks:
+        return [], {"tokens_in": 0, "tokens_out": 0, "timing_ms": 0}
+
+    # Render SRT chunk
+    srt_lines = []
+    for b in scene_blocks:
+        spk = b.get("speaker") or "?"
+        srt_lines.append(f"{b['index']}|{spk}|{b['text']}")
+    srt_chunk = "\n".join(srt_lines)
+
+    # Render Bible + nhân vật trong scene
+    bible_summary = _render_bible_summary_for_speaker(bible)
+    chars_in_scene = _render_scene_characters(scene, bible)
+
+    prompt_tpl = (PROMPTS_DIR / "pass2_speaker.txt").read_text(encoding="utf-8")
+    prompt = (prompt_tpl
+              .replace("{CHARACTERS_IN_SCENE}", chars_in_scene)
+              .replace("{BIBLE_SUMMARY}",       bible_summary)
+              .replace("{SRT_CHUNK}",           srt_chunk))
 
     result = await _call_api(
         prompt, api_key, model,
-        temperature=0.2,
+        temperature=0.1,  # Thấp để quyết định ổn định
         response_json=True,
-        max_output=65536,   # Tăng từ 8192 → 65536 để JSON Bible không bị cắt
+        max_output=32768,    # Tăng từ 16k → 32k vì scene lớn output > 12k
         on_retry=on_retry,
-        thinking_budget=-1,  # Pass 1: để model tự quyết thinking — cần suy luận sâu
+        thinking_budget=4096,
     )
 
-    # Cập nhật với response thực tế
-    if pid is not None:
+    text = result["text"]
+    finish_reason = result.get("finish_reason", "")
+    if finish_reason == "MAX_TOKENS":
+        raise RuntimeError(
+            f"Pass 2 Speaker scene {scene.get('stt')} bị cắt token. "
+            f"tokens_out={result['tokens_out']}\nĐầu response:\n{text[:1500]}"
+        )
+
+    data = _parse_json_with_fallback(text, f"Pass2Speaker scene {scene.get('stt')}",
+                                      finish_reason, result["tokens_out"])
+    speakers = data.get("speakers") or []
+    result["prompt"] = prompt
+    return speakers, result
+
+
+async def pass2_speaker_analyze(
+    bible: dict,
+    srt_blocks: list[dict],
+    api_key: str,
+    model: str,
+    on_retry=None,
+    on_progress=None,
+    concurrency: int = 3,
+) -> tuple[list[dict], dict]:
+    """
+    Pass 2 Speaker — Gán speaker cho TẤT CẢ dòng phụ đề.
+
+    Chạy SONG SONG theo scene_map (mỗi scene 1 API call).
+
+    Trả về (all_speakers, api_result)
+      all_speakers: [{"index", "speaker_zh", "confidence", "reason"}, ...]
+                    Đủ cho mọi dòng từ tu_dong scene đầu đến den_dong scene cuối.
+    """
+    scene_map = bible.get("scene_map") or []
+    if not scene_map:
+        raise RuntimeError("Bible không có scene_map. Cần chạy Pass 1B trước.")
+
+    if on_progress:
         try:
-            from database import save_pass1_call
-            await save_pass1_call(
-                pid, prompt, result["text"],
-                result["tokens_in"], result["tokens_out"], result["timing_ms"],
-            )
+            await on_progress("pass2_start", f"Pass 2 Speaker: gán speaker cho {len(scene_map)} đoạn...")
         except Exception:
             pass
 
-    # Parse JSON
-    text = result["text"]
-    finish_reason = result.get("finish_reason", "")
+    # Chạy song song với semaphore
+    sem = asyncio.Semaphore(concurrency)
+    total_tokens_in = 0
+    total_tokens_out = 0
+    t0 = time.monotonic()
 
-    # Phát hiện response bị cắt
-    if finish_reason == "MAX_TOKENS":
-        raise RuntimeError(
-            f"Pass 1 bị cắt do hết token output ({result['tokens_out']} tokens). "
-            f"Phim quá dài hoặc model trả quá chi tiết. "
-            f"Thử dùng model có context lớn hơn (gemini-2.5-pro) hoặc chia nhỏ SRT."
-        )
-    if finish_reason and finish_reason not in ("STOP", "MODEL_LENGTH", ""):
-        raise RuntimeError(
-            f"Pass 1 dừng bất thường (finishReason={finish_reason}). "
-            f"Có thể do safety filter hoặc lỗi model."
-        )
+    results_lock = asyncio.Lock()
+    all_speakers: list[dict] = []
+    done_count = [0]
 
-    try:
-        bible = json.loads(text)
-    except json.JSONDecodeError as e:
-        # Thử bóc khỏi markdown code fence
-        m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-        if m:
+    async def _run_scene(idx: int, scene: dict):
+        async with sem:
             try:
-                bible = json.loads(m.group(1))
-            except json.JSONDecodeError:
-                raise RuntimeError(
-                    f"Pass 1 không trả JSON hợp lệ (sau khi bóc markdown): {e}\n"
-                    f"Đầu response:\n{text[:500]}\n...\nCuối response:\n{text[-500:]}"
+                speakers, api_result = await pass2_speaker_for_scene(
+                    scene, bible, srt_blocks, api_key, model, on_retry=on_retry,
                 )
-        else:
-            raise RuntimeError(
-                f"Pass 1 không trả JSON hợp lệ: {e}\n"
-                f"finish_reason={finish_reason}, tokens_out={result['tokens_out']}\n"
-                f"Đầu response:\n{text[:500]}\n...\nCuối response:\n{text[-500:]}"
-            )
+                async with results_lock:
+                    all_speakers.extend(speakers)
+                    nonlocal_tokens_in_out = (api_result.get("tokens_in", 0),
+                                              api_result.get("tokens_out", 0))
+                    done_count[0] += 1
+                if on_progress:
+                    try:
+                        await on_progress(
+                            "pass2_scene_done",
+                            f"Pass 2: xong scene {idx+1}/{len(scene_map)} ({len(speakers)} dòng)",
+                        )
+                    except Exception:
+                        pass
+                return api_result
+            except Exception as e:
+                logger.error(f"[Pass2 scene {idx}] Lỗi: {e}", exc_info=True)
+                if on_progress:
+                    try:
+                        await on_progress(
+                            "pass2_scene_err",
+                            f"Scene {idx+1} lỗi: {e}",
+                        )
+                    except Exception:
+                        pass
+                return {"tokens_in": 0, "tokens_out": 0, "timing_ms": 0}
 
-    return bible, result
+    tasks = [_run_scene(i, sc) for i, sc in enumerate(scene_map)]
+    sub_results = await asyncio.gather(*tasks)
+
+    for r in sub_results:
+        total_tokens_in  += r.get("tokens_in", 0) or 0
+        total_tokens_out += r.get("tokens_out", 0) or 0
+
+    # Sắp xếp theo index
+    all_speakers.sort(key=lambda x: x.get("index", 0))
+
+    timing_ms = int((time.monotonic() - t0) * 1000)
+    if on_progress:
+        try:
+            await on_progress("pass2_done",
+                              f"Pass 2 xong — gán {len(all_speakers)} dòng trong {timing_ms}ms")
+        except Exception:
+            pass
+
+    return all_speakers, {
+        "tokens_in":  total_tokens_in,
+        "tokens_out": total_tokens_out,
+        "timing_ms":  timing_ms,
+        "scene_count": len(scene_map),
+    }
 
 
 # ─────────────────────────────────────────────
@@ -758,26 +1167,57 @@ def _build_xung_ho_matrix(chunk_blocks: list[dict], bible: dict, scene_info: dic
     return "(Dùng xưng hô mặc định theo quan hệ nhân vật)"
 
 def _get_tone_rules(scene_info: dict) -> str:
-    """Lấy rules dựa trên tone của scene, không phải genre."""
-    tone = (scene_info.get("tone") or "").lower() if scene_info else ""
-    rules_txt = (PROMPTS_DIR / "tone_rules.txt").read_text(encoding="utf-8")
+    """Lấy rules dựa trên tone của scene.
 
-    # Map tone keywords → section
-    if any(k in tone for k in ["bi thương", "phẫn uất", "cay đắng", "đau", "khóc"]):
+    Hỗ trợ 2 dạng tone từ Bible:
+      - Mới (enum list): ["lanh_lung", "can_thang"]
+      - Cũ (string tự do): "lạnh lùng → căng thẳng"
+    """
+    if not scene_info:
+        return ""
+
+    rules_txt = (PROMPTS_DIR / "tone_rules.txt").read_text(encoding="utf-8")
+    sections = re.split(r"\n(?=[a-z_|]+:)", rules_txt.strip())
+
+    raw = scene_info.get("tone")
+    if raw is None:
+        return ""
+
+    # Trường hợp enum list mới
+    if isinstance(raw, list):
+        valid_keys = {"bi_thuong", "can_thang", "hai_huoc", "am_ap",
+                      "lanh_lung", "trung_tinh"}
+        keys = []
+        for item in raw:
+            if isinstance(item, str):
+                k = item.strip().lower()
+                if k in valid_keys and k not in keys:
+                    keys.append(k)
+        if not keys:
+            return ""
+        out = []
+        for key in keys[:2]:
+            for section in sections:
+                if section.startswith(key):
+                    out.append(section.strip())
+                    break
+        return "\n\n".join(out)
+
+    # Backward compat: string cũ
+    tone_str = str(raw).lower() if raw else ""
+    if any(k in tone_str for k in ["bi thương", "phẫn uất", "cay đắng", "đau", "khóc"]):
         key = "bi_thuong"
-    elif any(k in tone for k in ["căng thẳng", "đối đầu", "quyết liệt", "phẫn nộ"]):
+    elif any(k in tone_str for k in ["căng thẳng", "đối đầu", "quyết liệt", "phẫn nộ"]):
         key = "can_thang"
-    elif any(k in tone for k in ["hài hước", "tán tỉnh", "ngượng", "vui"]):
+    elif any(k in tone_str for k in ["hài hước", "tán tỉnh", "ngượng", "vui"]):
         key = "hai_huoc"
-    elif any(k in tone for k in ["ấm áp", "thấu hiểu", "quyết tâm", "hy vọng"]):
+    elif any(k in tone_str for k in ["ấm áp", "thấu hiểu", "quyết tâm", "hy vọng"]):
         key = "am_ap"
-    elif any(k in tone for k in ["lạnh lùng", "bá đạo", "ngạo", "thờ ơ"]):
+    elif any(k in tone_str for k in ["lạnh lùng", "bá đạo", "ngạo", "thờ ơ"]):
         key = "lanh_lung"
     else:
         return ""
 
-    # Extract matching section
-    sections = re.split(r"\n(?=[a-z_|]+:)", rules_txt.strip())
     for section in sections:
         if section.startswith(key):
             return section.strip()
@@ -873,8 +1313,16 @@ def build_pass3_prompt(
     blocks      = chunk["blocks"]
     scene_info  = chunk.get("scene_info") or {}
     tom_tat     = chunk.get("tom_tat") or scene_info.get("tom_tat", "")
-    boi_canh    = scene_info.get("boi_canh", "")
-    tone        = scene_info.get("tone", "")
+    # Schema mới: "dia_diem". Schema cũ: "boi_canh".
+    dia_diem    = scene_info.get("dia_diem", "") or scene_info.get("boi_canh", "")
+    thoi_gian   = scene_info.get("thoi_gian", "")
+    # Tone có thể là list (enum mới) hoặc string (cũ)
+    tone_raw    = scene_info.get("tone", "")
+    if isinstance(tone_raw, list):
+        tone = ", ".join(str(t) for t in tone_raw if t)
+    else:
+        tone = str(tone_raw) if tone_raw else ""
+    ghi_chu     = scene_info.get("ghi_chu", "")
     part_info   = chunk.get("part_info", "") or ""
 
     # STORY SUMMARY
@@ -885,9 +1333,11 @@ def build_pass3_prompt(
 
     # SCENE SUMMARY
     scene_parts = []
-    if tom_tat:  scene_parts.append(f"Nội dung: {tom_tat}")
-    if boi_canh: scene_parts.append(f"Bối cảnh: {boi_canh}")
-    if tone:     scene_parts.append(f"Tone: {tone}")
+    if tom_tat:   scene_parts.append(f"Nội dung: {tom_tat}")
+    if dia_diem:  scene_parts.append(f"Địa điểm: {dia_diem}")
+    if thoi_gian: scene_parts.append(f"Thời gian: {thoi_gian}")
+    if tone:      scene_parts.append(f"Tone: {tone}")
+    if ghi_chu:   scene_parts.append(f"Lưu ý: {ghi_chu}")
     scene_summary = "\n".join(scene_parts) if scene_parts else "(Không có thông tin phân cảnh)"
 
     # CHUNK PART INFO — chỉ hiển thị khi là phần x/y của phân cảnh dài
@@ -930,8 +1380,16 @@ def build_pass3_prompt(
     tone_rules = _get_tone_rules(scene_info)
     genre_rules = _get_genre_rules(bible, scene_info)
 
-    # SRT INPUT
-    srt_input = "\n".join(f"{b['index']}|{b['text']}" for b in blocks)
+    # SRT INPUT — format có speaker nếu có
+    # Pipeline mới (sau Pass 2 Speaker): blocks có field "speaker_zh"
+    # Backward compat: nếu không có speaker_zh → render format cũ
+    has_speaker = any(b.get("speaker_zh") for b in blocks)
+    if has_speaker:
+        srt_input = "\n".join(
+            f"{b['index']}|{b.get('speaker_zh') or '?'}|{b['text']}" for b in blocks
+        )
+    else:
+        srt_input = "\n".join(f"{b['index']}|{b['text']}" for b in blocks)
 
     # BUILD PROMPT
     prompt_tpl = (PROMPTS_DIR / "pass3_translate.txt").read_text(encoding="utf-8")
@@ -1257,7 +1715,12 @@ def build_pass4_prompt(
     the_loai     = bible.get("the_loai", {})
     boi_canh     = the_loai.get("boi_canh", "do_thi")
     tom_tat      = chunk.get("tom_tat") or scene_info.get("tom_tat", "")
-    tone         = scene_info.get("tone", "")
+    # Tone có thể là list (enum mới) hoặc string (cũ)
+    tone_raw     = scene_info.get("tone", "")
+    if isinstance(tone_raw, list):
+        tone = ", ".join(str(t) for t in tone_raw if t)
+    else:
+        tone = str(tone_raw) if tone_raw else ""
     scene_summary = f"{tom_tat} | Tone: {tone}" if tom_tat else "(Không có)"
 
     # Phạm vi dòng của scene — để trim turning points
@@ -1383,15 +1846,25 @@ def apply_review_fixes(entries: list[dict], review_result: dict) -> list[dict]:
 def detect_abnormal_entries(entries: list[dict]) -> list[int]:
     """
     Scan danh sách SRT entries, trả về list index (1-based) của các dòng bất thường.
+
+    ⚠ LOGIC NÀY PHẢI KHỚP với scanAbnormal() ở FE
+    (dubeditor_frontend/src/components/TranslatePage.tsx).
+
     Tiêu chí:
-      - Text quá dài (>30 ký tự CJK hoặc >50 ký tự tổng)
-      - Có ký tự Latin liên tiếp >=3 (logo kênh, tên chương trình)
-      - Có nhiều câu gộp (dấu cách giữa 2 cụm CJK dài)
-      - Có xuống dòng thật trong text (multi-line OCR)
+      1. Text quá dài (>25 ký tự CJK hoặc >50 ký tự tổng)
+      2. Có Latin liên tiếp >=3 (logo, tên kênh)
+      3. Có xuống dòng thật trong text (multi-line OCR)
+      4. Có 2+ cụm CJK dài cách nhau bằng dấu cách (2 vùng OCR gộp)
+      5. Lặp 1 ký tự >=5 lần liên tiếp (OCR glitch)
+      6. Ký tự nhạc thuần túy (♪♫)
+      7. Tag âm thanh [Music], [Applause]
+      8. Mix Latin + số dài bất thường (vd: "桐A.99999")
     """
     abnormal = []
     for e in entries:
         text = e["text"].strip()
+        if not text:
+            continue
         reasons = []
 
         # 1. Quá dài
@@ -1412,6 +1885,27 @@ def detect_abnormal_entries(entries: list[dict]) -> list[int]:
         cjk_parts = [p for p in cjk_parts if sum(1 for c in p if '\u4e00' <= c <= '\u9fff') >= 3]
         if len(cjk_parts) >= 2:
             reasons.append("multi_region")
+
+        # 5. Lặp 1 ký tự >= 5 lần liên tiếp — OCR glitch
+        # Ví dụ: "来来来来来" (来 lặp 5 lần), "99999"
+        if re.search(r'(.)\1{4,}', text):
+            reasons.append("repeated_char")
+
+        # 6. Ký tự nhạc thuần túy
+        if re.fullmatch(r'[\u266a\u266b\u266c\u266d\u266e\u266f\s]+', text):
+            reasons.append("music_symbols")
+
+        # 7. Tag âm thanh [Music], [Applause]
+        if re.fullmatch(r'\[.{1,20}\]', text):
+            reasons.append("audio_tag")
+
+        # 8. Mix Latin/số dài bất thường giữa CJK
+        # Vd: "桐A.99999" — có CJK + ký tự Latin/số tạo chuỗi dài ≥5
+        # (không bị bắt bởi rule 2 vì chỉ có 1 Latin, không bị rule 5 vì .99999 lặp 9 chỉ ≥5)
+        # → đã được bắt bởi rule 5 ("99999")
+        # Bổ sung: text có CJK + chuỗi alphanumeric ≥4 ký tự liền nhau
+        if cjk_len >= 1 and re.search(r'[A-Za-z0-9]{4,}', text):
+            reasons.append("alphanumeric_in_cjk")
 
         if reasons:
             abnormal.append(e["index"])
@@ -1461,39 +1955,37 @@ def build_pass0_windows(entries: list[dict], abnormal_indices: list[int],
 
 
 def build_pass0_prompt(window_entries: list[dict], abnormal_indices: list[int]) -> str:
-    """Tạo prompt gửi lên AI cho 1 window."""
+    """Tạo prompt gửi lên AI cho 1 window làm sạch.
+
+    Đọc template từ pass0_clean.txt. Đánh dấu ⚠ vào dòng nghi ngờ.
+    """
     lines = []
     for e in window_entries:
         marker = " ⚠" if e["index"] in abnormal_indices else ""
         lines.append(f"{e['index']}|{e['text']}{marker}")
     srt_text = "\n".join(lines)
 
-    return f"""Dưới đây là đoạn phụ đề phim Trung Quốc (định dạng index|text).
-Các dòng có dấu ⚠ bị nghi ngờ chứa text thừa không phải lời thoại chính.
-Text thừa có thể là: logo kênh TV, tên chương trình, chữ trên màn hình/điện thoại/sách/banner trong cảnh quay, text từ vùng OCR khác lẫn vào.
+    # Đọc prompt template. Có file → dùng file, không có → fallback inline.
+    prompt_path = PROMPTS_DIR / "pass0_clean.txt"
+    if prompt_path.exists():
+        template = prompt_path.read_text(encoding="utf-8")
+        return template.replace("{SRT_WINDOW}", srt_text)
 
-Nhiệm vụ:
-1. Dựa vào ngữ cảnh xung quanh, xác định phần nào là text thừa
-2. Với dòng có text thừa: chỉ giữ lại phần là lời thoại thật, bỏ phần thừa
-3. Với dòng hoàn toàn là text thừa (không có lời thoại): đánh dấu action="delete"
-4. Với dòng bình thường: KHÔNG đưa vào fixes
-
-Trả về JSON (chỉ JSON, không giải thích):
-{{
-  "fixes": [
-    {{
-      "index": <số>,
-      "action": "clean" | "delete",
-      "cleaned": "<text sau khi bỏ phần thừa, chỉ có nếu action=clean>",
-      "reason": "<giải thích ngắn>"
-    }}
-  ]
-}}
-
-Nếu không có gì cần sửa, trả về: {{"fixes": []}}
-
-ĐOẠN PHỤ ĐỀ:
-{srt_text}"""
+    # Fallback nếu file không tồn tại (giữ backward compat)
+    return (
+        "Dưới đây là đoạn phụ đề phim Trung Quốc (định dạng index|text).\n"
+        "Các dòng có dấu ⚠ bị nghi ngờ chứa text thừa không phải lời thoại chính.\n"
+        "Text thừa có thể là: logo kênh TV, tên chương trình, chữ trên màn hình/"
+        "điện thoại/sách/banner trong cảnh quay, text từ vùng OCR khác lẫn vào.\n\n"
+        "Nhiệm vụ:\n"
+        "1. Dựa vào ngữ cảnh xung quanh, xác định phần nào là text thừa\n"
+        "2. Với dòng có text thừa: chỉ giữ lại phần là lời thoại thật, bỏ phần thừa\n"
+        "3. Với dòng hoàn toàn là text thừa: đánh dấu action=\"delete\"\n"
+        "4. Với dòng bình thường: KHÔNG đưa vào fixes\n\n"
+        "Trả về JSON: {\"fixes\": [{\"index\": <số>, \"action\": \"clean\"|\"delete\", "
+        "\"cleaned\": \"...\", \"reason\": \"...\"}]}\n\n"
+        f"ĐOẠN PHỤ ĐỀ:\n{srt_text}"
+    )
 
 
 async def pass0_clean_window(
@@ -1512,7 +2004,7 @@ async def pass0_clean_window(
             prompt, api_key, model,
             temperature=0.1,
             response_json=True,
-            max_output=2048,
+            max_output=4096,
         )
         text = result["text"].strip()
         # Strip markdown nếu có
