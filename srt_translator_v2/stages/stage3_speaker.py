@@ -1,8 +1,9 @@
 """
 Stage 3 — Speaker Assignment.
 
-Per-scene: gán speaker cho mỗi dòng thoại.
-Chạy song song nhiều scene cùng lúc (theo concurrency config).
+v3 strategy: gom nhiều scenes liền nhau thành 1 batch ~N dòng (config.batch.speaker_lines_per_call)
+để giảm số calls + chia sẻ Bible context. Mỗi batch vẫn giữ scene boundary trong prompt
+để LLM biết khi nào đổi cảnh.
 """
 from __future__ import annotations
 import asyncio
@@ -25,18 +26,56 @@ def load_prompt(name: str, config: PipelineConfig) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def format_scene_dialogue(scene: Scene, entries_by_idx: dict[int, SrtEntry]) -> str:
-    """Format thoại của 1 scene cho prompt."""
-    lines = []
-    for i in range(scene.start_line, scene.end_line + 1):
-        e = entries_by_idx.get(i)
-        if e:
-            lines.append(f"{e.index} | {e.text}")
-    return "\n".join(lines)
+# ─────────────────────────────────────────────────────────────────
+# Batching: gom scenes thành batches ~N dòng
+# ─────────────────────────────────────────────────────────────────
+
+def build_scene_batches(scenes: list[Scene], lines_per_call: int) -> list[list[Scene]]:
+    """Gom các scenes LIỀN NHAU thành 1 batch sao cho tổng dòng ≈ lines_per_call.
+
+    Không tách scene ra giữa chừng (giữ boundary tự nhiên).
+    Scene đơn lẻ vượt lines_per_call vẫn tự thành 1 batch.
+    """
+    batches: list[list[Scene]] = []
+    current: list[Scene] = []
+    current_lines = 0
+
+    for sc in scenes:
+        sc_len = sc.end_line - sc.start_line + 1
+        # Nếu thêm scene này vượt threshold VÀ current đã có scene → flush
+        if current and (current_lines + sc_len > lines_per_call):
+            batches.append(current)
+            current = [sc]
+            current_lines = sc_len
+        else:
+            current.append(sc)
+            current_lines += sc_len
+
+    if current:
+        batches.append(current)
+    return batches
 
 
-async def process_one_scene(
-    scene: Scene,
+def format_batch_dialogue(scenes: list[Scene], entries_by_idx: dict[int, SrtEntry]) -> str:
+    """Format thoại của 1 batch gồm nhiều scenes, có marker scene boundary."""
+    parts = []
+    for sc in scenes:
+        parts.append(f"=== SCENE {sc.index} — {sc.location or '?'} | "
+                     f"emotion: {sc.emotion_primary} ===")
+        if sc.summary:
+            parts.append(f"   (tóm tắt: {sc.summary})")
+        if sc.characters_present:
+            parts.append(f"   (nhân vật mặt: {', '.join(sc.characters_present)})")
+        for i in range(sc.start_line, sc.end_line + 1):
+            e = entries_by_idx.get(i)
+            if e:
+                parts.append(f"{e.index} | {e.text}")
+        parts.append("")  # blank line giữa scenes
+    return "\n".join(parts).rstrip()
+
+
+async def process_one_batch(
+    batch: list[Scene],
     bible: Bible,
     entries_by_idx: dict[int, SrtEntry],
     prompt_template: str,
@@ -45,7 +84,7 @@ async def process_one_scene(
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
 ) -> dict[int, dict]:
-    """Process 1 scene, trả về map line_index -> {speaker_zh, confidence, reason}."""
+    """Process 1 batch (nhiều scenes liền), trả về map line_index -> speaker info."""
     async with semaphore:
         cast_compact = json.dumps([
             {
@@ -64,16 +103,22 @@ async def process_one_scene(
             for t in bible.glossary.terms if t.category in ("title", "nickname")
         ], ensure_ascii=False, indent=2)
 
-        dialogue = format_scene_dialogue(scene, entries_by_idx)
+        dialogue = format_batch_dialogue(batch, entries_by_idx)
+
+        # Aggregate context cho batch
+        first_scene = batch[0]
+        last_scene = batch[-1]
+        scene_range = f"{first_scene.index}-{last_scene.index}" if len(batch) > 1 else str(first_scene.index)
+        all_chars_present = sorted({c for sc in batch for c in sc.characters_present})
 
         prompt = (prompt_template
                   .replace("{CAST_JSON}", cast_compact)
                   .replace("{GLOSSARY_JSON}", glossary_compact)
-                  .replace("{SCENE_INDEX}", str(scene.index))
-                  .replace("{SCENE_LOCATION}", scene.location)
-                  .replace("{SCENE_EMOTION}", f"{scene.emotion_primary} ({scene.emotion_arc})")
-                  .replace("{SCENE_SUMMARY}", scene.summary)
-                  .replace("{CHARACTERS_PRESENT}", ", ".join(scene.characters_present))
+                  .replace("{SCENE_INDEX}", scene_range)
+                  .replace("{SCENE_LOCATION}", "nhiều cảnh" if len(batch) > 1 else (first_scene.location or ""))
+                  .replace("{SCENE_EMOTION}", f"{first_scene.emotion_primary} → {last_scene.emotion_primary}")
+                  .replace("{SCENE_SUMMARY}", f"Batch {scene_range}: " + (first_scene.summary or ""))
+                  .replace("{CHARACTERS_PRESENT}", ", ".join(all_chars_present))
                   .replace("{SCENE_DIALOGUE}", dialogue))
 
         req = LLMRequest(
@@ -81,7 +126,7 @@ async def process_one_scene(
             model=config.models.medium,
             api_key=config.api_key,
             temperature=0.2,
-            max_output=8000,
+            max_output=16000,   # tăng từ 8000 để đủ chỗ cho batch nhiều dòng
             json_mode=True,
             max_retries=config.concurrency.retry_max,
         )
@@ -90,8 +135,14 @@ async def process_one_scene(
             resp = await call_llm(req, client=client)
             tracker.add("3_speaker", resp)
             data = parse_json_response(resp.text, default={"lines": []})
+            lines_count = len(data.get("lines", []) or [])
+            if lines_count == 0:
+                logger.warning(
+                    f"[Stage 3] Batch {scene_range}: LLM returned 0 lines. "
+                    f"Resp preview: {(resp.text or '')[:200]!r}"
+                )
         except Exception as e:
-            logger.warning(f"[Stage 3] Scene {scene.index} failed: {e}")
+            logger.warning(f"[Stage 3] Batch {scene_range} failed: {e}")
             return {}
 
         result = {}
@@ -129,13 +180,19 @@ async def run_stage3_speaker(
     prompt_template = load_prompt("speaker", config)
     entries_by_idx = {e.index: e for e in entries}
 
+    # v3: batch nhiều scenes liền thành 1 call
+    batches = build_scene_batches(scene_map.scenes, config.batch.speaker_lines_per_call)
+    total_lines = sum(sc.end_line - sc.start_line + 1 for sc in scene_map.scenes)
+    logger.info(f"[Stage 3] {len(scene_map.scenes)} scenes → {len(batches)} batches "
+                f"(~{total_lines / max(len(batches), 1):.0f} lines/batch)")
+
     semaphore = asyncio.Semaphore(config.concurrency.speaker)
 
     async with httpx.AsyncClient() as client:
         tasks = [
-            process_one_scene(s, bible, entries_by_idx, prompt_template,
+            process_one_batch(batch, bible, entries_by_idx, prompt_template,
                               config, tracker, client, semaphore)
-            for s in scene_map.scenes
+            for batch in batches
         ]
 
         all_results = {}
@@ -143,11 +200,11 @@ async def run_stage3_speaker(
         total = len(tasks)
 
         for coro in asyncio.as_completed(tasks):
-            scene_result = await coro
-            all_results.update(scene_result)
+            batch_result = await coro
+            all_results.update(batch_result)
             completed += 1
-            if completed % 10 == 0 or completed == total:
-                logger.info(f"   [Stage 3] {completed}/{total} scenes done")
+            if completed % 5 == 0 or completed == total:
+                logger.info(f"   [Stage 3] {completed}/{total} batches done")
 
     # Map line → scene_index
     line_to_scene = {}

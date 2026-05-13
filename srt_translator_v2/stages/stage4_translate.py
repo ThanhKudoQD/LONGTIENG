@@ -278,7 +278,7 @@ async def process_one_scene(
             model=config.models.heavy,
             api_key=config.api_key,
             temperature=0.4,  # cao hơn — cần creativity cho dịch
-            max_output=8000,
+            max_output=16000,
             json_mode=True,
             max_retries=config.concurrency.retry_max,
         )
@@ -313,6 +313,216 @@ async def process_one_scene(
 # MAIN STAGE 4
 # ─────────────────────────────────────────────────────────────────
 
+def build_translate_batches(scenes: list, lines_per_call: int) -> list[list]:
+    """Gộp scenes liền nhau CÙNG story_arc thành batch ~N dòng.
+
+    Quy tắc:
+      - Chỉ gộp scenes liền nhau (theo index)
+      - Chỉ gộp scenes CÙNG story_arc (để pronoun + emotion context nhất quán)
+      - Tổng dòng ≤ lines_per_call → flush batch
+      - Scene có is_hook=True hoặc is_emotion_peak=True → tách riêng (giữ chất lượng)
+    """
+    batches: list[list] = []
+    current: list = []
+    current_lines = 0
+    current_arc: Optional[int] = None
+
+    for sc in scenes:
+        sc_len = sc.end_line - sc.start_line + 1
+        # Scene đặc biệt → tách riêng
+        is_special = sc.is_hook or sc.is_emotion_peak
+        # Đổi arc → flush
+        arc_changed = (current_arc is not None and sc.story_arc_index != current_arc)
+        # Vượt threshold → flush
+        will_overflow = current and (current_lines + sc_len > lines_per_call)
+
+        if is_special:
+            # Flush current trước, scene đặc biệt 1 mình
+            if current:
+                batches.append(current)
+                current = []
+                current_lines = 0
+            batches.append([sc])
+            current_arc = None
+            continue
+
+        if current and (arc_changed or will_overflow):
+            batches.append(current)
+            current = [sc]
+            current_lines = sc_len
+            current_arc = sc.story_arc_index
+        else:
+            current.append(sc)
+            current_lines += sc_len
+            if current_arc is None:
+                current_arc = sc.story_arc_index
+
+    if current:
+        batches.append(current)
+    return batches
+
+
+def format_batch_dialogue_input(
+    scenes: list,
+    entries_by_idx: dict[int, SrtEntry],
+    speaker_map: dict[int, dict],
+    bible: Bible,
+) -> str:
+    """Format dialogue cho 1 batch nhiều scenes, có scene boundary markers."""
+    parts = []
+    for sc in scenes:
+        parts.append(f"=== SCENE {sc.index} — {sc.location or '?'} | "
+                     f"emotion: {sc.emotion_primary} ===")
+        sc_dialogue = format_dialogue_input(sc, entries_by_idx, speaker_map, bible)
+        parts.append(sc_dialogue)
+        parts.append("")
+    return "\n".join(parts).rstrip()
+
+
+async def process_batch(
+    batch: list,
+    bible: Bible,
+    genre_pack: Optional[GenrePack],
+    entries_by_idx: dict[int, SrtEntry],
+    speaker_map: dict[int, dict],
+    prompt_template: str,
+    config: PipelineConfig,
+    tracker: CostTracker,
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+) -> dict[int, dict]:
+    """Dịch 1 batch (nhiều scenes cùng arc), trả về map line_index -> translation.
+
+    Vẫn dùng prompt template cũ — chỉ aggregate context fields đúng:
+      - Address matrix: hợp nhất chars present trong tất cả scenes của batch
+      - Glossary: hợp nhất terms xuất hiện trong batch
+      - Dialogue: nhiều scenes với marker boundary
+    """
+    if len(batch) == 1:
+        # 1 scene → dùng path cũ (tối ưu hơn, prompt clean hơn)
+        return await process_one_scene(
+            batch[0], bible, genre_pack, entries_by_idx, speaker_map,
+            prompt_template, config, tracker, client, semaphore,
+        )
+
+    async with semaphore:
+        # Aggregate context across scenes in batch
+        first = batch[0]
+        last = batch[-1]
+        scene_range = f"{first.index}-{last.index}"
+
+        # Merge characters_in_scene (deduplicated)
+        seen_chars = set()
+        char_lines = []
+        for sc in batch:
+            sc_chars = format_characters_in_scene(sc, bible)
+            for line in sc_chars.splitlines():
+                if line and line not in seen_chars:
+                    seen_chars.add(line)
+                    char_lines.append(line)
+        characters_in_scene = "\n".join(char_lines)
+
+        # Address matrix dùng chars của tất cả scenes (merge characters_present)
+        merged_chars_set = sorted({c for sc in batch for c in sc.characters_present})
+        # Tạo synthetic scene để build address matrix
+        from models import Scene as _Scene
+        synthetic = _Scene(
+            index=first.index,
+            start_line=first.start_line,
+            end_line=last.end_line,
+            start_time_sec=first.start_time_sec,
+            end_time_sec=last.end_time_sec,
+            location=first.location,
+            characters_present=merged_chars_set,
+            summary=f"Batch {scene_range}",
+            emotion_primary=first.emotion_primary,
+            emotion_arc=last.emotion_arc or first.emotion_arc,
+            purpose=first.purpose,
+            story_arc_index=first.story_arc_index,
+        )
+        address_matrix = build_address_matrix(synthetic, bible, genre_pack)
+
+        # Glossary: merge for all scenes
+        seen_terms = set()
+        gloss_lines = []
+        for sc in batch:
+            g = format_glossary_block(bible, sc, entries_by_idx)
+            for line in g.splitlines():
+                if line and line not in seen_terms:
+                    seen_terms.add(line)
+                    gloss_lines.append(line)
+        glossary_block = "\n".join(gloss_lines)
+
+        dialogue_input = format_batch_dialogue_input(batch, entries_by_idx, speaker_map, bible)
+        hook_inst = hook_instruction(first)  # batch không nên chứa hook scenes (đã tách)
+
+        arc_title = ""
+        if first.story_arc_index is not None and first.story_arc_index < len(bible.world.story_arcs):
+            arc_title = bible.world.story_arcs[first.story_arc_index].title
+
+        # Emotion arc: kết hợp đầu-cuối
+        emotion_arc_combined = (
+            f"{first.emotion_arc or first.emotion_primary} → {last.emotion_arc or last.emotion_primary}"
+        )
+
+        prompt = (prompt_template
+                  .replace("{GENRE_MAIN}", bible.world.genre_main)
+                  .replace("{GENRE_SUB}", ", ".join(bible.world.genre_sub))
+                  .replace("{SETTING}", bible.world.setting or "")
+                  .replace("{TONE_OVERALL}", bible.world.tone_overall or "")
+                  .replace("{PLOT_SUMMARY}", bible.world.plot_summary or "")
+                  .replace("{SCENE_INDEX}", scene_range)
+                  .replace("{SCENE_LOCATION}", first.location or "")
+                  .replace("{SCENE_SUMMARY}",
+                           f"Batch {len(batch)} cảnh liên tiếp cùng arc. " + (first.summary or ""))
+                  .replace("{SCENE_PURPOSE}", first.purpose or "")
+                  .replace("{SCENE_EMOTION}", first.emotion_primary)
+                  .replace("{SCENE_EMOTION_ARC}", emotion_arc_combined)
+                  .replace("{STORY_ARC_TITLE}", arc_title)
+                  .replace("{IS_HOOK}", "không")  # batch không chứa hook (đã filter)
+                  .replace("{IS_EMOTION_PEAK}", "không")
+                  .replace("{CHARACTERS_IN_SCENE}", characters_in_scene)
+                  .replace("{ADDRESS_MATRIX}", address_matrix)
+                  .replace("{GLOSSARY_BLOCK}", glossary_block)
+                  .replace("{IS_HOOK_INSTRUCTION}", hook_inst)
+                  .replace("{DIALOGUE_INPUT}", dialogue_input))
+
+        req = LLMRequest(
+            prompt=prompt,
+            model=config.models.heavy,
+            api_key=config.api_key,
+            temperature=0.4,
+            max_output=16000,
+            json_mode=True,
+            max_retries=config.concurrency.retry_max,
+        )
+
+        try:
+            resp = await call_llm(req, client=client)
+            tracker.add("4_translate", resp)
+            data = parse_json_response(resp.text, default={"translations": []})
+        except Exception as e:
+            logger.warning(f"[Stage 4] Batch {scene_range} failed: {e}")
+            return {}
+
+        result = {}
+        for t_data in data.get("translations", []) or []:
+            try:
+                line_idx = int(t_data.get("line_index", -1))
+                if line_idx < 1:
+                    continue
+                result[line_idx] = {
+                    "text_vi": t_data.get("text_vi", "") or "",
+                    "speaker_vi": t_data.get("speaker_vi", "") or "",
+                    "emotion": t_data.get("emotion", "neutral"),
+                    "intensity": int(t_data.get("intensity", 5)),
+                }
+            except Exception:
+                continue
+
+        return result
+
+
 async def run_stage4_translate(
     entries: list[SrtEntry],
     bible: Bible,
@@ -322,7 +532,11 @@ async def run_stage4_translate(
     tracker: CostTracker,
     genre_pack: Optional[GenrePack] = None,
 ) -> dict[int, dict]:
-    """Dịch toàn phim, return map line_index -> {text_vi, speaker_vi, emotion, intensity}."""
+    """Dịch toàn phim, return map line_index -> {text_vi, speaker_vi, emotion, intensity}.
+
+    v3: gộp scenes cùng story_arc thành batches để giảm calls.
+    Scenes hook hoặc emotion_peak vẫn xử lý riêng để giữ chất lượng.
+    """
     logger.info("=" * 60)
     logger.info("STAGE 4 — TRANSLATE")
     logger.info("=" * 60)
@@ -330,13 +544,23 @@ async def run_stage4_translate(
     prompt_template = load_prompt("translate_scene", config)
     entries_by_idx = {e.index: e for e in entries}
 
+    # v3: batch scenes cùng arc
+    batches = build_translate_batches(
+        scene_map.scenes, config.batch.translate_lines_per_call,
+    )
+    total_lines = sum(s.end_line - s.start_line + 1 for s in scene_map.scenes)
+    avg_per_batch = total_lines / max(len(batches), 1)
+    single_count = sum(1 for b in batches if len(b) == 1)
+    logger.info(f"[Stage 4] {len(scene_map.scenes)} scenes → {len(batches)} batches "
+                f"(~{avg_per_batch:.0f} lines/batch, {single_count} single-scene)")
+
     semaphore = asyncio.Semaphore(config.concurrency.translate)
 
     async with httpx.AsyncClient() as client:
         tasks = [
-            process_one_scene(s, bible, genre_pack, entries_by_idx, speaker_map,
-                              prompt_template, config, tracker, client, semaphore)
-            for s in scene_map.scenes
+            process_batch(batch, bible, genre_pack, entries_by_idx, speaker_map,
+                          prompt_template, config, tracker, client, semaphore)
+            for batch in batches
         ]
 
         all_results = {}
@@ -344,11 +568,11 @@ async def run_stage4_translate(
         total = len(tasks)
 
         for coro in asyncio.as_completed(tasks):
-            scene_result = await coro
-            all_results.update(scene_result)
+            batch_result = await coro
+            all_results.update(batch_result)
             completed += 1
-            if completed % 10 == 0 or completed == total:
-                logger.info(f"   [Stage 4] {completed}/{total} scenes translated")
+            if completed % 5 == 0 or completed == total:
+                logger.info(f"   [Stage 4] {completed}/{total} batches translated")
 
     # Coverage check
     covered = len(all_results)

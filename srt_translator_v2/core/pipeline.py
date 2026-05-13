@@ -51,6 +51,15 @@ async def run_full_pipeline(
                 f"{stats['total_duration_min']} min, "
                 f"avg CPS {stats['avg_cps']}")
 
+    # ─── Auto-tune config theo size (v3) ──────────────────────
+    # Tự chỉnh batch sizes + compact mode theo total subs.
+    config.auto_tune_for_size(len(entries))
+    logger.info(
+        f"⚙️  Auto-tune: compact={config.compact.enabled}, "
+        f"speaker={config.batch.speaker_lines_per_call} lines/call, "
+        f"translate={config.batch.translate_lines_per_call} lines/call"
+    )
+
     tracker = CostTracker()
 
     # ─── Stage 1: Bible ───────────────────────────────────────

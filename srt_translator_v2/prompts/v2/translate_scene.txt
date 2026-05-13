@@ -9,42 +9,9 @@ Dịch CẢ PHÂN CẢNH dưới đây sang tiếng Việt sao cho:
 4. NÓI ĐƯỢC — câu tròn, đủ chủ ngữ, dễ đọc cho TTS
 5. ĐỘ DÀI VỪA THỜI GIAN — sub đọc kịp khi hiện trên màn hình
 
-━━━ THÔNG TIN PHIM ━━━
-
-Thể loại chính: {GENRE_MAIN}
-Thể loại phụ: {GENRE_SUB}
-Bối cảnh: {SETTING}
-Tone tổng thể: {TONE_OVERALL}
-
-Tóm tắt cốt truyện:
-{PLOT_SUMMARY}
-
-━━━ PHÂN CẢNH HIỆN TẠI ━━━
-
-Index: {SCENE_INDEX}
-Địa điểm: {SCENE_LOCATION}
-Tóm tắt: {SCENE_SUMMARY}
-Mục đích kịch: {SCENE_PURPOSE}
-Cảm xúc chủ đạo: {SCENE_EMOTION}
-Cảm xúc tiến triển: {SCENE_EMOTION_ARC}
-Story arc: {STORY_ARC_TITLE}
-
-Đây là cảnh hook (cliffhanger)? {IS_HOOK}
-Đây là cảnh đỉnh cảm xúc? {IS_EMOTION_PEAK}
-
-━━━ NHÂN VẬT TRONG CẢNH ━━━
-
-{CHARACTERS_IN_SCENE}
-
-━━━ MA TRẬN XƯNG HÔ TRONG CẢNH ━━━
-
-{ADDRESS_MATRIX}
-
-(Hướng dẫn đọc: hàng = người NÓI, cột = người ĐƯỢC NÓI VỚI)
-
 ━━━ QUY TẮC XƯNG HÔ — BẮT BUỘC ━━━
 
-⚠️ NGUYÊN TẮC TỐI THƯỢNG: TUYỆT ĐỐI tuân theo MA TRẬN ở trên.
+⚠️ NGUYÊN TẮC TỐI THƯỢNG: TUYỆT ĐỐI tuân theo MA TRẬN XƯNG HÔ (sẽ cung cấp ở cuối prompt).
    · Cặp xưng hô (self - other) trong matrix là KHUNG MẶC ĐỊNH cho speaker đó.
    · Mọi quyết định khác phải xuất phát từ matrix này, KHÔNG được phép tự bịa.
 
@@ -128,15 +95,8 @@ KHÔNG dịch literal cảm thán Trung. Tìm tương đương Việt:
 · 不会吧 → "Đùa à" / "Không thể nào"
 · 真的吗 → "Thật á?" / "Thật vậy sao?"
 · 完了 → "Tiêu rồi" / "Xong rồi"
-· 别这样 → "Đừng mà" / "Đừng vậy"
-· 你说什么 → "Anh nói gì cơ?"
-· 牛逼 → "Đỉnh" / "Ghê thật"
-· 绝绝子 → "Tuyệt vời" / "Đỉnh của đỉnh"
-· 没事 → "Không sao" / "Ổn mà"
-· 哎呀 → "Ơ kìa" / "Ôi"
-· 拜托 → "Làm ơn đi" / "Xin lỗi nhé"
 
-【D. THÀNH NGỮ — KHÔNG DỊCH LITERAL】
+【D. IDIOM + THÀNH NGỮ】
 
 · 一见钟情 → "yêu từ cái nhìn đầu tiên"
 · 落井下石 → "vùi dập kẻ thất thế"
@@ -144,12 +104,6 @@ KHÔNG dịch literal cảm thán Trung. Tìm tương đương Việt:
 · 风花雪月 → "tình yêu lãng mạn" (tùy ngữ cảnh)
 · 自作自受 → "tự làm tự chịu"
 · 见鬼 → "Quái lạ" / "Lạ thật"
-
-【E. TÊN + THUẬT NGỮ — TRA GLOSSARY】
-
-{GLOSSARY_BLOCK}
-
-LUÔN dịch tên/thuật ngữ THEO GLOSSARY, KHÔNG tự ý đổi.
 
 ━━━ ĐỘ DÀI CÂU — CHO LỒNG TIẾNG ━━━
 
@@ -230,13 +184,7 @@ Câu phải TRÒN khi TTS đọc thành tiếng — KHÔNG cụt ngủn kiểu p
    · "聿" (gọi tên một mình) → "Duật" ✓
    · "进来" (mệnh lệnh ngắn) → "Mời vào" ✓ (vẫn tròn)
 
-━━━ HOOK / CLIFFHANGER ━━━
-
-{IS_HOOK_INSTRUCTION}
-
 ━━━ FEW-SHOT EXAMPLES ━━━
-
-Đây là ví dụ THỰC TẾ:
 
 VÍ DỤ 1 — Cảnh cãi nhau, chuyển xưng hô:
   Input:
@@ -284,7 +232,6 @@ VÍ DỤ 3 — Cảnh quyền lực, lạnh lùng:
 
   → Tone mệnh lệnh ngắn gọn — giữ ngắn
   → "顾总" = "Cố tổng" (giữ Hán Việt — context tổng tài)
-  → "让 + người + 动作" = "Bảo + người + làm gì"
 
 VÍ DỤ 4 — Cảnh sốc + cảm thán:
   Input:
@@ -299,7 +246,6 @@ VÍ DỤ 4 — Cảnh sốc + cảm thán:
 
   → "我去" KHÔNG dịch literal — dùng "Trời ơi"
   → "完了" → "Tiêu rồi" (cảm xúc panic)
-  → Lặp 3 lần thì lặp 2 lần cũng được (để đủ thời gian)
 
 VÍ DỤ 5 — Cảnh đe dọa / cliffhanger (hook):
   Input:
@@ -310,48 +256,33 @@ VÍ DỤ 5 — Cảnh đe dọa / cliffhanger (hook):
     500 | Phản diện | Cô tưởng chuyện này đã xong sao?
     501 | Phản diện | Đây mới chỉ là bắt đầu thôi!
 
-  → Hook line → DỊCH MẠNH, có thể thêm "thôi/đó" để nhấn
-
 VÍ DỤ 6 — Cảnh 2 nữ bạn thân tâm sự (BẮT BUỘC dùng "tớ-cậu"):
   Matrix:
-    Tô Niệm (nu_chinh, nu) → Lý Hoa (nu_phu, nu): "tớ - cậu" [QH: bạn thân]
-    Lý Hoa (nu_phu, nu) → Tô Niệm (nu_chinh, nu): "tớ - cậu" [QH: bạn thân]
+    Tô Niệm → Lý Hoa: "tớ - cậu" [QH: bạn thân]
+    Lý Hoa → Tô Niệm: "tớ - cậu" [QH: bạn thân]
 
   Input:
     68 | 苏念 | 念念啊, 你怎么了
     69 | 苏念 | 我想离开他
     70 | 李华 | 你疯了吗
-    71 | 苏念 | 我真的撑不下去了
 
   Output:
     68 | Lý Hoa | Niệm Niệm à, cậu sao thế?
     69 | Tô Niệm | Tớ muốn rời xa anh ấy
     70 | Lý Hoa | Cậu điên à?
-    71 | Tô Niệm | Tớ thật sự không trụ nổi nữa
 
   → Nữ với nữ bạn thân → "tớ-cậu", KHÔNG "con-anh", KHÔNG "em-chị"
-  → "他" (người yêu, vắng mặt) → "anh ấy" (KHÔNG "anh" — anh ấy không có
-     mặt trong cảnh nên không xưng hô trực tiếp)
-  → "撑不下去" → "không trụ nổi" (KHÔNG "không thể chống đỡ" — Hán quá nặng)
 
-❌ LỖI ĐIỂN HÌNH CẦN TRÁNH:
+❌ LỖI ĐIỂN HÌNH:
   · Nữ chính say xỉn tâm sự với bạn nữ:
-     Sai: "Con muốn cùng anh..." ← KHÔNG có quan hệ con-cha, KHÔNG có anh
-                                    ở trong cảnh → SAI XƯNG HÔ
-     Đúng: "Tớ muốn cùng anh ấy..." (anh ấy = người vắng mặt được nhắc tới)
-  · Nhân vật nói chuyện với mẹ ruột:
-     Sai: "Tôi không muốn về" ← Bible có relationship "mẹ ruột" → phải dùng
-                                "con-mẹ"
+     Sai: "Con muốn cùng anh..." ← KHÔNG có quan hệ con-cha
+     Đúng: "Tớ muốn cùng anh ấy..."
+  · Nói chuyện với mẹ ruột:
+     Sai: "Tôi không muốn về"
      Đúng: "Con không muốn về"
-  · Vợ chồng đời thường nói chuyện:
-     Sai: "Tôi đi làm rồi" ← Bible có "vợ-chồng" → "anh/em đi làm rồi"
+  · Vợ chồng đời thường:
+     Sai: "Tôi đi làm rồi"
      Đúng: "Anh đi làm rồi"
-
-━━━ INPUT THỰC TẾ ━━━
-
-Thoại cần dịch (định dạng: line_index | speaker_zh | text_zh | duration_sec):
-
-{DIALOGUE_INPUT}
 
 ━━━ OUTPUT FORMAT ━━━
 
@@ -365,13 +296,6 @@ Trả về JSON THUẦN — KHÔNG markdown, KHÔNG giải thích:
       "text_vi": "Tôi nói rồi, không phải việc của cậu",
       "emotion": "cold",
       "intensity": 7
-    },
-    {
-      "line_index": 48,
-      "speaker_vi": "Cố Tân",
-      "text_vi": "Anh nói cái gì cơ?",
-      "emotion": "angry",
-      "intensity": 6
     }
   ]
 }
@@ -385,28 +309,75 @@ Trong đó:
 ━━━ CHECKLIST CUỐI — TỰ KIỂM TRA ━━━
 
 🔴 BƯỚC 1: KIỂM TRA XƯNG HÔ TỪNG DÒNG
-   Với MỖI dòng đã dịch, đối chiếu lại MA TRẬN XƯNG HÔ:
    □ Speaker dòng này = ai? Có trong matrix không?
-   □ Cặp "self - other" tôi đã dùng trong dịch có khớp matrix không?
-   □ Nếu lệch khỏi matrix → có lý do CẢM XÚC RÕ trong NỘI DUNG câu không?
-      - Có → OK (vd. shift "anh-em" → "tôi-cô" khi giận)
-      - Không → SỬA LẠI theo matrix
-   □ Có dùng "con-mẹ/bố/cha/anh/chị" mà Bible KHÔNG có quan hệ huyết thống?
-      → SAI, SỬA NGAY về "tôi-cô/anh/cậu"
-   □ Có dùng "anh-em" cho cặp NỮ-NỮ không có quan hệ chị-em ruột?
-      → SAI, đổi thành "tớ-cậu" hoặc "tôi-cô"
+   □ Cặp "self - other" đã dùng có khớp matrix không?
+   □ Nếu lệch matrix → có lý do CẢM XÚC RÕ trong NỘI DUNG câu không?
+   □ Có dùng "con-mẹ/bố" mà Bible KHÔNG có quan hệ huyết thống? → SAI
+   □ Có dùng "anh-em" cho cặp NỮ-NỮ không có quan hệ chị-em ruột? → SAI
 
 🟡 BƯỚC 2: KIỂM TRA NỘI DUNG
-   □ Mọi line_index đều có translation, không bỏ sót
-   □ Speaker_vi khớp Bible (Cast.vi)
-   □ Cảm thán + idiom + thuật ngữ đã chuyển sang Việt thoát ý
-   □ Không có cấu trúc Hán văn lạ (vd: "tiến hành ăn cơm")
-   □ Câu nói được khi đọc to (cho TTS), đủ chủ ngữ
+   □ Mọi line_index đều có translation
+   □ Speaker_vi khớp Bible
+   □ Cảm thán + idiom đã chuyển sang Việt thoát ý
+   □ Không có cấu trúc Hán văn lạ
+   □ Câu nói được khi đọc to (cho TTS)
    □ Tên/thuật ngữ riêng phim đã tra GLOSSARY
 
 🟢 BƯỚC 3: KIỂM TRA FORMAT
    □ Output là JSON THUẦN, bắt đầu `{` kết thúc `}`
    □ Không có markdown fence ```json
-   □ Không có giải thích trước/sau JSON
 
 CHỈ TRẢ VỀ JSON SAU KHI ĐÃ ĐI QUA 3 BƯỚC TRÊN.
+
+═══════════════════════════════════════════════════════════════════
+PHẦN VARIABLE — CONTEXT CHO LẦN GỌI NÀY
+═══════════════════════════════════════════════════════════════════
+
+━━━ THÔNG TIN PHIM ━━━
+
+Thể loại chính: {GENRE_MAIN}
+Thể loại phụ: {GENRE_SUB}
+Bối cảnh: {SETTING}
+Tone tổng thể: {TONE_OVERALL}
+
+Tóm tắt cốt truyện:
+{PLOT_SUMMARY}
+
+━━━ PHÂN CẢNH HIỆN TẠI ━━━
+
+Index: {SCENE_INDEX}
+Địa điểm: {SCENE_LOCATION}
+Tóm tắt: {SCENE_SUMMARY}
+Mục đích kịch: {SCENE_PURPOSE}
+Cảm xúc chủ đạo: {SCENE_EMOTION}
+Cảm xúc tiến triển: {SCENE_EMOTION_ARC}
+Story arc: {STORY_ARC_TITLE}
+
+Đây là cảnh hook (cliffhanger)? {IS_HOOK}
+Đây là cảnh đỉnh cảm xúc? {IS_EMOTION_PEAK}
+
+━━━ NHÂN VẬT TRONG CẢNH ━━━
+
+{CHARACTERS_IN_SCENE}
+
+━━━ MA TRẬN XƯNG HÔ TRONG CẢNH ━━━
+
+{ADDRESS_MATRIX}
+
+(Hướng dẫn đọc: hàng = người NÓI, cột = người ĐƯỢC NÓI VỚI)
+
+━━━ TÊN + THUẬT NGỮ — TRA GLOSSARY ━━━
+
+{GLOSSARY_BLOCK}
+
+LUÔN dịch tên/thuật ngữ THEO GLOSSARY, KHÔNG tự ý đổi.
+
+━━━ HOOK / CLIFFHANGER ━━━
+
+{IS_HOOK_INSTRUCTION}
+
+━━━ INPUT THỰC TẾ ━━━
+
+Thoại cần dịch (định dạng: line_index | speaker_zh | text_zh | duration_sec):
+
+{DIALOGUE_INPUT}

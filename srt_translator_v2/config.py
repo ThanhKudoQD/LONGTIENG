@@ -67,8 +67,41 @@ class CacheConfig:
 
 
 # ─────────────────────────────────────────────────────────────────
-# CONCURRENCY
+# BATCH STRATEGY (v3 — giảm LLM calls)
 # ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class BatchConfig:
+    """Cấu hình batch để gộp calls, giảm overhead.
+
+    Mỗi stage có 1 "lines per call" target. Pipeline sẽ gộp các unit nhỏ
+    (scene, hoặc chunk) cho đến khi đạt target hoặc tới boundary tự nhiên.
+    """
+    # Speaker: gom N dòng liên tiếp vào 1 call (bỏ scene boundary)
+    # Càng to càng tiết kiệm, nhưng prompt to → LLM dễ nhầm. ~80-100 là sweet spot.
+    speaker_lines_per_call: int = 80
+
+    # Translate: gom scenes thành arc-batches. Mỗi call ~N dòng MAX.
+    # Vẫn giữ scene info trong prompt (LLM track pronoun/emotion theo scene).
+    translate_lines_per_call: int = 60
+
+    # Polish: gom chunks lớn hơn (CPS check + glossary check)
+    polish_lines_per_call: int = 80
+
+
+@dataclass
+class CompactModeConfig:
+    """Mode compact cho phim ngắn (<200 subs).
+
+    Khi bật:
+      - Scene detect: ép max 5 scenes
+      - Speaker + Translate: thường 1 call duy nhất
+      - Polish: gộp 3 sub-stage thành 1 call/sub-stage
+    """
+    enabled: bool = False                   # Auto-bật theo size
+    auto_threshold_subs: int = 200          # < threshold → bật compact
+    max_scenes: int = 5                     # Ép tối đa 5 scenes
+
 
 @dataclass
 class ConcurrencyConfig:
@@ -145,6 +178,8 @@ class PipelineConfig:
     duration: DurationConfig = field(default_factory=DurationConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
+    batch: BatchConfig = field(default_factory=BatchConfig)
+    compact: CompactModeConfig = field(default_factory=CompactModeConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
 
@@ -166,6 +201,43 @@ class PipelineConfig:
             self.cps.condense_threshold = preset.get(
                 "cps_condense_threshold", preset["cps_max"]
             )
+        return self
+
+    def auto_tune_for_size(self, total_subs: int):
+        """Tự động chỉnh batch size + compact mode theo số subs.
+
+        Nguyên tắc:
+          - < 200 subs: compact mode — ít scenes, gom call tối đa nhưng < 50 lines/call
+          - 200-800: medium batches (40-50 lines/call)
+          - 800-2000: standard (50-70 lines/call) — như default
+          - > 2000: large batches (70-90 lines/call) — phim dài 4h+
+
+        Mục đích: số calls không scale tuyến tính theo size.
+        Giữ batch ≤ 50 dòng để response JSON không bị truncate.
+        """
+        if total_subs < self.compact.auto_threshold_subs:
+            # Compact mode cho phim ngắn / test
+            self.compact.enabled = True
+            # Giới hạn ≤ 40 dòng/call để response không truncate
+            self.batch.speaker_lines_per_call = min(40, total_subs)
+            self.batch.translate_lines_per_call = min(40, total_subs)
+            self.batch.polish_lines_per_call = min(50, total_subs)
+        elif total_subs < 800:
+            self.compact.enabled = False
+            self.batch.speaker_lines_per_call = 50
+            self.batch.translate_lines_per_call = 40
+            self.batch.polish_lines_per_call = 60
+        elif total_subs < 2000:
+            self.compact.enabled = False
+            self.batch.speaker_lines_per_call = 60
+            self.batch.translate_lines_per_call = 50
+            self.batch.polish_lines_per_call = 80
+        else:
+            # Phim 4h+
+            self.compact.enabled = False
+            self.batch.speaker_lines_per_call = 80
+            self.batch.translate_lines_per_call = 60
+            self.batch.polish_lines_per_call = 100
         return self
 
 
