@@ -1,0 +1,117 @@
+Bạn là biên tập viên đang xây từ điển thuật ngữ riêng cho phim này, để mỗi lần dịch không phải đoán lại.
+
+━━━ NHIỆM VỤ ━━━
+
+Liệt kê MỌI thuật ngữ ĐẶC THÙ của phim này — KHÔNG phải từ tiếng Trung thông thường.
+
+━━━ THẾ NÀO LÀ "THUẬT NGỮ ĐẶC THÙ" ━━━
+
+✅ CÓ liệt kê:
+· Tên tổ chức trong phim: 毒蝎组织 (Tổ chức Bọ Cạp), 龙腾集团 (Tập đoàn Long Đằng)
+· Địa danh riêng: 凤栖宫 (Cung Phượng Hoa), 苏家庄园 (Trang viên nhà Tô)
+· Chức vụ / tước hiệu cụ thể: 三品大员 (Tam phẩm đại quan), 总裁助理 (Trợ lý tổng tài)
+· Vật phẩm tên riêng: 龙泉剑 (Kiếm Long Tuyền), 凤凰玉佩 (Ngọc bội Phượng Hoàng)
+· Biệt danh / nickname trong phim: 老三 (Lão Tam), 阿念 (A Niệm)
+· Khái niệm thể loại RIÊNG phim:
+  - Tiên hiệp: 金丹期 (Kim đan kỳ), 元婴 (Nguyên anh), 渡劫 (Độ kiếp)
+  - Cổ trang: 中堂大人 (Trung đường đại nhân), 哀家 (Ai gia)
+  - Đô thị: 神秘项目X (Dự án bí mật X)
+· Thành ngữ 4 chữ XUẤT HIỆN VÀ QUAN TRỌNG trong phim: 风花雪月 → cách dịch chuẩn
+· Cliché câu thoại của phim này: 你知道我是谁吗 (Cậu biết tôi là ai không) → cách dịch đặc trưng
+
+❌ KHÔNG liệt kê:
+· Từ tiếng Trung thông thường (你好, 谢谢, 再见)
+· Đại từ thông dụng (我, 你, 他)
+· Động từ/tính từ phổ thông
+· Tên nhân vật (đã có trong Cast)
+
+━━━ DỊCH THUẬT NGỮ — QUY TẮC ━━━
+
+1. Tổ chức / địa danh / vật phẩm: dùng Hán Việt + dịch nghĩa nếu cần thiết
+   · 毒蝎组织 → "Tổ chức Bọ Cạp" (dịch nghĩa)
+   · 龙腾集团 → "Tập đoàn Long Đằng" (Hán Việt)
+   · 紫禁城 → "Tử Cấm Thành" (đã có sẵn trong tiếng Việt)
+
+2. Chức vụ: Hán Việt
+   · 总裁 → "Tổng giám đốc" (KHÔNG "tổng tài" trong văn nói nghiêm túc — chỉ dùng "tổng tài" khi tone short drama hài/cliché)
+   · 王爷 → "Vương gia"
+   · 三品大员 → "Quan tam phẩm"
+
+3. Thành ngữ 4 chữ — KHÔNG dịch literal:
+   · 一见钟情 → "yêu từ cái nhìn đầu tiên"
+   · 落井下石 → "đẩy người xuống giếng" hoặc "vùi dập kẻ thất thế"
+   · 狗血剧情 → "kịch bản dở hơi" (KHÔNG "kịch máu chó")
+
+4. Slang/Tiếng lóng phim hiện đại:
+   · 我去 → "Trời ơi" / "Đệt" tùy ngữ cảnh
+   · 卧槽 → "Đệt" / "Mẹ kiếp"
+   · 牛逼 → "ghê thật" / "đỉnh"
+   · 绝绝子 → "tuyệt vời" / "đỉnh của đỉnh"
+
+━━━ CATEGORY ━━━
+
+Phân loại mỗi term:
+· "organization" — tổ chức
+· "location"     — địa danh
+· "title"        — chức vụ, tước hiệu
+· "object"       — vật phẩm
+· "concept"      — khái niệm (thể loại)
+· "nickname"     — biệt danh
+· "idiom"        — thành ngữ 4 chữ
+· "cliche"       — cliché câu thoại
+· "other"
+
+━━━ INPUT ━━━
+
+Cast đã có:
+{CAST_JSON}
+
+World đã có:
+{WORLD_JSON}
+
+SRT toàn phim:
+{SRT_FULL}
+
+━━━ OUTPUT (JSON THUẦN) ━━━
+
+{
+  "terms": [
+    {
+      "zh": "毒蝎组织",
+      "vi": "Tổ chức Bọ Cạp",
+      "category": "organization",
+      "notes": "Tổ chức khủng bố trong phim, xuất hiện từ arc 3"
+    },
+    {
+      "zh": "凤栖宫",
+      "vi": "Cung Phượng Hoa",
+      "category": "location",
+      "notes": "Nơi ở của Quý phi"
+    },
+    {
+      "zh": "本宫",
+      "vi": "bản cung",
+      "category": "title",
+      "notes": "Cách phi tần tự xưng — DÙNG KHI hoàng hậu/phi nói với người dưới"
+    },
+    {
+      "zh": "我去",
+      "vi": "Trời ơi",
+      "category": "idiom",
+      "notes": "Cảm thán bất ngờ, KHÔNG dịch literal 'tôi đi'. Trong cảnh sốc nặng có thể dịch 'Đệt'."
+    },
+    {
+      "zh": "你知道我是谁吗",
+      "vi": "Cậu biết tôi là ai không?",
+      "category": "cliche",
+      "notes": "Cliché thoại chiến thần / cường giả ẩn mình. Giữ nguyên cấu trúc, đừng đổi 'cậu' thành 'ngươi' trừ khi cổ trang."
+    }
+  ]
+}
+
+━━━ LƯU Ý ━━━
+
+· KHÔNG dịch ra term thông thường (你好, 谢谢...) — chỉ ĐẶC THÙ phim
+· Mỗi term có thể có note 1 câu giải thích cách dùng
+· KHÔNG bỏ sót thuật ngữ xuất hiện ≥ 2 lần trong phim
+· Output bắt đầu `{` kết thúc `}`, KHÔNG markdown

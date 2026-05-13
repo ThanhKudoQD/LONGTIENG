@@ -138,6 +138,7 @@ def uid():
 
 # ─── DB Helpers (SQLAlchemy) ──────────────────────────────────────────────────
 def _role_to_dict(role) -> dict:
+    from dubeditor.voice_modes import parse_voice_modes
     return {
         "id":                   role.id,
         "actor_id":             role.actor_id,
@@ -151,6 +152,8 @@ def _role_to_dict(role) -> dict:
         "lora_path":            role.lora_path,
         "sort_order":           role.sort_order,
         "images":               [img.url for img in role.images],
+        # v3: multi-mode voice refs (toggle ở Project level)
+        "voice_modes":          parse_voice_modes(role.voice_modes),
     }
 
 def _actor_to_dict(actor) -> dict:
@@ -217,9 +220,24 @@ def _wav_bytes(wav: np.ndarray, sr: int = 48000) -> bytes:
     return buf.read()
 
 def _build_text(text: str, control: str = "") -> str:
+    """Prefix control instruction vào text cho VoxCPM.
+
+    Output format VoxCPM cần: "(instruction)Hello world"
+
+    Args:
+        text: nội dung cần đọc
+        control: control instruction (có hoặc không có ngoặc bao quanh)
+    """
     c = (control or "").strip()
     t = (text or "").strip()
-    return f"({c}){t}" if c else t
+    if not c:
+        return t
+    # Bỏ ngoặc thừa nếu caller đã wrap rồi
+    if c.startswith("(") and c.endswith(")"):
+        c = c[1:-1].strip()
+    if not c:
+        return t
+    return f"({c}){t}"
 
 def _generate_sync(
     target_text: str,
@@ -306,6 +324,33 @@ def _do_load():
         _model_loading = False
 
 # ─── FastAPI App ──────────────────────────────────────────────────────────────
+def _cleanup_on_shutdown():
+    """Cleanup chạy khi app shutdown — unload model + free VRAM."""
+    global _nano_server, _nano_error
+    try:
+        if _nano_server is not None:
+            try:
+                _nano_server.stop()
+                logger.info("[Shutdown] Model server stopped")
+            except Exception as e:
+                logger.warning(f"[Shutdown] Stop server failed: {e}")
+            _nano_server = None
+            _nano_error  = None
+        # Free GPU memory
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.info("[Shutdown] VRAM freed ✅")
+        except Exception as e:
+            logger.warning(f"[Shutdown] CUDA cleanup failed: {e}")
+    except Exception as e:
+        logger.warning(f"[Shutdown] Cleanup error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from dubeditor.database import init_db as dub_init_db
@@ -319,11 +364,32 @@ async def lifespan(app: FastAPI):
     queue_manager.setup(generate_fn=dub_do_generate, broadcast_fn=dub_broadcast)
     queue_manager.start_worker()
 
+    # Đăng ký signal handler cho SIGTERM / SIGINT
+    # (lifespan shutdown đôi khi không chạy nếu kill -9, nhưng SIGTERM/SIGINT thì chạy được)
+    import signal
+    def _signal_handler(signum, frame):
+        logger.info(f"[Signal] Received {signum}, cleaning up...")
+        _cleanup_on_shutdown()
+        # Re-raise để uvicorn shutdown bình thường
+        raise SystemExit(0)
+    try:
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+    except (ValueError, OSError):
+        # Trong worker thread không đăng ký signal được — bỏ qua
+        pass
+
+    # Đăng ký atexit cho trường hợp normal exit
+    import atexit
+    atexit.register(_cleanup_on_shutdown)
+
     logger.info(f"✅ Server: http://{HOST}:{PORT}")
     yield
 
-    # Shutdown
+    # Shutdown (lifespan exit)
+    logger.info("[Shutdown] Lifespan exiting...")
     queue_manager.stop_worker()
+    _cleanup_on_shutdown()
 
 app = FastAPI(title="VoiceCast + VoxCPM2", version="3.0.0", lifespan=lifespan)
 
@@ -503,6 +569,7 @@ async def create_role(actor_id: str, request: Request, admin=Depends(require_aut
     new_id = uid()
     db     = _get_vc_session()
     try:
+        from dubeditor.voice_modes import dump_voice_modes
         count = db.query(Role).filter(Role.actor_id == actor_id).count()
         db.add(Role(
             id=new_id, actor_id=actor_id,
@@ -515,6 +582,7 @@ async def create_role(actor_id: str, request: Request, admin=Depends(require_aut
             reference_audio_text=body.get("reference_audio_text", ""),
             lora_path=body.get("lora_path", ""),
             sort_order=count,
+            voice_modes=dump_voice_modes(body.get("voice_modes") or {}),
         ))
         for i, url in enumerate(body.get("images", [])):
             db.add(RoleImage(role_id=new_id, url=url, sort_order=i))
@@ -526,6 +594,7 @@ async def create_role(actor_id: str, request: Request, admin=Depends(require_aut
 @app.put("/api/admin/roles/{role_id}")
 async def update_role(role_id: str, request: Request, admin=Depends(require_auth_api)):
     from dubeditor.models import Role, RoleImage
+    from dubeditor.voice_modes import dump_voice_modes
     body = await request.json()
     db   = _get_vc_session()
     try:
@@ -540,6 +609,9 @@ async def update_role(role_id: str, request: Request, admin=Depends(require_auth
         r.audio                = body.get("audio", "")
         r.reference_audio_text = body.get("reference_audio_text", "")
         r.lora_path            = body.get("lora_path", "")
+        # v3: multi-mode voice (toggle ở Project level)
+        if "voice_modes" in body:
+            r.voice_modes = dump_voice_modes(body.get("voice_modes") or {})
         # Cập nhật images
         db.query(RoleImage).filter(RoleImage.role_id == role_id).delete()
         for i, url in enumerate(body.get("images", [])):
@@ -581,6 +653,65 @@ async def upload_role_file(file: UploadFile = File(...),
         f.write(await file.read())
     return {"url": f"/uploads/roles/{fname}"}
 
+
+# ─── Admin: Voice modes per role ──────────────────────────────────────────────
+@app.put("/api/admin/roles/{role_id}/voice-mode/{mode}")
+async def upsert_voice_mode(role_id: str, mode: str, request: Request,
+                             admin=Depends(require_auth_api)):
+    """Set hoặc cập nhật 1 voice mode cho role.
+
+    Body: { audio: "/uploads/...", text: "...", duration: 3.5 }
+    Body có thể chỉ chứa các field muốn update (partial).
+    """
+    from dubeditor.models import Role
+    from dubeditor.voice_modes import parse_voice_modes, dump_voice_modes, MODE_LABELS
+
+    if mode not in MODE_LABELS:
+        raise HTTPException(400, f"Mode không hợp lệ: {mode}. Phải là 1 trong {list(MODE_LABELS.keys())}")
+
+    body = await request.json()
+    db = _get_vc_session()
+    try:
+        r = db.query(Role).filter(Role.id == role_id).first()
+        if not r:
+            raise HTTPException(404, "Không tìm thấy role")
+
+        modes = parse_voice_modes(r.voice_modes)
+        modes[mode] = {
+            "audio":    body.get("audio", modes.get(mode, {}).get("audio", "")),
+            "text":     body.get("text", modes.get(mode, {}).get("text", "")),
+            "duration": body.get("duration", modes.get(mode, {}).get("duration", 0)),
+        }
+        r.voice_modes = dump_voice_modes(modes)
+        db.commit()
+        return {"message": f"Đã cập nhật mode '{mode}'", "voice_modes": modes}
+    finally:
+        db.close()
+
+
+@app.delete("/api/admin/roles/{role_id}/voice-mode/{mode}")
+async def delete_voice_mode(role_id: str, mode: str,
+                              admin=Depends(require_auth_api)):
+    """Xóa 1 voice mode khỏi role."""
+    from dubeditor.models import Role
+    from dubeditor.voice_modes import parse_voice_modes, dump_voice_modes
+
+    db = _get_vc_session()
+    try:
+        r = db.query(Role).filter(Role.id == role_id).first()
+        if not r:
+            raise HTTPException(404, "Không tìm thấy role")
+
+        modes = parse_voice_modes(r.voice_modes)
+        if mode in modes:
+            del modes[mode]
+            r.voice_modes = dump_voice_modes(modes)
+            db.commit()
+        return {"message": f"Đã xóa mode '{mode}'", "voice_modes": modes}
+    finally:
+        db.close()
+
+
 # ─── TTS API ──────────────────────────────────────────────────────────────────
 class TTSRequest(BaseModel):
     role_id: str
@@ -590,17 +721,43 @@ class TTSRequest(BaseModel):
     cfg_value: float = 3.0
     locdit_steps: int = 40
     use_lora: bool = False
+    # v3: chọn voice mode (ref audio đã upload cho role)
+    # Values: 'normal' | 'happy' | 'sad' | 'angry' | 'intimate' | '' (= dùng role.audio cũ)
+    voice_mode: str = ""
 
 @app.post("/api/tts/generate")
 async def tts_generate(body: TTSRequest):
     from dubeditor.models import Role
+    from dubeditor.voice_modes import parse_voice_modes, MODE_LABELS
     db = _get_vc_session()
     try:
         role = db.query(Role).filter(Role.id == body.role_id).first()
         if not role:
             raise HTTPException(404, f"Không tìm thấy role: {body.role_id}")
+
+        # Resolve audio + ref_text:
+        # 1. Nếu voice_mode được set + role có voice_modes[mode] → dùng mode đó
+        # 2. Fallback: role.audio + role.reference_audio_text (mặc định)
         audio_url = role.audio or ""
         ref_text  = role.reference_audio_text or ""
+        voice_mode_used = "default"
+
+        vm = (body.voice_mode or "").strip().lower()
+        if vm and vm in MODE_LABELS:
+            modes = parse_voice_modes(role.voice_modes)
+            ref = modes.get(vm)
+            if ref and ref.get("audio"):
+                audio_url = ref["audio"]
+                ref_text  = ref.get("text", "") or ""
+                voice_mode_used = vm
+            else:
+                # Fallback normal nếu mode đó trống
+                ref = modes.get("normal")
+                if ref and ref.get("audio"):
+                    audio_url = ref["audio"]
+                    ref_text  = ref.get("text", "") or ""
+                    voice_mode_used = f"normal (fallback from {vm})"
+
         lora_path = (role.lora_path or "").strip() or None
     finally:
         db.close()
@@ -610,6 +767,8 @@ async def tts_generate(body: TTSRequest):
         candidate = PUBLIC_DIR / audio_url.lstrip("/")
         if candidate.exists():
             audio_path = str(candidate)
+        else:
+            logger.warning(f"[GEN] Audio file MISSING: {candidate}")
 
     if lora_path and not os.path.exists(lora_path):
         logger.warning(f"LoRA path không tồn tại: {lora_path}")
@@ -620,9 +779,23 @@ async def tts_generate(body: TTSRequest):
 
     target_text = _build_text(body.text, body.control_instruction)
 
+    # Log để debug — chi tiết reference audio + mode
+    has_instruction = bool((body.control_instruction or "").strip())
+    logger.info(
+        f"[GEN] mode={body.mode} cfg={body.cfg_value} "
+        f"role={body.role_id} voice_mode={voice_mode_used} "
+        f"audio_url={audio_url!r} audio_path={audio_path!r} "
+        f"ref_text_len={len(ref_text)} "
+        f"instruction={body.control_instruction!r} "
+        f"text={body.text!r}"[:450]
+    )
+
     loop = asyncio.get_event_loop()
     try:
-        if body.mode == "ultimate" and audio_path and ref_text:
+        # Ultimate mode (Hi-Fi) CHỈ khi không có instruction.
+        # VoxCPM docs: "When Hi-Fi mode is enabled, the control instruction is ignored."
+        # → Có instruction phải dùng Controllable Cloning (chỉ reference_wav_path).
+        if body.mode == "ultimate" and audio_path and ref_text and not has_instruction:
             wav = await loop.run_in_executor(None, lambda: _generate_sync(
                 target_text=body.text.strip(),
                 reference_wav_path=audio_path,
@@ -634,12 +807,14 @@ async def tts_generate(body: TTSRequest):
             mode_used = "ultimate"
         elif audio_path:
             wav = await loop.run_in_executor(None, lambda: _generate_sync(
-                target_text=target_text,
+                target_text=target_text,    # đã prefix instruction
                 reference_wav_path=audio_path,
                 cfg_value=body.cfg_value,
                 lora_path=lora_path,
             ))
             mode_used = "clone" + (" + lora" if lora_path else "")
+            if has_instruction and body.mode == "ultimate":
+                mode_used += " (downgraded from ultimate: has instruction)"
         else:
             wav = await loop.run_in_executor(None, lambda: _generate_sync(
                 target_text=target_text,
@@ -647,6 +822,8 @@ async def tts_generate(body: TTSRequest):
                 lora_path=lora_path,
             ))
             mode_used = "lora_only"
+
+        logger.info(f"[GEN] DONE mode_used={mode_used} dur={len(wav)/48000:.2f}s")
 
         url = _save_generated(wav)
         return {

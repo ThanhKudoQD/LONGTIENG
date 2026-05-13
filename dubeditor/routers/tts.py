@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 import asyncio, logging, sys
 from pathlib import Path
 from pydantic import BaseModel
+from typing import Optional
 
 from dubeditor.database import get_db, SessionLocal
 from dubeditor.models import Subtitle, Character, Role
@@ -49,12 +50,26 @@ def get_role(role_id: str, db: Session) -> Role | None:
     return db.query(Role).filter(Role.id == role_id).first()
 
 
-def _run_tts(text: str, role_id: str):
-    """role_id + text → _generate_sync (lấy từ app module)."""
+def _run_tts(text: str, role_id: str, emotion: Optional[str] = None,
+             intensity: int = 5, use_emotion_voice: bool = False,
+             force_mode: Optional[str] = None):
+    """role_id + text + emotion → _generate_sync (lấy từ app module).
+
+    Args:
+        text: nội dung TTS (có thể có prefix `(instruction)`)
+        role_id: VoxCPM role id
+        emotion: emotion code của subtitle (sad/angry/...)
+        intensity: 1-10
+        use_emotion_voice: nếu True → resolve ref theo voice_modes;
+                            nếu False → dùng role.audio mặc định
+        force_mode: override mode (bỏ qua emotion). VD: 'sad', 'angry'...
+    """
     main = sys.modules.get("__main__") or sys.modules.get("app")
     generate_sync = getattr(main, "_generate_sync", None)
     if generate_sync is None:
         raise RuntimeError("_generate_sync không tìm thấy")
+
+    has_instruction = text.strip().startswith("(") and ")" in text[:300]
 
     db = SessionLocal()
     try:
@@ -62,18 +77,37 @@ def _run_tts(text: str, role_id: str):
         if not role:
             raise RuntimeError(f"Không tìm thấy role {role_id}")
 
-        audio_url = role.audio or ""
-        ref_path  = None
+        # Resolve ref audio + transcript theo voice_modes
+        from dubeditor.voice_modes import resolve_ref_for_emotion
+        audio_url, ref_text_raw, mode_used = resolve_ref_for_emotion(
+            role, emotion=emotion, intensity=intensity,
+            use_emotion_voice=use_emotion_voice,
+            force_mode=force_mode,
+        )
+
+        ref_path = None
         if audio_url:
             candidate = PUBLIC_DIR / audio_url.lstrip("/")
             if candidate.exists():
                 ref_path = str(candidate)
+            else:
+                logger.warning(f"[TTS] Ref audio MISSING ({mode_used}): {candidate}")
+
+        ref_text = (ref_text_raw or "").strip() or None
 
         lora_path = (role.lora_path or "").strip() or None
-        ref_text  = (role.reference_audio_text or "").strip() or None
         use_lora  = lora_path and Path(lora_path).exists()
 
-        if ref_path and ref_text:
+        # Log mode được dùng (để debug)
+        logger.info(
+            f"[TTS-MODE] role={role_id} emotion={emotion or '-'} "
+            f"intensity={intensity} → mode_used={mode_used} "
+            f"ref={'✓' if ref_path else '✗'} ref_text={'✓' if ref_text else '✗'} "
+            f"has_instruction={has_instruction}"
+        )
+
+        # Hi-Fi CHỈ khi đủ ref+text VÀ không có instruction
+        if ref_path and ref_text and not has_instruction:
             return generate_sync(
                 target_text=text,
                 reference_wav_path=ref_path,
@@ -125,10 +159,47 @@ async def do_generate(subtitle_id: int):
         if not text:
             raise RuntimeError(f"Sub {subtitle_id} không có text")
 
-        logger.info(f"[DubTTS] subtitle={subtitle_id} role={role_id} text={text!r}"[:160])
+        # Resolve voice strategy: toggle ở Project level (global per-project)
+        from dubeditor.models import Project
+        project = db.query(Project).filter(Project.id == s.project_id).first()
+        use_emotion_voice = bool(project and project.use_emotion_voice)
+
+        # Force mode resolution (precedence: subtitle > project > auto)
+        force_mode = None
+        if use_emotion_voice:
+            force_mode = (s.tts_voice_mode or "").strip() or None
+            if not force_mode and project:
+                force_mode = (project.tts_voice_mode or "").strip() or None
+
+        if use_emotion_voice:
+            # Multi-mode Hi-Fi: pipeline tự chọn ref theo emotion, KHÔNG instruction
+            text_for_tts = text
+            tts_instruction = ""
+        else:
+            # Legacy: prefix instruction từ emotion + character context
+            from dubeditor.tts_instruction import build_tts_instruction, prefix_instruction
+            tts_instruction = build_tts_instruction(
+                emotion=s.emotion,
+                intensity=s.intensity,
+                gender=getattr(char, "gender", None),
+                age_group=getattr(char, "age_group", None),
+                role=getattr(char, "role", None),
+            )
+            text_for_tts = prefix_instruction(text, tts_instruction)
+
+        logger.info(
+            f"[DubTTS] subtitle={subtitle_id} role={role_id} "
+            f"emotion={s.emotion or '-'} intensity={s.intensity or '-'} "
+            f"use_emotion_voice={use_emotion_voice} force_mode={force_mode or '-'} "
+            f"instruction={tts_instruction or '(none)'} "
+            f"text={text!r}"[:340]
+        )
 
         loop = asyncio.get_event_loop()
-        wav  = await loop.run_in_executor(None, _run_tts, text, role_id)
+        wav  = await loop.run_in_executor(
+            None, _run_tts, text_for_tts, role_id,
+            s.emotion, s.intensity or 5, use_emotion_voice, force_mode,
+        )
         wav  = _trim_silence(wav, sr=48000)
 
         sr      = 48000

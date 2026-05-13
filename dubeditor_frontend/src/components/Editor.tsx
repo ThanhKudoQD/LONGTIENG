@@ -170,6 +170,43 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
     }
   }
 
+  // ── Emotion voice toggle (v3) ────────────────────────────────────────────
+  const [emotionVoiceOn, setEmotionVoiceOn] = useState(false)
+  const [globalVoiceMode, setGlobalVoiceMode] = useState<string>('')  // '' = auto
+  // Sync state khi project load
+  useEffect(() => {
+    if (project) {
+      if (typeof project.use_emotion_voice === 'boolean') {
+        setEmotionVoiceOn(project.use_emotion_voice)
+      }
+      setGlobalVoiceMode(project.tts_voice_mode || '')
+    }
+  }, [project?.id, project?.use_emotion_voice, project?.tts_voice_mode])
+
+  const toggleEmotionVoice = async () => {
+    if (!project) return
+    const next = !emotionVoiceOn
+    setEmotionVoiceOn(next)   // optimistic
+    try {
+      await api.patch(`/projects/${project.id}`, { use_emotion_voice: next })
+    } catch (e: any) {
+      setEmotionVoiceOn(!next)   // revert
+      alert('Lưu thất bại: ' + (e?.message || ''))
+    }
+  }
+
+  const setGlobalMode = async (mode: string) => {
+    if (!project) return
+    const prev = globalVoiceMode
+    setGlobalVoiceMode(mode)   // optimistic
+    try {
+      await api.patch(`/projects/${project.id}`, { tts_voice_mode: mode || null })
+    } catch (e: any) {
+      setGlobalVoiceMode(prev)   // revert
+      alert('Lưu thất bại: ' + (e?.message || ''))
+    }
+  }
+
   const [overlapMinCount, setOverlapMinCount] = useState(2)
   const [overlapMinSec, setOverlapMinSec] = useState(0.01)
   const [overlapIdx, setOverlapIdx] = useState(0)
@@ -340,8 +377,40 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   const importSRT = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]; if (!file) return
     const form = new FormData(); form.append('file', file)
-    await api.post(`/projects/${projectId}/import-srt`, form)
-    await loadProject(projectId)
+    try {
+      const res = await api.post(`/projects/${projectId}/import-srt`, form)
+      const data = res.data || {}
+      if (data.detected_chinese) {
+        // Toast nhẹ — không alert
+        console.log(`[Import] OK ${data.imported} dòng tiếng Trung (encoding: ${data.encoding})`)
+      }
+      await loadProject(projectId)
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail
+      // Backend trả error có code 'DETECTED_NON_CHINESE' → hỏi user có muốn force không
+      if (detail?.code === 'DETECTED_NON_CHINESE') {
+        const ok = confirm(
+          `⚠ File này không phải SRT tiếng Trung\n\n` +
+          `Tỉ lệ ký tự Trung: ${(detail.cjk_ratio * 100).toFixed(1)}% (cần ≥ 30%)\n` +
+          `Encoding detect: ${detail.encoding}\n\n` +
+          `Pipeline v2 chỉ dịch Trung→Việt. Nếu bạn vẫn muốn import (vd: file đã dịch sẵn để chỉnh sửa thủ công), bấm OK.\n\n` +
+          `Bấm Cancel nếu upload nhầm file.`
+        )
+        if (!ok) { e.target.value = ''; return }
+        // Retry với ?force=true
+        try {
+          const form2 = new FormData(); form2.append('file', file)
+          await api.post(`/projects/${projectId}/import-srt?force=true`, form2)
+          await loadProject(projectId)
+        } catch (err2: any) {
+          alert(`Import fail: ${err2?.response?.data?.detail?.message || err2?.message || 'Unknown'}`)
+        }
+      } else {
+        alert(`Import fail: ${typeof detail === 'string' ? detail : (detail?.message || err?.message || 'Unknown')}`)
+      }
+    } finally {
+      e.target.value = ''  // reset input để có thể chọn lại cùng file
+    }
   }
 
   // Tính overlap chains — chuỗi audio liên tiếp chồng nhau
@@ -471,6 +540,41 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           {modelStatus==='loading' && <><div className="w-3 h-3 rounded-full border-2 border-amber-400 border-t-transparent animate-spin"/>Loading...</>}
           {(modelStatus==='unloaded'||modelStatus==='unknown') && <><span className="w-1.5 h-1.5 rounded-full bg-zinc-400"/>Model OFF</>}
         </button>
+
+        {/* Emotion Voice toggle — v3 multi-mode TTS */}
+        <button
+          onClick={toggleEmotionVoice}
+          disabled={!project}
+          title={emotionVoiceOn
+            ? "TTS dùng audio mẫu theo cảm xúc của từng câu. Click để tắt."
+            : "TTS dùng audio mẫu mặc định. Click để bật theo cảm xúc."}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0 disabled:opacity-50
+            ${emotionVoiceOn
+              ? 'border-fuchsia-300 dark:border-fuchsia-700 bg-fuchsia-50 dark:bg-fuchsia-950/40 text-fuchsia-700 dark:text-fuchsia-400 hover:bg-fuchsia-100'
+              : 'border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-500 hover:bg-fuchsia-50 hover:border-fuchsia-300 hover:text-fuchsia-600'
+            }`}>
+          <span>🎭</span>
+          {emotionVoiceOn ? 'Giọng cảm xúc ON' : 'Giọng cảm xúc OFF'}
+        </button>
+
+        {/* Global override dropdown — chỉ hiện khi emotion voice ON */}
+        {emotionVoiceOn && (
+          <select
+            value={globalVoiceMode}
+            onChange={e => setGlobalMode(e.target.value)}
+            disabled={!project}
+            title="Override mode toàn project (mỗi dòng có thể override riêng)"
+            className="px-2 py-1.5 rounded-lg border border-fuchsia-200 dark:border-fuchsia-800 bg-white dark:bg-zinc-900 text-[12px] text-fuchsia-700 dark:text-fuchsia-400 flex-shrink-0 focus:outline-none focus:ring-1 focus:ring-fuchsia-400"
+          >
+            <option value="">🎯 Auto (theo emotion)</option>
+            <option value="normal">😐 Bình thường (tất cả)</option>
+            <option value="happy">😊 Vui vẻ (tất cả)</option>
+            <option value="sad">😢 Buồn (tất cả)</option>
+            <option value="angry">😠 Tức giận (tất cả)</option>
+            <option value="intimate">🥺 Nhẹ nhàng (tất cả)</option>
+          </select>
+        )}
+
         <button onClick={onTranslate}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0"
           style={{ borderColor: '#7c3aed', background: 'linear-gradient(135deg,#7c3aed18,#4f46e518)', color: '#7c3aed' }}>

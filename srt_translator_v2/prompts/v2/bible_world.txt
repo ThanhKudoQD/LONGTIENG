@@ -1,0 +1,114 @@
+Bạn là chuyên gia phân tích kịch bản phim Trung Quốc. Phim này đã có hồ sơ nhân vật, giờ cần phân tích BỐI CẢNH và CỐT TRUYỆN.
+
+━━━ NHIỆM VỤ ━━━
+
+1. Xác định thể loại chính + phụ
+2. Xác định bối cảnh thời đại + không gian
+3. Tóm tắt cốt truyện tổng thể (3-5 câu)
+4. Xác định xung đột chính + tone tổng thể
+5. CHIA PHIM THÀNH 3-6 STORY ARC (đoạn cốt truyện lớn)
+
+━━━ THỂ LOẠI CHÍNH (genre_main) ━━━
+
+Chọn 1 trong:
+· "do_thi"      — đô thị hiện đại
+· "co_trang"    — cổ trang (Đường/Tống/Minh/Thanh...)
+· "dan_quoc"    — dân quốc (1912-1949)
+· "tien_hiep"   — tiên hiệp (tu tiên, kim đan, nguyên anh...)
+· "huyen_huyen" — huyền huyễn (thế giới khác, ma pháp)
+· "vo_hiep"     — võ hiệp (giang hồ, kiếm khách)
+· "khoa_huyen"  — khoa huyễn (sci-fi)
+· "khong_xac_dinh"
+
+━━━ THỂ LOẠI PHỤ (genre_sub) — có thể chọn nhiều ━━━
+
+· "ngon_tinh"     — ngôn tình (yêu đương là trục chính)
+· "trong_sinh"    — trọng sinh (sống lại, biết trước tương lai)
+· "bao_thu"       — báo thù
+· "cung_dau"      — cung đấu (hoàng cung, hậu cung)
+· "tong_tai"      — tổng tài (CEO romance)
+· "chien_than"    — chiến thần (ẩn mình, lộ thân phận)
+· "hac_dao"       — hắc đạo / xã hội đen
+· "than_y"        — thần y (lương y giỏi, thường có hệ thống)
+· "gia_dau"       — gia tộc đấu
+· "hoc_duong"     — học đường
+· "trinh_tham"    — trinh thám
+· "kinh_di"       — kinh dị
+· "hai_huoc"      — hài hước
+
+━━━ STORY ARC ━━━
+
+Chia phim thành 3-6 ARC LỚN. Mỗi arc = 1 giai đoạn cốt truyện rõ rệt.
+
+VÍ DỤ với phim "Trọng sinh báo thù":
+  Arc 1: "Bị áp bức" (dòng 1-300)       — nữ chính bị nhà chồng bắt nạt
+  Arc 2: "Trọng sinh" (dòng 301-500)    — chết và sống lại
+  Arc 3: "Phục thù bắt đầu" (dòng 501-1000) — bộc lộ thân phận, ra tay
+  Arc 4: "Đối đầu trực diện" (dòng 1001-1400) — chiến đấu tay đôi với phản diện
+  Arc 5: "Kết thúc" (dòng 1401-1500)    — báo thù hoàn tất, có HE/BE
+
+QUY TẮC CHIA ARC:
+· Mỗi arc thường 200-500 dòng (tùy độ dài phim)
+· Ranh giới arc là 1 sự kiện THAY ĐỔI TÌNH THẾ (turning point):
+  - Nhân vật chết / sống lại
+  - Bộc lộ thân phận thật
+  - Cuộc gặp gỡ định mệnh
+  - Quyết định lớn (đi xa, bỏ về, đối đầu)
+  - Lộ ra bí mật quan trọng
+· Mỗi arc có 1 emotional tone chủ đạo
+
+━━━ INPUT ━━━
+
+Cast đã xác định:
+{CAST_JSON}
+
+SRT toàn phim:
+{SRT_FULL}
+
+━━━ OUTPUT (JSON THUẦN) ━━━
+
+{
+  "genre_main": "do_thi",
+  "genre_sub": ["tong_tai", "ngon_tinh", "bao_thu"],
+  "era": "hiện đại, khoảng 2020s",
+  "setting": "Thành phố lớn TQ, tập đoàn lớn Cố thị, có cảnh ở biệt thự + công ty + bệnh viện",
+  "plot_summary": "Cố Trầm Châu là tổng giám đốc tập đoàn Cố thị, lạnh lùng và quyền lực. Sau cái chết bí ẩn của cha, anh phát hiện em trai Cố Tân âm mưu cướp gia sản. Anh kết hôn với Tô Niệm — cô gái xuất thân nghèo nhưng có quá khứ gắn với gia đình anh. Sự thật về mẹ Tô Niệm dần được hé lộ, đẩy hai người vào vòng xoáy báo thù và yêu đương.",
+  "main_conflict": "Cố Trầm Châu vs Cố Tân — tranh giành quyền lực gia tộc + bí mật về cái chết của cha",
+  "tone_overall": "Lạnh lùng quyền lực + ngôn tình ngọt ngào + báo thù gay gắt, mix 3 tone",
+  "story_arcs": [
+    {
+      "index": 0,
+      "title": "Cha mất - Tranh quyền",
+      "summary": "Cố Trầm Châu nhận tin cha mất bất ngờ, trở về tiếp quản tập đoàn. Cố Tân bộc lộ tham vọng. Tô Niệm xuất hiện với một lá thư bí ẩn.",
+      "start_line": 1,
+      "end_line": 280,
+      "emotional_tone": "u ám + nghi ngờ + căng thẳng",
+      "key_events": [
+        "Tin cha mất ở dòng 15",
+        "Đọc di chúc dòng 90-130",
+        "Tô Niệm xuất hiện dòng 220"
+      ]
+    },
+    {
+      "index": 1,
+      "title": "Hợp đồng hôn nhân",
+      "summary": "Cố Trầm Châu phát hiện Tô Niệm có liên quan đến cha mình. Anh đề nghị kết hôn để giữ cô bên cạnh và tìm sự thật. Hai người sống chung trong căng thẳng.",
+      "start_line": 281,
+      "end_line": 650,
+      "emotional_tone": "lạnh lùng + dò xét + manh nha tình cảm",
+      "key_events": [
+        "Đề nghị kết hôn dòng 310",
+        "Đám cưới dòng 420",
+        "Cãi nhau lớn dòng 580"
+      ]
+    }
+  ]
+}
+
+━━━ LƯU Ý ━━━
+
+· KHÔNG dùng markdown
+· start_line / end_line PHẢI là số nguyên, là INDEX của SRT entries
+· title arc phải NGẮN GỌN (3-6 từ tiếng Việt)
+· summary arc 2-3 câu
+· Output bắt đầu `{` kết thúc `}`

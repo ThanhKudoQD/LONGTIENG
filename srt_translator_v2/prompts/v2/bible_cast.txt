@@ -1,0 +1,226 @@
+Bạn là chuyên gia phân tích kịch bản phim Trung Quốc đang xây hồ sơ nhân vật để dịch sang tiếng Việt.
+
+━━━ NHIỆM VỤ ━━━
+
+Đọc TOÀN BỘ phụ đề SRT tiếng Trung dưới đây. Liệt kê MỌI nhân vật xuất hiện trong phim.
+Với mỗi nhân vật, xác định: tên Trung, tên Hán Việt, vai vế, tính cách, kiểu nói, cách tự xưng.
+
+━━━ QUY TẮC DỊCH TÊN HÁN VIỆT ━━━
+
+1. Dùng phiên âm Hán Việt CHUẨN, KHÔNG dùng pinyin:
+   · 顾沉舟 → "Cố Trầm Châu" (KHÔNG "Gu Chenzhou")
+   · 苏念 → "Tô Niệm" (KHÔNG "Su Nian")
+   · 谢明轩 → "Tạ Minh Hiên" (KHÔNG "Xie Mingxuan")
+
+2. Một số họ dễ sai — phải đúng:
+   · 邱 → "Khâu" (KHÔNG "Cầu")
+   · 谢 → "Tạ" (KHÔNG "Giải")
+   · 叶 → "Diệp" (KHÔNG "Lá")
+   · 任 → "Nhậm" (KHÔNG "Nhiệm")
+   · 沈 → "Thẩm" (KHÔNG "Trầm" — chữ này là 谌)
+   · 单 (họ) → "Thiện" (KHÔNG "Đan")
+   · 解 (họ) → "Giải"
+   · 仇 (họ) → "Cừu"
+
+3. Nhân vật phụ KHÔNG có tên thật:
+   · Có chức năng rõ → đặt tên placeholder kiểu chức năng:
+     - 医生 → "bac_si" (vai_tro: "phu")
+     - 秘书 → "thu_ky"
+     - 司机 → "tai_xe"
+     - 管家 → "quan_gia"
+     - 服务员 → "nhan_vien"
+   · Không có chức năng rõ → "phu_1", "phu_2", "phu_3" theo thứ tự xuất hiện
+   · Hoàn toàn không xác định được → bỏ qua, không liệt kê
+
+━━━ XÁC ĐỊNH VAI TRÒ (role) ━━━
+
+· "nam_chinh"  — nam chính (xuất hiện nhiều nhất + là người dẫn dắt cốt truyện)
+· "nu_chinh"   — nữ chính
+· "nam_phu"    — nam phụ quan trọng (có nhiều cảnh, ảnh hưởng cốt truyện)
+· "nu_phu"     — nữ phụ quan trọng
+· "phan_dien"  — phản diện rõ rệt
+· "phu"        — phụ thường (gia đình, bạn bè nam/nữ chính, đối tác)
+· "khach"      — chỉ thoáng qua
+
+━━━ XÁC ĐỊNH KIỂU NÓI (speaking_style) ━━━
+
+Quan sát thoại của nhân vật, mô tả NGẮN GỌN (1-2 câu) kiểu nói đặc trưng:
+· "Lạnh lùng, ngắn gọn, ít cảm thán"
+· "Ngọt ngào, hay dùng các từ kéo dài như 嘛/啦/呢"
+· "Cộc lốc, hay chửi, dùng 老子/妈的"
+· "Lễ phép, hay xưng chức vụ, dùng 您/请"
+· "Mỉa mai, hay châm chọc, dùng câu hỏi tu từ"
+
+━━━ XÁC ĐỊNH CÁCH TỰ XƯNG (self_address) ━━━
+
+Quan trọng: tiếng Trung 我 = "tôi/anh/em/con/chị/tao/trẫm/bản cung..." TÙY ngữ cảnh.
+Bạn cần CHỈ ĐỊNH cho từng tình huống:
+
+🚨 PHÂN BIỆT TUYỆT ĐỐI:
+  · `self_address` = cách NHÂN VẬT TỰ XƯNG khi nói (= từ thay cho 我).
+    VD: Tổng tài tự xưng "tôi", phi tần tự xưng "bản cung".
+  · `addresses` = cách NHÂN VẬT GỌI NGƯỜI KHÁC.
+    VD: Tổng tài gọi vợ là "em", gọi em trai là "em".
+  · KHÔNG NHẦM LẪN:
+    - Mẹ tự xưng KHÔNG phải "mẹ" — đó là cách CON GỌI mẹ.
+      Mẹ tự xưng = "tôi" (chính thức) hoặc "mẹ" CHỈ KHI nói với con
+      (đây là edge case — vẫn ưu tiên "tôi" cho default).
+    - Bố tự xưng KHÔNG phải "bố" — đó là cách CON GỌI bố.
+    - Con tự xưng KHÔNG bao giờ là "con" làm default — "con" chỉ dùng
+      KHI nói với bố/mẹ/người lớn tuổi. Default phải là "tôi" (người lớn)
+      hoặc "em" (cô gái trẻ trong cảnh yêu) hoặc "tớ" (bạn bè).
+
+· `default`: cách tự xưng MẶC ĐỊNH (khi không có context đặc biệt)
+  Quy tắc CHỌN DEFAULT — chọn từ trung tính nhất:
+  - Tổng tài 30 tuổi → "tôi"
+  - Cô gái trẻ (làm gì cũng được, có context yêu thì shift sang "em") → "tôi"
+  - Phi tần cổ trang → "bản cung"
+  - Hoàng đế → "trẫm"
+  - Thái hậu → "ai gia"
+  - Hắc đạo lão đại → "tôi" (formal) hoặc "tao" (cộc cằn)
+  - NGƯỜI BÌNH THƯỜNG (không có gì đặc biệt) → "tôi"
+
+  ❌ KHÔNG dùng "con", "em", "anh", "chị" làm default trừ khi nhân vật
+     thực sự luôn ở vị trí thấp (vd: 1 đứa trẻ trong phim người lớn).
+
+· `when_angry`: KHI GIẬN
+  - "tôi" → "tôi" (giữ) hoặc "tao" (bùng nổ)
+  - "em" → "tôi" (lạnh xa) hoặc "tao" (mâu thuẫn nặng)
+  - Nhân vật luôn lạnh lùng → giữ nguyên "tôi"
+
+· `when_intimate`: KHI THÂN MẬT, YÊU ĐƯƠNG (chỉ với người yêu)
+  - Nam: "tôi" → "anh"
+  - Nữ: "tôi" → "em"
+  - Nhân vật không có cảnh yêu → để null hoặc giữ "tôi"
+
+· `when_formal`: KHI TRANG TRỌNG, NÓI CHUYỆN NƠI CÔNG CỘNG
+  - "tao" → "tôi"
+  - "anh"/"em" → "tôi"
+
+━━━ XÁC ĐỊNH CÁCH GỌI ĐỐI TƯỢNG (addresses) — RẤT QUAN TRỌNG ━━━
+
+BẮT BUỘC: Với MỖI nhân vật khác xuất hiện CÙNG CẢNH thường xuyên, phải có entry
+trong `addresses`. Đây là cốt lõi để dịch xưng hô đúng.
+
+Cách điền:
+  addresses: {
+    "<zh_name_của_người_kia>": "<từ_cách_gọi>"
+  }
+
+Quy tắc khi điền:
+
+📐 NẾU CÓ QUAN HỆ HUYẾT THỐNG (có ghi trong relationships):
+  · Gọi mẹ → "mẹ" (con xưng "con")
+  · Gọi bố/cha → "bố" / "cha" (con xưng "con")
+  · Gọi anh trai → "anh" (em xưng "em")
+  · Gọi em gái → "em" (anh xưng "anh", chị xưng "chị")
+  · Gọi chị gái → "chị" (em xưng "em")
+
+📐 NẾU LÀ VỢ CHỒNG / NGƯỜI YÊU:
+  · Nam → Nữ: "em" (nam xưng "anh")
+  · Nữ → Nam: "anh" (nữ xưng "em")
+  · Khi giận / lạnh nhạt: "cô" / "anh ấy" (mặc dù vẫn quan hệ)
+
+📐 NẾU LÀ BẠN BÈ THÂN THIẾT:
+  · Nữ ↔ Nữ bạn thân: "cậu" (xưng "tớ")
+  · Nam ↔ Nam bạn thân: "cậu" (xưng "tôi") hoặc "mày" (xưng "tao", thân hơn)
+  · Khác giới bạn bè: "cậu" cả 2 bên (xưng "tôi"/"tớ")
+
+📐 NẾU LÀ ĐỒNG NGHIỆP / SẾP-LÍNH:
+  · Lính → Sếp: "anh"/"chị" + chức vụ ("Cố tổng", "giám đốc")
+  · Sếp → Lính: "cô"/"cậu" hoặc gọi tên
+  · Đồng nghiệp ngang: "cậu" hoặc gọi tên
+
+📐 NẾU LÀ ĐỐI TÁC / NGƯỜI LẠ:
+  · Mặc định: "cô" (với nữ), "anh" (với nam)
+  · Lạnh / không thân: "cô" / "anh"
+
+📐 NẾU LÀ KẺ THÙ / PHẢN DIỆN:
+  · Khinh thường: "mày" (xưng "tao")
+  · Lạnh: "cô" / "anh"
+  · Cảnh chính thức: "cô" / "anh"
+
+⚠️ TUYỆT ĐỐI KHÔNG:
+  · Đặt "con" cho người không phải là con cái thực sự
+  · Đặt "mẹ/bố" cho người không phải là cha mẹ thực sự
+  · Đặt "anh-em" cho NỮ-NỮ không phải chị em ruột (dùng "cậu" hoặc "chị/em")
+
+VÍ DỤ ĐẦY ĐỦ:
+
+addresses: {
+  "顾沉舟": "anh",         // anh trai ruột (đã có trong relationships)
+  "苏念": "em",            // người yêu (đã có trong relationships)
+  "顾母": "mẹ",            // mẹ ruột (đã có trong relationships)
+  "李华": "cậu",           // bạn thân nữ — DÙNG "cậu" KHÔNG "em"
+  "李总": "Lý tổng",       // sếp / đối tác
+  "服务员": "cô"           // người lạ
+}
+
+━━━ XÁC ĐỊNH QUAN HỆ (relationships) — CŨNG QUAN TRỌNG ━━━
+
+`relationships` ghi mô tả NGẮN GỌN quan hệ với từng nhân vật khác:
+
+relationships: {
+  "顾沉舟": "anh trai ruột",
+  "苏念": "vợ chưa cưới — sau là vợ",
+  "顾母": "mẹ ruột",
+  "李华": "bạn thân từ thời đại học",
+  "李总": "đối tác kinh doanh"
+}
+
+Hệ thống dùng `relationships` để suy luận đúng xưng hô. CẦN ghi đầy đủ.
+
+━━━ INPUT ━━━
+
+SRT toàn phim (mỗi dòng: index | start --> end | text):
+
+{SRT_FULL}
+
+━━━ OUTPUT (JSON THUẦN, KHÔNG markdown, KHÔNG giải thích) ━━━
+
+{
+  "characters": [
+    {
+      "zh": "顾沉舟",
+      "vi": "Cố Trầm Châu",
+      "aliases_zh": ["顾总", "沉舟"],
+      "aliases_vi": ["Cố tổng", "Trầm Châu"],
+      "role": "nam_chinh",
+      "gender": "nam",
+      "age_group": "30-35",
+      "social_status": "Tổng giám đốc tập đoàn Cố thị",
+      "personality": "Lạnh lùng, sắc bén, ít biểu lộ cảm xúc, có trách nhiệm gia đình",
+      "speaking_style": "Ngắn gọn, mệnh lệnh, ít cảm thán, hay dùng câu khẳng định mạnh",
+      "self_address": {
+        "default": "tôi",
+        "when_angry": "tôi",
+        "when_intimate": "anh",
+        "when_formal": "tôi"
+      },
+      "addresses": {
+        "顾辰": "em",
+        "苏念": "em (khi yêu) / cô (khi lạnh)",
+        "顾母": "mẹ"
+      },
+      "relationships": {
+        "顾辰": "em trai ruột",
+        "苏念": "vợ chưa cưới — sau là vợ",
+        "顾母": "mẹ ruột"
+      },
+      "notes": "Đỉnh cao quyền lực gia tộc, gánh trách nhiệm cha mất sớm."
+    }
+  ]
+}
+
+━━━ LƯU Ý CUỐI ━━━
+
+🚨 GIÁ TRỊ HỢP LỆ — DÙNG ĐÚNG, KHÔNG TỰ DỊCH:
+   · `gender`: CHỈ một trong "nam" / "nu" / "?" (KHÔNG dùng "nữ" có dấu).
+   · `role`: CHỈ một trong "nam_chinh" / "nu_chinh" / "nam_phu" / "nu_phu" /
+     "phan_dien" / "phu" / "khach".
+
+· LIỆT KÊ ĐẦY ĐỦ tất cả nhân vật xuất hiện ≥ 2 dòng thoại
+· Nhân vật chỉ xuất hiện 1 dòng → chỉ liệt kê nếu có chức năng rõ
+· KHÔNG bỏ sót nhân vật phụ quan trọng (mẹ, em trai, bạn thân...)
+· Tên trong addresses và relationships PHẢI là zh name (để match key)
+· Output bắt đầu bằng `{` và kết thúc bằng `}`, không thêm gì khác

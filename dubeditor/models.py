@@ -15,12 +15,27 @@ class Project(Base):
     created_at         = Column(DateTime(timezone=True), server_default=func.now())
     updated_at         = Column(DateTime(timezone=True), onupdate=func.now())
     current_chapter_id = Column(Integer, nullable=True)
-    # ── Translate fields ──────────────────────────────────────────────────────
-    bible_json         = Column(Text, nullable=True)    # JSON Bible từ Pass 1
-    source_lang        = Column(String, default='vi')   # 'zh' | 'vi'
+    # ── Translate v2 fields ──────────────────────────────────────────────────
+    source_lang        = Column(String, default='vi')          # 'zh' | 'vi'
+    project_type       = Column(String, default='short_drama') # 'short_drama'|'drama_series'|'movie'
+    genre_pack         = Column(String, nullable=True)         # ID của genre pack
+    translate_status   = Column(String, default='idle')        # idle|stage1|stage2|stage3|stage4|stage5|done|error
+    translate_progress = Column(Float, default=0.0)            # 0-100
+    translate_error    = Column(Text, nullable=True)
+    # ── TTS settings (per-project) ───────────────────────────────────────────
+    # Khi True: TTS dùng Role.voice_modes resolve theo Subtitle.emotion
+    # Khi False: TTS dùng Role.audio + Role.reference_audio_text mặc định
+    use_emotion_voice  = Column(Boolean, default=False)
+    # Global override mode khi use_emotion_voice=True. Null = auto theo emotion.
+    # Subtitle.tts_voice_mode (nếu set) sẽ override field này per-line.
+    tts_voice_mode     = Column(String, nullable=True)
+    # ── Relationships ────────────────────────────────────────────────────────
     subtitles  = relationship("Subtitle",  back_populates="project", cascade="all, delete")
     characters = relationship("Character", back_populates="project", cascade="all, delete")
     chapters   = relationship("Chapter",   back_populates="project", cascade="all, delete", order_by="Chapter.sort_order")
+    bibles     = relationship("Bible",     back_populates="project", cascade="all, delete")
+    scenes     = relationship("Scene",     back_populates="project", cascade="all, delete", order_by="Scene.scene_index")
+    story_arcs = relationship("StoryArc",  back_populates="project", cascade="all, delete", order_by="StoryArc.arc_index")
 
 class Character(Base):
     __tablename__ = "characters"
@@ -36,6 +51,21 @@ class Character(Base):
     audio             = Column(String, nullable=True)
     shortcut_key      = Column(String, nullable=True)
     tts_speed         = Column(Float, default=1.0)
+    # ── v2 fields (từ Bible.cast) ────────────────────────────────────────────
+    name_zh           = Column(String, nullable=True)        # Tên Trung gốc
+    aliases_zh        = Column(Text, nullable=True)          # JSON array
+    aliases_vi        = Column(Text, nullable=True)          # JSON array
+    role              = Column(String, default='phu')        # nam_chinh|nu_chinh|...
+    gender            = Column(String, default='?')          # nam|nu|?
+    age_group         = Column(String, nullable=True)
+    social_status     = Column(String, nullable=True)
+    personality       = Column(Text, default="")
+    speaking_style    = Column(Text, default="")
+    self_address      = Column(Text, nullable=True)          # JSON Pronouns
+    addresses         = Column(Text, nullable=True)          # JSON dict
+    relationships_json= Column(Text, nullable=True)          # JSON dict (avoid Python keyword)
+    notes             = Column(Text, default="")
+    # ── Relationships ────────────────────────────────────────────────────────
     project   = relationship("Project",  back_populates="characters")
     subtitles = relationship("Subtitle", back_populates="character")
 
@@ -44,18 +74,37 @@ class Subtitle(Base):
     id            = Column(Integer, primary_key=True, index=True)
     project_id    = Column(Integer, ForeignKey("projects.id"), nullable=False)
     character_id  = Column(Integer, ForeignKey("characters.id"), nullable=True)
+    scene_id      = Column(Integer, ForeignKey("scenes.id"), nullable=True)
     index         = Column(Integer, nullable=False)
     start_time    = Column(Float, nullable=False)
     end_time      = Column(Float, nullable=False)
-    text          = Column(Text, default="")
-    original_text = Column(Text, nullable=True)   # Văn bản gốc tiếng Trung
+    text          = Column(Text, default="")             # Bản dịch tiếng Việt
+    original_text = Column(Text, nullable=True)          # Văn bản gốc tiếng Trung (= text_zh)
     audio_path    = Column(String, nullable=True)
     audio_offset  = Column(Float, default=0.0)
     tts_done      = Column(Boolean, default=False)
     wav_duration  = Column(Float, nullable=True)
     tts_speed     = Column(Float, nullable=True)
+    # ── v2 fields ────────────────────────────────────────────────────────────
+    speaker_zh           = Column(String, nullable=True)      # Tên Trung của speaker (raw)
+    speaker_confidence   = Column(String, default='low')      # high|mid|low
+    speaker_reason       = Column(Text, default="")           # Lý do gán speaker (debug)
+    emotion              = Column(String, nullable=True)      # neutral|angry|sad|...
+    intensity            = Column(Integer, default=5)         # 1-10
+    cps_value            = Column(Float, nullable=True)       # Characters per second
+    needs_review         = Column(Boolean, default=False)
+    review_reason        = Column(Text, default="")
+    text_draft           = Column(Text, nullable=True)        # Bản nháp trước polish
+    is_hook              = Column(Boolean, default=False)
+    translation_version  = Column(Integer, default=1)
+    # ── v3: TTS per-line override ────────────────────────────────────────────
+    # Override voice mode khi TTS dòng này. Null = auto theo emotion.
+    # Values: 'normal' | 'happy' | 'sad' | 'angry' | 'intimate' | null
+    tts_voice_mode       = Column(String, nullable=True)
+    # ── Relationships ────────────────────────────────────────────────────────
     project   = relationship("Project",   back_populates="subtitles")
     character = relationship("Character", back_populates="subtitles")
+    scene     = relationship("Scene",     back_populates="subtitles")
 
 class Chapter(Base):
     __tablename__ = "chapters"
@@ -71,41 +120,113 @@ class Chapter(Base):
     project = relationship("Project", back_populates="chapters")
 
 
-class TranslateChunk(Base):
-    """Lưu prompt/response của từng chunk dịch để debug và xem lại.
+class Bible(Base):
+    """Bible v2 — hồ sơ phim đầy đủ.
 
-    Cập nhật: thêm status để FE biết trạng thái chunk từ DB (không phải đoán
-    qua subtitle.original_text), và snapshot kết quả QC Review (Pass 4) để
-    khi user chuyển chunk khác rồi quay lại, kết quả review vẫn còn.
+    Mỗi project có thể có nhiều version Bible (giữ lịch sử).
+    Active = version có is_active=True. Stage 1 luôn tạo version mới.
     """
-    __tablename__ = "translate_chunks"
-    id          = Column(Integer, primary_key=True, index=True)
-    project_id  = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
-    chunk_index = Column(Integer, nullable=False)   # index trong scene_map
-    start_line  = Column(Integer, nullable=False)
-    end_line    = Column(Integer, nullable=False)
-    # ── Trạng thái ────────────────────────────────────────────────────────────
-    status      = Column(String, default="wait")    # 'wait' | 'run' | 'done' | 'err'
-    error       = Column(Text, nullable=True)       # thông báo lỗi gần nhất
-    # ── Pass 3 (dịch) ─────────────────────────────────────────────────────────
-    prompt      = Column(Text, nullable=True)       # prompt đã gửi
-    response    = Column(Text, nullable=True)       # raw response từ AI
-    tokens_in   = Column(Integer, default=0)
-    tokens_out  = Column(Integer, default=0)
-    timing_ms   = Column(Integer, default=0)
-    model       = Column(String, nullable=True)
-    # ── Pass 4 (QC Review) snapshot ────────────────────────────────────────────
-    qc_response   = Column(Text, nullable=True)     # raw response Pass 4
-    qc_van_de     = Column(Text, nullable=True)     # JSON array các vấn đề
-    qc_tong_ket   = Column(Text, nullable=True)     # JSON object tong_ket
-    qc_tokens_in  = Column(Integer, default=0)
-    qc_tokens_out = Column(Integer, default=0)
-    qc_timing_ms  = Column(Integer, default=0)
-    qc_model      = Column(String, nullable=True)
-    qc_run_at     = Column(DateTime(timezone=True), nullable=True)
-    # ── Timestamps ────────────────────────────────────────────────────────────
-    created_at  = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at  = Column(DateTime(timezone=True), onupdate=func.now())
+    __tablename__ = "bibles"
+    id              = Column(Integer, primary_key=True, index=True)
+    project_id      = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    version         = Column(Integer, default=1)
+    is_active       = Column(Boolean, default=True)
+    # ── Bible content (3 phần) ───────────────────────────────────────────────
+    cast_json       = Column(Text, default="{}")        # Bible.cast (Pydantic)
+    world_json      = Column(Text, default="{}")        # Bible.world (genre + arcs)
+    glossary_json   = Column(Text, default="{}")        # Bible.glossary
+    genre_pack_id   = Column(String, nullable=True)     # ID pack đã match
+    # ── Cost tracking ────────────────────────────────────────────────────────
+    tokens_in       = Column(Integer, default=0)
+    tokens_out      = Column(Integer, default=0)
+    cost_usd        = Column(Float, default=0.0)
+    model_used      = Column(String, nullable=True)
+    # ── Timestamps ───────────────────────────────────────────────────────────
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at      = Column(DateTime(timezone=True), onupdate=func.now())
+    # ── Relationships ────────────────────────────────────────────────────────
+    project = relationship("Project", back_populates="bibles")
+
+
+class StoryArc(Base):
+    """Story arc — 1 đoạn cốt truyện lớn (3-6 arc/phim)."""
+    __tablename__ = "story_arcs"
+    id              = Column(Integer, primary_key=True, index=True)
+    project_id      = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    arc_index       = Column(Integer, nullable=False)
+    title           = Column(String, default="")
+    summary         = Column(Text, default="")
+    start_line      = Column(Integer, default=1)
+    end_line        = Column(Integer, default=1)
+    emotional_tone  = Column(String, default="")
+    key_events      = Column(Text, default="[]")        # JSON array
+    # ── Relationships ────────────────────────────────────────────────────────
+    project = relationship("Project", back_populates="story_arcs")
+    scenes  = relationship("Scene", back_populates="story_arc")
+
+
+class Scene(Base):
+    """Phân cảnh kịch — đơn vị xử lý của pipeline v2.
+
+    1 phim short drama có ~150-250 scenes. Mỗi scene = 1 địa điểm + 1 thời gian
+    + 1 nhóm nhân vật + 1 mục đích kịch.
+    """
+    __tablename__ = "scenes"
+    id                  = Column(Integer, primary_key=True, index=True)
+    project_id          = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    scene_index         = Column(Integer, nullable=False)
+    # ── Ranh giới ────────────────────────────────────────────────────────────
+    start_line          = Column(Integer, nullable=False)
+    end_line            = Column(Integer, nullable=False)
+    start_time_sec      = Column(Float, default=0.0)
+    end_time_sec        = Column(Float, default=0.0)
+    # ── Bối cảnh ─────────────────────────────────────────────────────────────
+    location            = Column(String, default="")
+    time_of_day         = Column(String, nullable=True)
+    characters_present  = Column(Text, default="[]")    # JSON array tên Trung
+    # ── Cảm xúc ──────────────────────────────────────────────────────────────
+    emotion_primary     = Column(String, default="neutral")
+    emotion_arc         = Column(String, default="")
+    # ── Nội dung ─────────────────────────────────────────────────────────────
+    summary             = Column(Text, default="")
+    purpose             = Column(Text, default="")
+    # ── Liên kết ─────────────────────────────────────────────────────────────
+    story_arc_id        = Column(Integer, ForeignKey("story_arcs.id"), nullable=True)
+    # ── Flags ────────────────────────────────────────────────────────────────
+    is_hook             = Column(Boolean, default=False)
+    is_emotion_peak     = Column(Boolean, default=False)
+    # ── Status trong pipeline ────────────────────────────────────────────────
+    status              = Column(String, default="pending")  # pending|speaker|translated|polished|error
+    error_message       = Column(Text, nullable=True)
+    # ── Cost tracking (per scene) ────────────────────────────────────────────
+    tokens_in           = Column(Integer, default=0)
+    tokens_out          = Column(Integer, default=0)
+    cost_usd            = Column(Float, default=0.0)
+    timing_ms           = Column(Integer, default=0)
+    # ── Timestamps ───────────────────────────────────────────────────────────
+    created_at          = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at          = Column(DateTime(timezone=True), onupdate=func.now())
+    # ── Relationships ────────────────────────────────────────────────────────
+    project   = relationship("Project", back_populates="scenes")
+    story_arc = relationship("StoryArc", back_populates="scenes")
+    subtitles = relationship("Subtitle", back_populates="scene")
+
+
+class PolishIssue(Base):
+    """Issue được phát hiện ở Stage 5 polish — để FE hiển thị review queue."""
+    __tablename__ = "polish_issues"
+    id              = Column(Integer, primary_key=True, index=True)
+    project_id      = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    subtitle_id     = Column(Integer, ForeignKey("subtitles.id"), nullable=True, index=True)
+    line_index      = Column(Integer, nullable=False)
+    issue_type      = Column(String, default="other")   # speaker|pronoun|consistency|glossary|cps|...
+    description     = Column(Text, default="")
+    current_text    = Column(Text, default="")
+    suggested_text  = Column(Text, nullable=True)
+    confidence      = Column(String, default="mid")     # high|mid|low
+    evidence        = Column(Text, default="")
+    resolved        = Column(Boolean, default=False)    # User đã xử lý chưa
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
 
 # ─── VoiceCast Models ─────────────────────────────────────────────────────────
 
@@ -142,6 +263,18 @@ class Role(Base):
     lora_path            = Column(String, default="")
     sort_order           = Column(Integer, default=0)
     created_at           = Column(DateTime, server_default=func.now())
+    # ── Multi-mode voice refs (v3) ───────────────────────────────────────────
+    # Schema:
+    # {
+    #   "normal":   {"audio": "/uploads/...", "text": "...", "duration": 3.5},
+    #   "happy":    {"audio": "/uploads/...", "text": "...", "duration": 4.2},
+    #   "sad":      {"audio": "/uploads/...", "text": "...", "duration": 3.8},
+    #   "angry":    {"audio": "/uploads/...", "text": "...", "duration": 2.1},
+    #   "intimate": {"audio": "/uploads/...", "text": "...", "duration": 4.5},
+    # }
+    # "normal" bắt buộc (default fallback). 4 mode khác optional.
+    # Toggle bật/tắt nằm ở Project.use_emotion_voice (global per-project).
+    voice_modes          = Column(Text, nullable=True)         # JSON
     actor  = relationship("Actor", back_populates="roles")
     images = relationship("RoleImage", back_populates="role", cascade="all, delete", order_by="RoleImage.sort_order")
 

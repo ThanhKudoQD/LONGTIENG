@@ -1,0 +1,143 @@
+{
+  "id": "mafia_lord",
+  "name_vi": "Hắc đạo bá đạo",
+  "name_zh": "黑道霸总",
+  "description": "Hắc đạo / xã hội đen — lão đại / bang chủ tổ chức ngầm, vợ là phụ nữ ngây thơ hoặc cảnh sát ngầm. Đặc trưng: bạo lực ngôn ngữ, dùng tiếng lóng, có chửi, tone đe dọa.",
+
+  "tone_signature": "Cộc + tục + uy nghiêm + có chửi. Đại từ 'tao-mày' phổ biến. Phụ nữ trong giới có thể nói tục. Đe dọa thường xuyên. Ngôn ngữ trên đường phố, không trau chuốt.",
+
+  "typical_pronouns": {
+    "boss_to_subordinate_default": "tao-mày / tôi-cậu (lúc bình tĩnh)",
+    "boss_to_subordinate_angry": "tao-mày (với chửi)",
+    "boss_to_wife_intimate": "anh-em",
+    "boss_to_wife_protective": "anh-em (kể cả khi giận, vẫn không hạ vợ)",
+    "boss_to_rival_gang": "tao-mày / tôi-cậu (mỉa)",
+    "subordinate_to_boss": "tao + đại ca / em + đại ca",
+    "wife_to_boss_default": "em-anh"
+  },
+
+  "common_terms": [
+    {
+      "zh": "大哥",
+      "vi": "đại ca",
+      "category": "title",
+      "notes": "Cách gọi lão đại"
+    },
+    {
+      "zh": "老大",
+      "vi": "đại ca / boss",
+      "category": "title",
+      "notes": "Tương tự 大哥. 'boss' nếu muốn tone hiện đại hơn."
+    },
+    {
+      "zh": "兄弟",
+      "vi": "anh em",
+      "category": "title",
+      "notes": "Đàn em của lão đại"
+    },
+    {
+      "zh": "小弟",
+      "vi": "đàn em",
+      "category": "title",
+      "notes": ""
+    },
+    {
+      "zh": "帮派",
+      "vi": "bang phái",
+      "category": "concept",
+      "notes": ""
+    },
+    {
+      "zh": "黑道",
+      "vi": "hắc đạo",
+      "category": "concept",
+      "notes": "Thế giới ngầm"
+    },
+    {
+      "zh": "地盘",
+      "vi": "địa bàn",
+      "category": "concept",
+      "notes": ""
+    },
+    {
+      "zh": "废了你",
+      "vi": "xử cậu",
+      "category": "concept",
+      "notes": "Tiêu diệt — KHÔNG 'phế cậu' (Hán nặng)"
+    }
+  ],
+
+  "common_cliches": [
+    {
+      "zh": "敢动我的人",
+      "vi": "Dám động vào người của tao",
+      "category": "cliche",
+      "notes": "Tuyên bố bảo vệ"
+    },
+    {
+      "zh": "你他妈找死",
+      "vi": "Mày tìm chết hả?",
+      "category": "cliche",
+      "notes": "Có 'tha mạ' chửi tục. Có thể nhẹ hơn 'Mày muốn chết à?'"
+    },
+    {
+      "zh": "给我滚",
+      "vi": "Biến đi cho tao!",
+      "category": "cliche",
+      "notes": "Mệnh lệnh đuổi"
+    },
+    {
+      "zh": "我会让你后悔",
+      "vi": "Tao sẽ khiến mày hối hận",
+      "category": "cliche",
+      "notes": ""
+    },
+    {
+      "zh": "动手",
+      "vi": "Ra tay đi",
+      "category": "cliche",
+      "notes": "Ra lệnh hành động"
+    },
+    {
+      "zh": "我老婆轮不到你说",
+      "vi": "Vợ tao không tới lượt mày nói",
+      "category": "cliche",
+      "notes": "Bảo vệ vợ trước người ngoài"
+    }
+  ],
+
+  "translation_examples": [
+    {
+      "zh": "他妈的，谁让你动我女人",
+      "vi": "Mẹ kiếp, đứa nào cho mày động vào vợ tao?",
+      "context": "Lão đại nổi giận khi vợ bị bắt nạt",
+      "note": "'他妈的' = 'Mẹ kiếp' (KHÔNG 'mẹ nó' — yếu hơn). 'tao-mày' đậm tone hắc đạo"
+    },
+    {
+      "zh": "兄弟们，给我上",
+      "vi": "Anh em, xông lên!",
+      "context": "Lão đại ra lệnh đánh nhau",
+      "note": "'兄弟们' = 'anh em' (cách gọi đàn em chung). 'xông lên' nghe ngữ giang hồ"
+    },
+    {
+      "zh": "我说话你听不见吗",
+      "vi": "Tao nói mày không nghe thấy hả?",
+      "context": "Đe dọa cấp dưới",
+      "note": "Tone khinh + đe dọa"
+    },
+    {
+      "zh": "宝贝，别怕，有我在",
+      "vi": "Bảo bối, đừng sợ, có anh đây",
+      "context": "Lão đại an ủi vợ — chuyển tone cực mạnh",
+      "note": "Đại từ ĐỘT NGỘT chuyển 'tao-mày' → 'anh-em' khi nói với vợ. 'Bảo bối' giữ nguyên — cliché"
+    },
+    {
+      "zh": "今天这事必须给我个说法",
+      "vi": "Chuyện hôm nay phải có lời giải thích cho tao",
+      "context": "Yêu sách",
+      "note": "'说法' = 'lời giải thích' (KHÔNG 'cách nói')"
+    }
+  ],
+
+  "style_notes": "TONE TỔNG: Cộc cằn + tục + đe dọa. Đại từ 'tao-mày' suốt khi nói với đàn em / kẻ thù / người lạ. NGOẠI LỆ DUY NHẤT: với vợ → 'anh-em' tone bảo vệ ngọt ngào. Có chửi tục: 'mẹ kiếp', 'đệt'. KHÔNG dùng 'thằng/đứa/con' để gọi người trong bang (đó là cách ngoại nhân gọi). Người trong bang gọi nhau 'anh em', 'đại ca', 'đàn em'."
+}

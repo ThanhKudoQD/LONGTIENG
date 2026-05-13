@@ -1,1470 +1,754 @@
 """
 dubeditor/routers/translate.py
-Pipeline dịch thuật tích hợp vào DubEditor.
+Translate API v2 — refactored hoàn toàn.
 
 Endpoints:
-  GET  /dub/api/projects/{pid}/bible
-  POST /dub/api/projects/{pid}/translate/analyze   → Pass 1
-  POST /dub/api/projects/{pid}/translate/run       → Pass 3 (background + SSE)
-  GET  /dub/api/projects/{pid}/translate/progress  → SSE stream
-  POST /dub/api/projects/{pid}/translate/retranslate
-  POST /dub/api/projects/{pid}/translate/cancel
-  POST /dub/api/projects/{pid}/translate/reset
+  GET  /dub/api/projects/{pid}/translate/status      → trạng thái + stats
+  POST /dub/api/projects/{pid}/translate/start       → chạy full pipeline (background + SSE)
+  POST /dub/api/projects/{pid}/translate/run-stage   → chạy 1 stage cụ thể
+  POST /dub/api/projects/{pid}/translate/cancel      → hủy
+  POST /dub/api/projects/{pid}/translate/reset       → xóa Bible + Scenes
+  GET  /dub/api/projects/{pid}/translate/progress    → SSE stream
+
+  GET  /dub/api/projects/{pid}/bible                 → Bible active
+  PUT  /dub/api/projects/{pid}/bible                 → edit Bible thủ công
+  GET  /dub/api/projects/{pid}/bibles                → list versions
+
+  GET  /dub/api/projects/{pid}/scenes                → list scenes
+  GET  /dub/api/projects/{pid}/scenes/{scene_id}     → 1 scene + subtitles
+  GET  /dub/api/projects/{pid}/story-arcs            → list arcs
+
+  GET  /dub/api/projects/{pid}/polish-issues         → list issues
+  POST /dub/api/projects/{pid}/polish-issues/{id}/apply  → apply suggested
+  POST /dub/api/projects/{pid}/polish-issues/{id}/dismiss
+
+  POST /dub/api/projects/{pid}/translate/retranslate → dịch lại 1 dòng
+
+  GET  /dub/api/translate/genre-packs                → list packs available
 """
-import asyncio, json, logging, sys, time
-from pathlib import Path
-from pydantic import BaseModel
+import asyncio
+import json
+import logging
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from dubeditor.database import get_db, SessionLocal
-from dubeditor.models import Project, Subtitle, Character, TranslateChunk
+from dubeditor.models import (
+    Project, Subtitle, Character,
+    Bible as DBBible, Scene as DBScene, StoryArc as DBStoryArc,
+    PolishIssue as DBPolishIssue,
+)
 from dubeditor.schemas import (
-    TranslateAnalyzeRequest, TranslateRunRequest, RetranslateRequest,
-    TranslateRunChunksRequest,
+    TranslateStartRequest, TranslateStageRequest, RetranslateRequest,
+    BibleOut, SceneOut, StoryArcOut, PolishIssueOut,
+    TranslateStatusOut, GenrePackInfo,
+)
+from dubeditor.translate_service import (
+    TranslateRunner, build_pipeline_config, get_available_genre_packs,
+    load_active_bible_from_db, load_scenes_from_db,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-BASE_DIR = Path(__file__).parent.parent.parent
 
-# SSE subscriber queues — project_id → list[Queue]
-_progress: dict[int, list[asyncio.Queue]] = {}
+# ─── SSE infrastructure ───────────────────────────────────────────────────────
 
-CHAR_COLORS = [
-    '#185FA5','#993C1D','#0F6E56','#854F0B','#534AB7',
-    '#D4537E','#3B6D11','#0C6E7A','#7A2D6E','#5F5E5A',
-]
+_progress_subscribers: dict[int, list[asyncio.Queue]] = {}
+_active_runners: dict[int, TranslateRunner] = {}
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-async def _pub(pid: int, data: dict):
-    msg = f"event: progress\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    for q in list(_progress.get(pid, [])):
+async def _publish_progress(pid: int, stage: str, progress: float,
+                             message: str, detail: Optional[dict] = None):
+    """Broadcast 1 progress event tới tất cả SSE subscribers của project."""
+    payload = {
+        "stage": stage,
+        "progress": progress,
+        "message": message,
+        "detail": detail or {},
+    }
+    msg = f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    for q in list(_progress_subscribers.get(pid, [])):
         try:
             await q.put(msg)
         except Exception:
             pass
 
 
-def _sec_to_srt_time(s: float) -> str:
-    h = int(s // 3600)
-    m = int((s % 3600) // 60)
-    sec = s % 60
-    ms = int(round((sec - int(sec)) * 1000))
-    return f"{h:02d}:{m:02d}:{int(sec):02d},{ms:03d}"
-
-
-def _subs_to_blocks(subs: list[Subtitle], char_map: dict | None = None) -> list[dict]:
-    """Convert subtitles thành blocks cho translator.
-
-    Nếu truyền char_map (id → name), block sẽ có field "speaker" = tên Character
-    (thường là SPEAKER_XX từ Diarization, hoặc tên đã đổi sau Pass 1A).
-    Nếu không có character_id → speaker = None.
-    """
-    result = []
-    for s in sorted(subs, key=lambda x: x.index):
-        speaker = None
-        if char_map and s.character_id:
-            speaker = char_map.get(s.character_id)
-        result.append({
-            "index":   s.index,
-            "start":   _sec_to_srt_time(s.start_time),
-            "end":     _sec_to_srt_time(s.end_time),
-            "text":    s.original_text or s.text or "",
-            "speaker": speaker,  # None nếu chưa gán
-        })
-    return result
-
-
-def _load_translator():
-    """Import translator.py từ dự án dịch đặt tại srt_translator/backend/."""
-    trans_dir = BASE_DIR / "srt_translator" / "backend"
-    if trans_dir.exists() and str(trans_dir) not in sys.path:
-        sys.path.insert(0, str(trans_dir))
-    try:
-        import translator as t
-        return t
-    except ImportError:
-        raise RuntimeError(
-            "Chưa tích hợp module dịch. "
-            "Copy thư mục backend/ của dự án SRT Translator vào srt_translator/backend/"
-        )
-
-
-def _build_retranslate_prompt(original: str, current: str, bible: dict,
-                               ctx_before: list, ctx_after: list, hint: str) -> str:
-    chars_str = "\n".join(
-        f"- {c.get('vi','?')} ({c.get('zh','?')}): tự xưng \"{c.get('tu_xung','?')}\""
-        for c in (bible.get("nhan_vat") or [])[:10]
-    )
-    terms_str = "\n".join(
-        f"- {zh} → {vi}"
-        for zh, vi in list((bible.get("thuat_ngu") or {}).items())[:10]
-    )
-    return f"""Dịch lại 1 dòng phụ đề tiếng Trung sang tiếng Việt.
-
-NGUYÊN BẢN: {original}
-BẢN HIỆN TẠI: {current}
-YÊU CẦU: {hint}
-
-NHÂN VẬT:
-{chars_str or "(chưa có)"}
-
-THUẬT NGỮ:
-{terms_str or "(chưa có)"}
-
-MẠCH TRƯỚC: {" | ".join(ctx_before) if ctx_before else "(đầu cảnh)"}
-MẠCH SAU:   {" | ".join(ctx_after)  if ctx_after  else "(cuối cảnh)"}
-
-Chỉ trả về bản dịch, không giải thích, không dấu ngoặc kép."""
-
-
-# ─── Endpoints ────────────────────────────────────────────────────────────────
-
-@router.get("/projects/{pid}/bible")
-def get_bible(pid: int, db: Session = Depends(get_db)):
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
-    if not p.bible_json:
-        return {"bible": None}
-    try:
-        return {"bible": json.loads(p.bible_json), "source_lang": p.source_lang}
-    except Exception:
-        return {"bible": None}
-
-
-@router.post("/projects/{pid}/translate/analyze")
-async def analyze(pid: int, req: TranslateAnalyzeRequest, db: Session = Depends(get_db)):
-    """Pass 1 — phân tích phim 2 bước (1A nhân vật, 1B scene_map), tự tạo Characters.
-
-    Stream progress qua SSE channel của project để FE hiển thị:
-      - pass1a_start  → "Bước 1/2: Phân tích nhân vật..."
-      - pass1a_done   → "Pass 1A xong, N nhân vật"
-      - pass1b_start  → "Bước 2/2: Phân tích cảnh..."
-      - pass1b_done   → "Pass 1B xong, M đoạn"
-    """
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
-
-    subs = db.query(Subtitle).filter(
-        Subtitle.project_id == pid
-    ).order_by(Subtitle.index).all()
-
-    if not subs:
-        raise HTTPException(400, "Project chưa có subtitle nào.")
-
-    try:
-        t = _load_translator()
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-
-    # Load Characters → map id → name (SPEAKER_XX hoặc tên đã đổi)
-    chars = db.query(Character).filter(Character.project_id == pid).all()
-    char_map = {c.id: c.name for c in chars}
-    srt_blocks = _subs_to_blocks(subs, char_map=char_map)
-
-    # Thông báo: có dùng diarization không
-    speakers_assigned = sum(1 for b in srt_blocks if b.get("speaker"))
-    if speakers_assigned > 0:
-        logger.info(
-            f"[Pass1 pid={pid}] Pass 1A có dữ liệu Diarization: "
-            f"{speakers_assigned}/{len(srt_blocks)} dòng có speaker"
-        )
-
-    # Callback để stream progress qua SSE
-    async def _on_progress(stage: str, message: str):
-        await _pub(pid, {
-            "stage":   stage,
-            "message": message,
-            "percent": 50 if stage == "pass1a_done" else (
-                       25 if stage == "pass1a_start" else
-                       75 if stage == "pass1b_start" else
-                       100 if stage == "pass1b_done" else 0),
-        })
-
-    try:
-        # pass1_analyze giờ là wrapper gọi 1A → 1B → merge
-        bible, api_result = await t.pass1_analyze(
-            srt_blocks=srt_blocks,
-            api_key=req.api_key,
-            model=req.model,
-            on_progress=_on_progress,
-        )
-    except Exception as e:
-        logger.error(f"Pass1 pid={pid}: {e}", exc_info=True)
-        await _pub(pid, {"stage": "error", "message": f"Pass 1 lỗi: {e}", "percent": 0})
-        raise HTTPException(500, f"Pass 1 lỗi: {e}")
-
-    # ── Lưu Bible ────────────────────────────────────────────────────────────
-    p.bible_json  = json.dumps(bible, ensure_ascii=False)
-    p.source_lang = req.source_lang
-    db.commit()
-
-    # ⚠ Bible mới → scene_map mới. Xóa translate_chunks cũ.
-    # KHÔNG reset subtitle.character_id (giữ gán từ Diarization).
-    # Chỉ clear bản dịch tiếng Việt (nếu có) để Pass 3 chạy lại.
-    deleted_chunks = db.query(TranslateChunk).filter(
-        TranslateChunk.project_id == pid
-    ).delete(synchronize_session=False)
-
-    subs_to_reset = db.query(Subtitle).filter(Subtitle.project_id == pid).all()
-    reset_subs_count = 0
-    for s in subs_to_reset:
-        # Reset BẢN DỊCH (text) nhưng GIỮ character_id (từ Diarization).
-        if s.original_text and s.text and s.text != s.original_text:
-            s.text         = ""
-            # KHÔNG reset character_id — giữ từ Diarization
-            s.tts_done     = False
-            s.audio_path   = None
-            s.wav_duration = None
-            reset_subs_count += 1
-    db.commit()
-
-    if deleted_chunks > 0 or reset_subs_count > 0:
-        logger.info(
-            f"[Pass1 reset pid={pid}] Xóa {deleted_chunks} translate_chunks cũ, "
-            f"clear {reset_subs_count} bản dịch cũ"
-        )
-
-    # ── Map SPEAKER_XX → tên Việt (đổi tên Character) ────────────────────────
-    # Pass 1A trả về speaker_ids: list các SPEAKER_XX khớp với nhân vật này.
-    # Backend đổi tên Character "SPEAKER_XX" → "Cố Trầm Châu".
-    # Trường hợp 1 nhân vật khớp với nhiều SPEAKER:
-    #   - SPEAKER đầu tiên (chính) → đổi tên thành tên Việt
-    #   - SPEAKER còn lại → merge: chuyển subtitle.character_id về SPEAKER đầu,
-    #     rồi xóa SPEAKER thừa
-    existing_chars = db.query(Character).filter(Character.project_id == pid).all()
-    char_by_name   = {c.name: c for c in existing_chars}
-    renamed = []
-    merged_count = 0
-
-    for nv in (bible.get("nhan_vat") or []):
-        vi = (nv.get("vi") or "").strip()
-        if not vi:
-            continue
-        spk_ids = nv.get("speaker_ids") or []
-        if not spk_ids:
-            # Nhân vật không match speaker nào → tạo Character mới (như cũ)
-            # nhưng skip tier chuc_nang
-            tier = (nv.get("tier") or "").strip().lower()
-            if tier == "chuc_nang":
-                continue
-            if vi in char_by_name:
-                continue  # đã tồn tại, không tạo trùng
-            new_char = Character(
-                project_id=pid,
-                name=vi,
-                description=nv.get("than_phan", ""),
-                color=CHAR_COLORS[len(char_by_name) % len(CHAR_COLORS)],
-            )
-            db.add(new_char)
-            db.flush()
-            char_by_name[vi] = new_char
-            renamed.append({"action": "create_new", "vi": vi})
-            continue
-
-        # Có speaker_ids → đổi tên Character đầu, merge các Character sau
-        primary_spk = spk_ids[0]
-        primary_char = char_by_name.get(primary_spk)
-        if not primary_char:
-            logger.warning(
-                f"[Pass1 pid={pid}] {vi} mapping với {primary_spk} nhưng "
-                f"không tìm thấy Character đó. Bỏ qua."
-            )
-            continue
-
-        # Đổi tên Character primary
-        old_name = primary_char.name
-        primary_char.name = vi
-        if nv.get("than_phan"):
-            primary_char.description = nv["than_phan"]
-        renamed.append({"action": "rename", "from": old_name, "to": vi})
-
-        # Merge các SPEAKER thứ 2+ vào primary
-        for extra_spk in spk_ids[1:]:
-            extra_char = char_by_name.get(extra_spk)
-            if not extra_char:
-                continue
-            # Chuyển subtitle.character_id từ extra → primary
-            updated = db.query(Subtitle).filter(
-                Subtitle.project_id == pid,
-                Subtitle.character_id == extra_char.id
-            ).update({"character_id": primary_char.id}, synchronize_session=False)
-            merged_count += updated
-            # Xóa Character thừa
-            db.delete(extra_char)
-            renamed.append({"action": "merge_into", "from": extra_spk, "into": vi, "lines": updated})
-
-    db.commit()
-
-    if renamed:
-        logger.info(
-            f"[Pass1 pid={pid}] Speaker mapping: "
-            f"đổi tên/tạo {len(renamed)} Characters, merge {merged_count} dòng"
-        )
-
-    return {
-        "bible":            bible,
-        "speaker_mapping":  renamed,
-        "merged_count":     merged_count,
-        "tokens_in":        api_result.get("tokens_in", 0),
-        "tokens_out":       api_result.get("tokens_out", 0),
-        "timing_ms":        api_result.get("timing_ms", 0),
-        # Chi tiết 2 sub-pass — FE có thể hiển thị nếu muốn
-        "pass1a":           api_result.get("pass1a", {}),
-        "pass1b":           api_result.get("pass1b", {}),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PASS 0 — LÀM SẠCH SRT (loại bỏ logo kênh, watermark, text OCR thừa)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Pass0CleanRequest(BaseModel):
-    api_key: str
-    model:   str
-
-
-@router.post("/projects/{pid}/translate/pass0-clean")
-async def pass0_clean(pid: int, req: Pass0CleanRequest, db: Session = Depends(get_db)):
-    """Pass 0 — quét subtitles, gửi AI xác định text thừa, áp dụng fix vào DB.
-
-    Quy trình:
-      1. Detect các dòng bất thường (text quá dài, latin noise, multi-region OCR)
-      2. Build windows context (mỗi dòng ⚠ + 10 dòng kề)
-      3. Gửi từng window lên AI song song
-      4. AI quyết định: clean (giữ thoại, bỏ thừa) hoặc delete (cả dòng là thừa)
-      5. Áp dụng fixes vào DB:
-         - clean → update Subtitle.text
-         - delete → xóa Subtitle khỏi DB, reindex các dòng sau
-      6. Trả về report cho FE hiển thị
-    """
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
-
-    subs = db.query(Subtitle).filter(
-        Subtitle.project_id == pid
-    ).order_by(Subtitle.index).all()
-
-    if not subs:
-        raise HTTPException(400, "Project chưa có subtitle nào.")
-
-    try:
-        t = _load_translator()
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-
-    # Chuyển subtitles DB sang format mà pass0 hiểu:
-    # entries = [{"index", "start", "end", "text"}]
-    entries = []
-    for s in subs:
-        entries.append({
-            "index": s.index,
-            "start": s.start_time,
-            "end":   s.end_time,
-            # Pass 0 nhìn vào text gốc (TQ). Nếu đã có original_text → đây là
-            # bản gốc, ưu tiên dùng. Nếu chưa → s.text chính là tiếng Trung.
-            "text":  (s.original_text or s.text or "").strip(),
-        })
-
-    # Detect dòng bất thường
-    try:
-        abnormal = t.detect_abnormal_entries(entries)
-    except Exception as e:
-        logger.error(f"[Pass0 pid={pid}] detect_abnormal_entries lỗi: {e}", exc_info=True)
-        raise HTTPException(500, f"Detect bất thường lỗi: {e}")
-
-    if not abnormal:
-        return {
-            "ok":       True,
-            "report":   [],
-            "message":  "Không phát hiện dòng bất thường nào.",
-            "scanned":  len(entries),
-            "abnormal": 0,
-            "fixed":    0,
-        }
-
-    logger.info(f"[Pass0 pid={pid}] Phát hiện {len(abnormal)} dòng nghi ngờ trong {len(entries)} subs")
-
-    # Build windows context
-    windows = t.build_pass0_windows(entries, abnormal, window=10, merge_gap=5)
-
-    # Gửi song song lên AI
-    try:
-        tasks = [
-            t.pass0_clean_window(w, abnormal, req.api_key, req.model)
-            for w in windows
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as e:
-        logger.error(f"[Pass0 pid={pid}] Gọi AI lỗi: {e}", exc_info=True)
-        raise HTTPException(500, f"Gọi AI lỗi: {e}")
-
-    # Gom tất cả fixes (bỏ qua window lỗi)
-    all_fixes = []
-    for r in results:
-        if isinstance(r, dict):
-            all_fixes.extend(r.get("fixes", []))
-        elif isinstance(r, Exception):
-            logger.warning(f"[Pass0 pid={pid}] 1 window lỗi: {r}")
-
-    if not all_fixes:
-        return {
-            "ok":       True,
-            "report":   [],
-            "message":  f"Đã quét {len(abnormal)} dòng nghi ngờ nhưng AI không tìm thấy text thừa.",
-            "scanned":  len(entries),
-            "abnormal": len(abnormal),
-            "fixed":    0,
-        }
-
-    logger.info(f"[Pass0 pid={pid}] AI đề xuất {len(all_fixes)} fixes")
-
-    # Áp dụng fixes vào DB
-    fix_map = {f["index"]: f for f in all_fixes if "index" in f}
-    indices_to_delete = []
-    report = []
-    fixed_count = 0
-
-    for s in subs:
-        fix = fix_map.get(s.index)
-        if not fix:
-            continue
-
-        action = fix.get("action", "")
-        original_text = s.original_text or s.text or ""
-
-        if action == "delete":
-            indices_to_delete.append(s.index)
-            report.append({
-                "index":    s.index,
-                "action":   "delete",
-                "original": original_text,
-                "cleaned":  "",
-                "reason":   fix.get("reason", ""),
-            })
-            fixed_count += 1
-
-        elif action == "clean":
-            cleaned = (fix.get("cleaned") or "").strip()
-            if not cleaned:
-                # cleaned rỗng → coi như delete
-                indices_to_delete.append(s.index)
-                report.append({
-                    "index":    s.index,
-                    "action":   "delete",
-                    "original": original_text,
-                    "cleaned":  "",
-                    "reason":   fix.get("reason", "") + " (cleaned rỗng)",
-                })
-            else:
-                # Update text. Quan trọng: cập nhật cả s.text VÀ s.original_text
-                # (nếu original_text đã tồn tại, đây là gốc TQ — phải sửa luôn để
-                # Pass 3 sau này không thấy text thừa).
-                s.text = cleaned
-                if s.original_text:
-                    s.original_text = cleaned
-                report.append({
-                    "index":    s.index,
-                    "action":   "clean",
-                    "original": original_text,
-                    "cleaned":  cleaned,
-                    "reason":   fix.get("reason", ""),
-                })
-            fixed_count += 1
-
-    # Xóa các subtitle bị delete, reindex các dòng còn lại
-    if indices_to_delete:
-        # Xóa
-        db.query(Subtitle).filter(
-            Subtitle.project_id == pid,
-            Subtitle.index.in_(indices_to_delete),
-        ).delete(synchronize_session=False)
-        db.commit()
-
-        # Reindex: lấy lại danh sách subtitles còn lại theo thứ tự index cũ,
-        # gán index mới liên tục 1..N
-        remaining = db.query(Subtitle).filter(
-            Subtitle.project_id == pid
-        ).order_by(Subtitle.index).all()
-        for new_idx, s in enumerate(remaining, start=1):
-            if s.index != new_idx:
-                s.index = new_idx
-        db.commit()
-
-        logger.info(
-            f"[Pass0 pid={pid}] Đã xóa {len(indices_to_delete)} dòng, "
-            f"reindex còn {len(remaining)} dòng"
-        )
-
-    # Bible cũ không còn hợp lệ vì số dòng đã đổi → xóa Bible + chunks
-    # để buộc user chạy lại Pass 1.
-    if indices_to_delete:
-        p.bible_json = None
-        db.query(TranslateChunk).filter(
-            TranslateChunk.project_id == pid
-        ).delete(synchronize_session=False)
-        db.commit()
-
-    # Commit cuối cho các fix kiểu clean (chưa commit ở trên)
-    db.commit()
-
-    return {
-        "ok":       True,
-        "report":   report,
-        "message":  f"Đã làm sạch {fixed_count} dòng (xóa {len(indices_to_delete)}, sửa {fixed_count - len(indices_to_delete)}).",
-        "scanned":  len(entries),
-        "abnormal": len(abnormal),
-        "fixed":    fixed_count,
-        "deleted":  len(indices_to_delete),
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PASS 2 SPEAKER — AI QUYẾT ĐỊNH CUỐI AI NÓI DÒNG NÀO
-# ─────────────────────────────────────────────────────────────────────────────
-
-class Pass2SpeakerRequest(BaseModel):
-    api_key:    str
-    model:      str
-    concurrency: int = 3
-
-
-@router.post("/projects/{pid}/translate/pass2-speaker")
-async def pass2_speaker(pid: int, req: Pass2SpeakerRequest, db: Session = Depends(get_db)):
-    """Pass 2 Speaker — AI gán speaker chính thức cho mọi dòng phụ đề.
-
-    Chạy song song theo scene_map. AI dùng SPEAKER_XX (Diarization) làm gợi ý,
-    nhưng QUYẾT ĐỊNH CUỐI dựa vào nội dung thoại.
-
-    Sau Pass 2:
-      - subtitle.character_id được cập nhật trỏ về Character đúng (theo speaker_zh)
-      - Pass 3 chỉ cần dịch, không phải đoán speaker
-    """
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
-    if not p.bible_json:
-        raise HTTPException(400, "Chưa có Bible. Hãy chạy Pass 1 trước.")
-
-    bible = json.loads(p.bible_json)
-
-    subs = db.query(Subtitle).filter(
-        Subtitle.project_id == pid
-    ).order_by(Subtitle.index).all()
-    if not subs:
-        raise HTTPException(400, "Project chưa có subtitle nào.")
-
-    try:
-        t = _load_translator()
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-
-    # Build srt_blocks có sẵn speaker (SPEAKER_XX hoặc tên đã đổi sau Pass 1)
-    chars = db.query(Character).filter(Character.project_id == pid).all()
-    char_map = {c.id: c.name for c in chars}
-    srt_blocks = _subs_to_blocks(subs, char_map=char_map)
-
-    # Lookup zh → Character id (để gán sau)
-    # Từ bible.nhan_vat: zh → vi → Character với name=vi
-    char_by_name = {c.name: c for c in chars}
-    zh_to_char_id: dict[str, int] = {}
-    for nv in (bible.get("nhan_vat") or []):
-        zh = nv.get("zh")
-        vi = nv.get("vi")
-        if not zh or not vi:
-            continue
-        char = char_by_name.get(vi)
-        if char:
-            zh_to_char_id[zh] = char.id
-
-    logger.info(f"[Pass2 pid={pid}] zh→char_id map: {len(zh_to_char_id)} entries")
-
-    # Progress callback qua SSE
-    async def _on_progress(stage: str, message: str):
-        await _pub(pid, {"stage": stage, "message": message})
-
-    # Chạy Pass 2 Speaker
-    try:
-        speakers, api_result = await t.pass2_speaker_analyze(
-            bible       = bible,
-            srt_blocks  = srt_blocks,
-            api_key     = req.api_key,
-            model       = req.model,
-            on_progress = _on_progress,
-            concurrency = req.concurrency,
-        )
-    except Exception as e:
-        logger.error(f"[Pass2 pid={pid}] Lỗi: {e}", exc_info=True)
-        await _pub(pid, {"stage": "error", "message": f"Pass 2 lỗi: {e}"})
-        raise HTTPException(500, f"Pass 2 lỗi: {e}")
-
-    # Áp dụng kết quả: cập nhật subtitle.character_id
-    updated_count = 0
-    unknown_count = 0
-    by_index = {s.index: s for s in subs}
-
-    for entry in speakers:
-        idx = entry.get("index")
-        speaker_zh = entry.get("speaker_zh", "?")
-        if not idx or idx not in by_index:
-            continue
-
-        sub = by_index[idx]
-        if speaker_zh == "?" or not speaker_zh:
-            # Không xác định → để character_id null (hoặc giữ Diarization?)
-            # Chính sách: clear character_id để biết AI không xác định được
-            if sub.character_id is not None:
-                sub.character_id = None
-            unknown_count += 1
-            continue
-
-        char_id = zh_to_char_id.get(speaker_zh)
-        if char_id and sub.character_id != char_id:
-            sub.character_id = char_id
-            updated_count += 1
-        elif not char_id:
-            # speaker_zh AI trả về không match Character nào — lỗi prompt
-            logger.warning(
-                f"[Pass2 pid={pid}] line {idx}: speaker_zh='{speaker_zh}' "
-                f"không match Character nào"
-            )
-
-    db.commit()
-
-    logger.info(
-        f"[Pass2 pid={pid}] Cập nhật {updated_count} dòng, "
-        f"unknown {unknown_count}, total {len(speakers)} entries"
-    )
-
-    return {
-        "ok":              True,
-        "total":           len(speakers),
-        "updated":         updated_count,
-        "unknown":         unknown_count,
-        "tokens_in":       api_result.get("tokens_in", 0),
-        "tokens_out":      api_result.get("tokens_out", 0),
-        "timing_ms":       api_result.get("timing_ms", 0),
-        "scene_count":     api_result.get("scene_count", 0),
-    }
-
-
-@router.post("/projects/{pid}/translate/run")
-async def run_translation(pid: int, req: TranslateRunRequest,
-                           bg: BackgroundTasks, db: Session = Depends(get_db)):
-    """Pass 3 — dịch song song theo chunks, stream progress qua SSE."""
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
-    if not p.bible_json:
-        raise HTTPException(400, "Chưa có Bible. Hãy chạy Pass 1 trước.")
-
-    bg.add_task(_run_pass3_bg, pid, req.api_key, req.model,
-                req.concurrency, req.enable_qc, None)
-    return {"ok": True}
-
-
-@router.post("/projects/{pid}/translate/run-chunks")
-async def run_translation_chunks(pid: int, req: TranslateRunChunksRequest,
-                                  bg: BackgroundTasks, db: Session = Depends(get_db)):
-    """Dịch lại một số chunk cụ thể (theo index trong scene_map).
-
-    Dùng để cho phép FE bấm nút "Dịch lại chunk này" mà không phải
-    chạy lại toàn bộ Pass 3.
-    """
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
-    if not p.bible_json:
-        raise HTTPException(400, "Chưa có Bible. Hãy chạy Pass 1 trước.")
-    if not req.chunk_indices:
-        raise HTTPException(400, "chunk_indices rỗng — không có chunk nào để dịch.")
-
-    only_set = set(int(i) for i in req.chunk_indices)
-    bg.add_task(_run_pass3_bg, pid, req.api_key, req.model,
-                req.concurrency, False, only_set)
-    return {"ok": True, "chunk_indices": sorted(only_set)}
-
-
-async def _run_pass3_bg(pid: int, api_key: str, model: str,
-                         concurrency: int, enable_qc: bool,
-                         only_indices: set | None = None):
-    db = SessionLocal()
-    try:
-        t     = _load_translator()
-        p     = db.query(Project).filter(Project.id == pid).first()
-        bible = json.loads(p.bible_json)
-
-        subs      = db.query(Subtitle).filter(
-            Subtitle.project_id == pid
-        ).order_by(Subtitle.index).all()
-
-        # Build srt_blocks với speaker_zh
-        # Pipeline mới: subtitle.character_id → Character.name (tiếng Việt)
-        # Bible: nhân vật có cả zh và vi. Lookup vi → zh
-        chars = db.query(Character).filter(Character.project_id == pid).all()
-        char_id_to_vi = {c.id: c.name for c in chars}
-        vi_to_zh: dict[str, str] = {}
-        for nv in (bible.get("nhan_vat") or []):
-            vi = nv.get("vi")
-            zh = nv.get("zh")
-            if vi and zh:
-                vi_to_zh[vi] = zh
-
-        srt_blocks = _subs_to_blocks(subs, char_map=char_id_to_vi)
-        # Thêm speaker_zh cho mỗi block (Pass 3 build_pass3_prompt sẽ dùng)
-        for b in srt_blocks:
-            vi_name = b.get("speaker")
-            if vi_name and vi_name in vi_to_zh:
-                b["speaker_zh"] = vi_to_zh[vi_name]
-            elif vi_name:
-                # Có speaker nhưng không match Bible (Character chưa đổi tên?) → fallback dùng nguyên
-                b["speaker_zh"] = vi_name
-
-        all_chunks = t.build_chunks_from_bible(srt_blocks, bible)
-
-        # Nếu chỉ định only_indices → giữ index gốc nhưng chỉ chạy các chunk được chọn.
-        # Quan trọng: chunk_idx truyền vào do_chunk phải khớp với index trong scene_map
-        # để FE update đúng chunk.
-        if only_indices is not None:
-            chunks_to_run = [(i, c) for i, c in enumerate(all_chunks) if i in only_indices]
-        else:
-            chunks_to_run = list(enumerate(all_chunks))
-
-        total  = len(chunks_to_run)
-        done   = 0
-
-        if total == 0:
-            await _pub(pid, {
-                "stage": "done", "message": "Không có chunk nào để dịch.",
-                "percent": 100, "chunks_total": 0, "chunks_done": 0,
-            })
-            return
-
-        await _pub(pid, {
-            "stage": "pass3", "message": f"Bắt đầu dịch {total} chunks...",
-            "percent": 0, "chunks_total": total, "chunks_done": 0,
-        })
-
-        # Map tên → character_id
-        chars        = db.query(Character).filter(Character.project_id == pid).all()
-        name_to_char = {c.name: c.id for c in chars}
-
-        sem = asyncio.Semaphore(concurrency)
-
-        async def do_chunk(chunk: dict, chunk_idx: int):
-            nonlocal done
-            async with sem:
-                # Notify FE: chunk bắt đầu
-                await _pub(pid, {
-                    "stage": "chunk_start",
-                    "chunk_index": chunk_idx,
-                    "message": f"Đang dịch chunk {chunk_idx + 1}...",
-                })
-                # Pre-mark status='run' trong DB để khi user F5 thấy chunk đang chạy
-                try:
-                    tc_run = db.query(TranslateChunk).filter(
-                        TranslateChunk.project_id  == pid,
-                        TranslateChunk.chunk_index == chunk_idx,
-                    ).first()
-                    if tc_run:
-                        tc_run.status = "run"
-                        tc_run.error  = None
-                    db.commit()
-                except Exception:
-                    db.rollback()
-                try:
-                    # pass3_translate_chunk trả tuple (entries, call_info)
-                    entries, call_info = await t.pass3_translate_chunk(
-                        chunk=chunk, bible=bible,
-                        api_key=api_key, model=model,
-                    )
-                    # entries: [{index, original_text, translated_text, ...}]
-                    fe_entries = []
-                    # Build name→char_id map từ Bible nhan_vat
-                    bible_chars = bible.get("nhan_vat") or []
-                    vi_to_char = {}
-                    for nv in bible_chars:
-                        vi_name = (nv.get("vi") or "").strip()
-                        if vi_name and vi_name in name_to_char:
-                            vi_to_char[vi_name] = name_to_char[vi_name]
-
-                    fe_entries = []
-                    for entry in (entries or []):
-                        idx      = entry.get("index")
-                        raw_text = (entry.get("translated_text") or "").strip()
-                        original = (entry.get("original_text") or "").strip()
-                        # speaker từ entry (nếu translator đã parse) hoặc tự split từ raw_text
-                        speaker  = (entry.get("speaker") or "").strip()
-                        new_text = raw_text
-
-                        # Nếu chưa có speaker, thử split "SpeakerName|actual text"
-                        if not speaker and "|" in raw_text:
-                            parts = raw_text.split("|", 1)
-                            candidate = parts[0].strip()
-                            # Luôn split nếu phần trước | trông như tên (ngắn, không có dấu câu lạ)
-                            if candidate and len(candidate) <= 30 and not any(x in candidate for x in ['.', '!', '?', '…', '\n']):
-                                speaker  = candidate
-                                new_text = parts[1].strip() if parts[1].strip() else raw_text
-
-                        char_id = vi_to_char.get(speaker) if speaker else None
-
-                        sub = next((s for s in subs if s.index == idx), None)
-                        if sub and new_text:
-                            sub.text = new_text
-                            sub.original_text = original or sub.original_text
-                            if char_id and not sub.character_id:
-                                sub.character_id = char_id
-
-                        fe_entries.append({
-                            "index":      idx,
-                            "original":   original,
-                            "translated": new_text,
-                            "speaker":    speaker,
-                        })
-
-                    # Fallback: scene chỉ có 1 nhân vật → gán dòng chưa có
-                    scene_info = chunk.get("scene_info") or {}
-                    scene_nv_list = scene_info.get("nhan_vat") or []
-                    if len(scene_nv_list) == 1:
-                        single_char_id = vi_to_char.get(scene_nv_list[0])
-                        if single_char_id:
-                            for entry in fe_entries:
-                                sub = next((s for s in subs if s.index == entry["index"]), None)
-                                if sub and not sub.character_id:
-                                    sub.character_id = single_char_id
-                                    entry["speaker"] = scene_nv_list[0]
-                    # Lưu prompt/response vào translate_chunks + đánh dấu status='done'
-                    try:
-                        tc = db.query(TranslateChunk).filter(
-                            TranslateChunk.project_id  == pid,
-                            TranslateChunk.chunk_index == chunk_idx,
-                        ).first()
-                        if tc:
-                            tc.status     = "done"
-                            tc.error      = None
-                            tc.prompt     = call_info.get("prompt", "")
-                            tc.response   = call_info.get("response", "")
-                            tc.tokens_in  = call_info.get("tokens_in", 0)
-                            tc.tokens_out = call_info.get("tokens_out", 0)
-                            tc.timing_ms  = call_info.get("timing_ms", 0)
-                            tc.model      = model
-                            # Bản dịch đã thay đổi → invalidate QC cũ (kết quả review
-                            # dựa trên bản dịch trước đó không còn đúng nữa).
-                            tc.qc_response   = None
-                            tc.qc_van_de     = None
-                            tc.qc_tong_ket   = None
-                            tc.qc_tokens_in  = 0
-                            tc.qc_tokens_out = 0
-                            tc.qc_timing_ms  = 0
-                            tc.qc_run_at     = None
-                        else:
-                            blocks = chunk.get("blocks") or []
-                            s_line = blocks[0]["index"]  if blocks else 0
-                            e_line = blocks[-1]["index"] if blocks else 0
-                            db.add(TranslateChunk(
-                                project_id  = pid,
-                                chunk_index = chunk_idx,
-                                start_line  = s_line,
-                                end_line    = e_line,
-                                status      = "done",
-                                prompt      = call_info.get("prompt", ""),
-                                response    = call_info.get("response", ""),
-                                tokens_in   = call_info.get("tokens_in", 0),
-                                tokens_out  = call_info.get("tokens_out", 0),
-                                timing_ms   = call_info.get("timing_ms", 0),
-                                model       = model,
-                            ))
-                        db.commit()
-                    except Exception as tc_err:
-                        logger.warning(f"[TranslateChunk save] {tc_err}")
-                        db.rollback()
-
-                    done += 1
-                    await _pub(pid, {
-                        "stage":       "chunk_done",
-                        "chunk_index": chunk_idx,
-                        "message":     f"Chunk {done}/{total} xong",
-                        "percent":     round(done / total * 100, 1),
-                        "chunks_total": total,
-                        "chunks_done":  done,
-                        "tokens_in":   call_info.get("tokens_in", 0),
-                        "tokens_out":  call_info.get("tokens_out", 0),
-                        "timing_ms":   call_info.get("timing_ms", 0),
-                        "response":    call_info.get("response", ""),   # raw AI response
-                        "prompt":      call_info.get("prompt", ""),
-                        "entries":     fe_entries,
-                    })
-                except Exception as e:
-                    logger.error(f"[Pass3 pid={pid} chunk={chunk_idx}] {e}", exc_info=True)
-                    # Lưu status='err' + error message vào DB
-                    try:
-                        tc_err_row = db.query(TranslateChunk).filter(
-                            TranslateChunk.project_id  == pid,
-                            TranslateChunk.chunk_index == chunk_idx,
-                        ).first()
-                        if tc_err_row:
-                            tc_err_row.status = "err"
-                            tc_err_row.error  = str(e)[:500]
-                        else:
-                            blocks = chunk.get("blocks") or []
-                            s_line = blocks[0]["index"]  if blocks else 0
-                            e_line = blocks[-1]["index"] if blocks else 0
-                            db.add(TranslateChunk(
-                                project_id  = pid,
-                                chunk_index = chunk_idx,
-                                start_line  = s_line,
-                                end_line    = e_line,
-                                status      = "err",
-                                error       = str(e)[:500],
-                                model       = model,
-                            ))
-                        db.commit()
-                    except Exception:
-                        db.rollback()
-                    done += 1
-                    await _pub(pid, {
-                        "stage":       "chunk_error",
-                        "chunk_index": chunk_idx,
-                        "message":     f"Chunk {chunk_idx + 1} lỗi",
-                        "percent":     round(done / total * 100, 1),
-                        "chunks_total": total,
-                        "chunks_done":  done,
-                        "error":       str(e)[:200],
-                    })
-
-        await asyncio.gather(*[do_chunk(chunk, idx) for idx, chunk in chunks_to_run])
-
-        await _pub(pid, {
-            "stage": "done",
-            "message": f"Dịch xong {total} chunks!",
-            "percent": 100,
-            "chunks_total": total, "chunks_done": total,
-        })
-
-    except Exception as e:
-        logger.error(f"[Pass3 bg pid={pid}] {e}", exc_info=True)
-        await _pub(pid, {
-            "stage": "error", "message": str(e),
-            "percent": 0, "chunks_total": 0, "chunks_done": 0,
-        })
-    finally:
-        db.close()
-
-
-@router.get("/projects/{pid}/translate/progress")
-async def progress_stream(pid: int):
-    """SSE — stream tiến trình dịch."""
-    q: asyncio.Queue = asyncio.Queue()
-    _progress.setdefault(pid, []).append(q)
-
-    async def gen():
+async def _publish_llm_call(pid: int, payload: dict):
+    """Broadcast 1 LLM call event (prompt + response) tới SSE subscribers."""
+    msg = f"event: llm_call\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    for q in list(_progress_subscribers.get(pid, [])):
         try:
-            while True:
-                try:
-                    msg = await asyncio.wait_for(q.get(), timeout=5.0)
-                    yield msg
-                    # Chỉ đóng SSE khi gặp event 'done' / 'error' của Pass 3 (cấp pipeline).
-                    # Các stage QC như qc_done / chunk_done / qc_error KHÔNG đóng,
-                    # vì FE còn cần lắng nghe tiếp event sau đó (QC chunk khác,
-                    # hoặc tiếp tục Pass 3).
-                    if '"stage": "done"' in msg or '"stage": "error"' in msg:
-                        break
-                except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
-        finally:
-            try:
-                _progress.get(pid, []).remove(q)
-            except ValueError:
-                pass
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
-
-
-@router.post("/projects/{pid}/translate/retranslate")
-async def retranslate(pid: int, req: RetranslateRequest, db: Session = Depends(get_db)):
-    """Dịch lại 1 dòng — trả N bản alternative dùng Bible context."""
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
-
-    bible = {}
-    if p.bible_json:
-        try:
-            bible = json.loads(p.bible_json)
+            await q.put(msg)
         except Exception:
             pass
 
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _get_project(db: Session, pid: int) -> Project:
+    p = db.query(Project).filter(Project.id == pid).first()
+    if not p:
+        raise HTTPException(404, f"Project {pid} not found")
+    return p
+
+
+def _db_scene_to_out(s: DBScene) -> SceneOut:
     try:
-        t = _load_translator()
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
+        chars = json.loads(s.characters_present or "[]")
+    except json.JSONDecodeError:
+        chars = []
+    return SceneOut(
+        id=s.id, project_id=s.project_id, scene_index=s.scene_index,
+        start_line=s.start_line, end_line=s.end_line,
+        start_time_sec=s.start_time_sec or 0.0, end_time_sec=s.end_time_sec or 0.0,
+        location=s.location or "", time_of_day=s.time_of_day,
+        characters_present=chars,
+        emotion_primary=s.emotion_primary or "neutral",
+        emotion_arc=s.emotion_arc or "",
+        summary=s.summary or "", purpose=s.purpose or "",
+        story_arc_id=s.story_arc_id,
+        is_hook=bool(s.is_hook), is_emotion_peak=bool(s.is_emotion_peak),
+        status=s.status or "pending", error_message=s.error_message,
+        line_count=s.end_line - s.start_line + 1,
+    )
 
-    # Context trước/sau
-    subs = db.query(Subtitle).filter(
-        Subtitle.project_id == pid
-    ).order_by(Subtitle.index).all()
-    idx = next((i for i, s in enumerate(subs) if s.id == req.subtitle_id), 0)
-    ctx_before = [s.text for s in subs[max(0, idx-3):idx] if s.text]
-    ctx_after  = [s.text for s in subs[idx+1:idx+4] if s.text]
 
-    hints = [
-        "Tự nhiên, gần gũi hơn với khán giả Việt",
-        "Trung thành hơn với nguyên bản, giữ sắc thái",
-    ]
+def _db_bible_to_out(b: DBBible) -> BibleOut:
+    return BibleOut(
+        id=b.id, version=b.version, is_active=bool(b.is_active),
+        cast=json.loads(b.cast_json or "{}"),
+        world=json.loads(b.world_json or "{}"),
+        glossary=json.loads(b.glossary_json or "{}"),
+        genre_pack_id=b.genre_pack_id,
+        tokens_in=b.tokens_in or 0, tokens_out=b.tokens_out or 0,
+        cost_usd=b.cost_usd or 0.0, created_at=b.created_at,
+    )
 
-    results = []
-    for i in range(min(req.variants, 2)):
-        try:
-            res = await t._call_api(
-                prompt=_build_retranslate_prompt(
-                    original=req.original_text,
-                    current=req.current_text,
-                    bible=bible,
-                    ctx_before=ctx_before,
-                    ctx_after=ctx_after,
-                    hint=hints[i],
-                ),
-                api_key=req.api_key,
-                model=req.model,
-                temperature=0.4 + i * 0.2,
+
+def _db_arc_to_out(a: DBStoryArc, scene_count: int = 0) -> StoryArcOut:
+    try:
+        events = json.loads(a.key_events or "[]")
+    except json.JSONDecodeError:
+        events = []
+    return StoryArcOut(
+        id=a.id, arc_index=a.arc_index, title=a.title or "",
+        summary=a.summary or "", start_line=a.start_line, end_line=a.end_line,
+        emotional_tone=a.emotional_tone or "",
+        key_events=events, scene_count=scene_count,
+    )
+
+
+# ─── Status ───────────────────────────────────────────────────────────────────
+
+@router.get("/projects/{pid}/translate/status", response_model=TranslateStatusOut)
+def get_status(pid: int, db: Session = Depends(get_db)):
+    """Trạng thái translate hiện tại của project."""
+    p = _get_project(db, pid)
+
+    active_bible = db.query(DBBible).filter(
+        DBBible.project_id == pid,
+        DBBible.is_active == True,  # noqa: E712
+    ).first()
+
+    scene_count = db.query(DBScene).filter(DBScene.project_id == pid).count()
+
+    subs = db.query(Subtitle).filter(Subtitle.project_id == pid).all()
+
+    # "translated" = đã được pipeline v2 dịch (KHÔNG tính text từ SRT upload ban đầu).
+    # Dấu hiệu: subtitle có translation_version > 1 HOẶC có text khác original_text.
+    # Cả 2 đều set bởi save_translations_to_db() trong translate_service.
+    def is_translated(s: Subtitle) -> bool:
+        if (s.translation_version or 1) > 1:
+            return True
+        # Fallback: text khác original_text (đảm bảo có dịch thật, không phải copy SRT)
+        if s.text and s.original_text and s.text.strip() != s.original_text.strip():
+            return True
+        return False
+
+    translated = sum(1 for s in subs if is_translated(s))
+    review = sum(1 for s in subs if s.needs_review)
+
+    # Speaker assigned = có speaker_zh hoặc character_id từ pipeline v2
+    # (character_id có thể đã được gán từ Diarization cũ → ưu tiên speaker_zh)
+    speaker_assigned = sum(1 for s in subs if s.speaker_zh)
+
+    cps_vals = [s.cps_value for s in subs if s.cps_value]
+    avg_cps = sum(cps_vals) / len(cps_vals) if cps_vals else 0.0
+
+    # Tổng cost + tokens xuyên pipeline (Bible + Scenes — đại diện cho tổng)
+    cost = 0.0
+    tokens_in = 0
+    tokens_out = 0
+    for b in db.query(DBBible).filter(DBBible.project_id == pid).all():
+        cost += b.cost_usd or 0.0
+        tokens_in += b.tokens_in or 0
+        tokens_out += b.tokens_out or 0
+    for s in db.query(DBScene).filter(DBScene.project_id == pid).all():
+        cost += s.cost_usd or 0.0
+        tokens_in += s.tokens_in or 0
+        tokens_out += s.tokens_out or 0
+
+    return TranslateStatusOut(
+        project_id=pid,
+        status=p.translate_status or "idle",
+        current_stage=None,
+        progress=p.translate_progress or 0.0,
+        has_bible=bool(active_bible),
+        scene_count=scene_count,
+        speaker_assigned_count=speaker_assigned,
+        translated_count=translated,
+        review_count=review,
+        avg_cps=round(avg_cps, 2),
+        cost_usd=round(cost, 4),
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        error_message=p.translate_error,
+    )
+
+
+# ─── Pipeline control ─────────────────────────────────────────────────────────
+
+async def _run_pipeline_background(pid: int, runner: TranslateRunner,
+                                    only_stage: Optional[str] = None):
+    """Chạy pipeline trong background task."""
+    # Cài LLM observer cho stage riêng (run_full đã tự cài trong runner)
+    if only_stage is not None:
+        runner._install_llm_observer()
+    try:
+        if only_stage is None:
+            await runner.run_full()
+        else:
+            # Resume mode — load state cần thiết từ DB
+            if only_stage == "bible":
+                await runner.run_bible()
+            else:
+                v2_bible = load_active_bible_from_db(runner.db, pid)
+                if not v2_bible:
+                    raise ValueError("Chưa có Bible. Chạy stage 'bible' trước.")
+
+                if only_stage == "scenes":
+                    await runner.run_scenes(v2_bible)
+                else:
+                    v2_scene_map = load_scenes_from_db(runner.db, pid)
+                    if not v2_scene_map.scenes:
+                        raise ValueError("Chưa có Scenes. Chạy stage 'scenes' trước.")
+
+                    if only_stage == "speaker":
+                        await runner.run_speaker(v2_bible, v2_scene_map)
+                    elif only_stage == "translate":
+                        # Build speaker_map từ DB
+                        subs = runner.db.query(Subtitle).filter(
+                            Subtitle.project_id == pid
+                        ).all()
+                        speaker_map = {}
+                        for s in subs:
+                            if s.speaker_zh:
+                                speaker_map[s.index] = {
+                                    "speaker_zh": s.speaker_zh,
+                                    "confidence": s.speaker_confidence,
+                                    "reason": s.speaker_reason or "",
+                                    "speaker_vi": s.character.name if s.character else "",
+                                }
+                        await runner.run_translate(v2_bible, v2_scene_map, speaker_map)
+                    elif only_stage == "polish":
+                        await runner.run_polish(v2_bible)
+                    else:
+                        raise ValueError(f"Unknown stage: {only_stage}")
+
+            # Update final status + emit "done" event để FE biết stage đã xong
+            runner._save_status("done", 100.0)
+            await _publish_progress(
+                pid, "done", 100.0,
+                f"✅ Stage '{only_stage}' hoàn tất",
+                {"only_stage": only_stage,
+                 "cost_usd": runner.tracker.total_cost_usd},
             )
-            results.append({
-                "text": res["text"].strip(),
-                "note": hints[i],
-            })
-        except Exception as e:
-            results.append({"text": f"[Lỗi: {e}]", "note": None})
+    except asyncio.CancelledError:
+        runner._save_status("idle", 0.0, error="Cancelled by user")
+        await _publish_progress(pid, "cancelled", 0.0, "Đã hủy")
+    except Exception as e:
+        logger.error(f"[Pipeline pid={pid}] {e}", exc_info=True)
+        runner._save_status("error", 0.0, error=str(e))
+        await _publish_progress(
+            pid, "error", 0.0, f"Lỗi: {str(e)[:200]}",
+            {"error": str(e)},
+        )
+    finally:
+        if only_stage is not None:
+            runner._uninstall_llm_observer()
+        _active_runners.pop(pid, None)
 
-    return {"alternatives": results}
+
+@router.post("/projects/{pid}/translate/start")
+async def start_translate(pid: int, req: TranslateStartRequest,
+                           background: BackgroundTasks,
+                           db: Session = Depends(get_db)):
+    """Khởi chạy full pipeline 5 stage. Chạy nền + push SSE."""
+    p = _get_project(db, pid)
+
+    subs_count = db.query(Subtitle).filter(Subtitle.project_id == pid).count()
+    if subs_count == 0:
+        raise HTTPException(400, "Project chưa có subtitles")
+
+    if pid in _active_runners:
+        raise HTTPException(409, "Pipeline đang chạy. Cancel trước khi start lại.")
+
+    # SAFETY: kiểm tra original_text có thật sự là tiếng Trung không.
+    # Bug cũ: nếu pipeline đã chạy 1 lần thì original_text có thể đã bị overwrite
+    # với tiếng Việt (do code import_srt cũ không lưu gốc).
+    # → Sample 20 dòng đầu, đếm CJK ratio.
+    sample = db.query(Subtitle).filter(
+        Subtitle.project_id == pid
+    ).order_by(Subtitle.index).limit(20).all()
+    import re as _re
+    sample_text = " ".join((s.original_text or s.text or "") for s in sample)
+    cjk_count = len(_re.findall(r'[\u4e00-\u9fff]', sample_text))
+    text_chars = len(_re.findall(r'\S', sample_text))
+    cjk_ratio = cjk_count / max(text_chars, 1)
+
+    if cjk_ratio < 0.3:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SOURCE_NOT_CHINESE",
+                "message": (
+                    f"Subtitles của project này không có nội dung tiếng Trung "
+                    f"(CJK ratio = {cjk_ratio*100:.1f}%, cần ≥ 30%). "
+                    f"Pipeline v2 chỉ dịch Trung→Việt. "
+                    f"Nếu original_text đã bị overwrite bởi pipeline chạy trước "
+                    f"(bug cũ), bạn cần re-import SRT tiếng Trung gốc."
+                ),
+                "cjk_ratio": round(cjk_ratio, 3),
+            },
+        )
+
+    # Persist project config
+    p.project_type = req.project_type
+    p.source_lang = req.source_lang
+    p.genre_pack = req.genre_pack
+    db.commit()
+
+    # Build config
+    cfg = build_pipeline_config(req)
+    if not cfg.api_key:
+        raise HTTPException(400, "Thiếu api_key")
+
+    # Tạo runner với session DB MỚI (background task không share session với request)
+    async def on_progress(stage: str, progress: float, message: str, detail):
+        await _publish_progress(pid, stage, progress, message, detail)
+
+    async def on_llm_call(payload: dict):
+        await _publish_llm_call(pid, payload)
+
+    bg_db = SessionLocal()
+    runner = TranslateRunner(bg_db, pid, cfg, on_progress=on_progress,
+                              on_llm_call=on_llm_call)
+    _active_runners[pid] = runner
+
+    async def task():
+        try:
+            await _run_pipeline_background(pid, runner)
+        finally:
+            bg_db.close()
+
+    background.add_task(task)
+    return {"ok": True, "message": "Pipeline started", "subtitles": subs_count}
 
 
-def _extract_api_key_from_project(p: Project) -> str:
-    """Placeholder — api_key đến từ FE request, không lưu trong DB."""
-    return ""
+@router.post("/projects/{pid}/translate/run-stage")
+async def run_stage(pid: int, req: TranslateStageRequest,
+                     background: BackgroundTasks,
+                     db: Session = Depends(get_db)):
+    """Chạy 1 stage cụ thể (resume từ state hiện tại)."""
+    _get_project(db, pid)
+
+    if pid in _active_runners:
+        raise HTTPException(409, "Pipeline đang chạy")
+
+    cfg = build_pipeline_config(req)
+    if not cfg.api_key:
+        raise HTTPException(400, "Thiếu api_key")
+
+    async def on_progress(stage: str, progress: float, message: str, detail):
+        await _publish_progress(pid, stage, progress, message, detail)
+
+    async def on_llm_call(payload: dict):
+        await _publish_llm_call(pid, payload)
+
+    bg_db = SessionLocal()
+    runner = TranslateRunner(bg_db, pid, cfg, on_progress=on_progress,
+                              on_llm_call=on_llm_call)
+    _active_runners[pid] = runner
+
+    async def task():
+        try:
+            await _run_pipeline_background(pid, runner, only_stage=req.stage)
+        finally:
+            bg_db.close()
+
+    background.add_task(task)
+    return {"ok": True, "stage": req.stage, "message": f"Stage {req.stage} started"}
 
 
 @router.post("/projects/{pid}/translate/cancel")
-async def cancel(pid: int):
-    for q in list(_progress.get(pid, [])):
-        await q.put(
-            'event: progress\ndata: {"stage":"error","message":"Đã hủy.","percent":0,"chunks_total":0,"chunks_done":0}\n\n'
-        )
-    _progress.pop(pid, None)
-    return {"ok": True}
+def cancel_translate(pid: int):
+    """Hủy pipeline đang chạy."""
+    runner = _active_runners.get(pid)
+    if not runner:
+        return {"ok": False, "message": "Không có pipeline đang chạy"}
+    runner.cancel()
+    return {"ok": True, "message": "Đã gửi cancel signal"}
 
 
 @router.post("/projects/{pid}/translate/reset")
-async def reset(pid: int, db: Session = Depends(get_db)):
-    """Xóa bản dịch, giữ Bible + original_text."""
-    subs = db.query(Subtitle).filter(Subtitle.project_id == pid).all()
-    for s in subs:
-        s.text        = ""
-        s.tts_done    = False
-        s.audio_path  = None
-        s.wav_duration = None
-    db.commit()
-    return {"ok": True, "reset_count": len(subs)}
+def reset_translate(pid: int, db: Session = Depends(get_db)):
+    """Xóa Bible + Scenes + Issues, KHÔNG xóa Subtitles/Characters."""
+    if pid in _active_runners:
+        raise HTTPException(409, "Đang chạy, cancel trước.")
 
+    _get_project(db, pid)
 
-# ─── Get saved chunks (prompt/response từ DB) ────────────────────────────────
+    db.query(DBPolishIssue).filter(DBPolishIssue.project_id == pid).delete()
+    db.query(DBScene).filter(DBScene.project_id == pid).delete()
+    db.query(DBStoryArc).filter(DBStoryArc.project_id == pid).delete()
+    db.query(DBBible).filter(DBBible.project_id == pid).delete()
 
-@router.get("/projects/{pid}/translate/chunks")
-def get_translate_chunks(pid: int, db: Session = Depends(get_db)):
-    """Load trạng thái + prompt/response + QC snapshot của tất cả chunks."""
-    chunks = db.query(TranslateChunk).filter(
-        TranslateChunk.project_id == pid
-    ).order_by(TranslateChunk.chunk_index).all()
-    out = []
-    for c in chunks:
-        # Parse QC JSON nếu có
-        qc_van_de   = None
-        qc_tong_ket = None
-        try:
-            if c.qc_van_de:
-                qc_van_de = json.loads(c.qc_van_de)
-        except Exception:
-            qc_van_de = None
-        try:
-            if c.qc_tong_ket:
-                qc_tong_ket = json.loads(c.qc_tong_ket)
-        except Exception:
-            qc_tong_ket = None
+    # Reset subtitles
+    db.query(Subtitle).filter(Subtitle.project_id == pid).update({
+        "scene_id": None,
+        "speaker_zh": None,
+        "speaker_confidence": "low",
+        "speaker_reason": "",
+        "emotion": None,
+        "intensity": 5,
+        "cps_value": None,
+        "needs_review": False,
+        "review_reason": "",
+        "text_draft": None,
+        "is_hook": False,
+    })
 
-        out.append({
-            "chunk_index":  c.chunk_index,
-            "start_line":   c.start_line,
-            "end_line":     c.end_line,
-            "status":       c.status or "wait",
-            "error":        c.error or "",
-            "prompt":       c.prompt or "",
-            "response":     c.response or "",
-            "tokens_in":    c.tokens_in,
-            "tokens_out":   c.tokens_out,
-            "timing_ms":    c.timing_ms,
-            "model":        c.model or "",
-            # QC snapshot
-            "qc_response":   c.qc_response or "",
-            "qc_van_de":     qc_van_de,
-            "qc_tong_ket":   qc_tong_ket,
-            "qc_tokens_in":  c.qc_tokens_in or 0,
-            "qc_tokens_out": c.qc_tokens_out or 0,
-            "qc_timing_ms":  c.qc_timing_ms or 0,
-            "qc_model":      c.qc_model or "",
-            "qc_run_at":     c.qc_run_at.isoformat() if c.qc_run_at else "",
-        })
-    return out
-
-
-@router.delete("/projects/{pid}/translate/chunks/{chunk_index}")
-def delete_translate_chunk(pid: int, chunk_index: int, db: Session = Depends(get_db)):
-    """Xóa bản dịch của 1 chunk:
-      - Xóa row trong translate_chunks (prompt, response, QC...)
-      - Reset Subtitle trong phạm vi chunk: clear text dịch, clear character_id
-        (giữ original_text vì đó là gốc tiếng Trung, không phải bản dịch).
-
-    Sau khi xóa: chunk sẽ về trạng thái 'wait' (chưa dịch).
-    """
     p = db.query(Project).filter(Project.id == pid).first()
-    if not p:
-        raise HTTPException(404, "Project not found")
+    if p:
+        p.translate_status = "idle"
+        p.translate_progress = 0.0
+        p.translate_error = None
 
-    # Lấy phạm vi dòng từ scene_map (nếu có) hoặc từ row translate_chunks
-    bible = json.loads(p.bible_json) if p.bible_json else {}
-    scene_map = bible.get("scene_map") or []
+    db.commit()
+    return {"ok": True, "message": "Đã reset translate state"}
 
-    start_line = end_line = None
-    if 0 <= chunk_index < len(scene_map):
-        scene = scene_map[chunk_index]
-        start_line = scene.get("tu_dong")
-        end_line   = scene.get("den_dong")
 
-    # Fallback: lấy từ row translate_chunks
-    tc = db.query(TranslateChunk).filter(
-        TranslateChunk.project_id  == pid,
-        TranslateChunk.chunk_index == chunk_index,
+# ─── SSE progress stream ──────────────────────────────────────────────────────
+
+@router.get("/projects/{pid}/translate/progress")
+async def progress_sse(pid: int):
+    """SSE stream gửi progress events."""
+    queue: asyncio.Queue = asyncio.Queue()
+    _progress_subscribers.setdefault(pid, []).append(queue)
+
+    async def event_gen():
+        try:
+            # Initial event
+            yield f"event: ready\ndata: {json.dumps({'project_id': pid})}\n\n"
+            while True:
+                try:
+                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield msg
+                except asyncio.TimeoutError:
+                    # Heartbeat để giữ connection
+                    yield ": heartbeat\n\n"
+        finally:
+            try:
+                _progress_subscribers.get(pid, []).remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# ─── Bible endpoints ──────────────────────────────────────────────────────────
+
+@router.get("/projects/{pid}/bible", response_model=Optional[BibleOut])
+def get_active_bible(pid: int, db: Session = Depends(get_db)):
+    """Get Bible đang active của project."""
+    _get_project(db, pid)
+    bible = db.query(DBBible).filter(
+        DBBible.project_id == pid,
+        DBBible.is_active == True,  # noqa: E712
     ).first()
-    if tc and (start_line is None or end_line is None):
-        start_line = tc.start_line
-        end_line   = tc.end_line
+    if not bible:
+        return None
+    return _db_bible_to_out(bible)
 
-    if start_line is None or end_line is None:
-        raise HTTPException(400, "Không xác định được phạm vi dòng của chunk này")
 
-    # Reset subtitles trong phạm vi chunk
+@router.put("/projects/{pid}/bible")
+def update_bible(pid: int, payload: dict, db: Session = Depends(get_db)):
+    """Edit Bible (cast/world/glossary) thủ công.
+
+    Body: {"cast": {...}, "world": {...}, "glossary": {...}}
+    Bất kỳ trường nào không truyền sẽ giữ nguyên.
+    """
+    _get_project(db, pid)
+    bible = db.query(DBBible).filter(
+        DBBible.project_id == pid,
+        DBBible.is_active == True,  # noqa: E712
+    ).first()
+    if not bible:
+        raise HTTPException(404, "Chưa có Bible. Chạy Stage 1 trước.")
+
+    if "cast" in payload:
+        bible.cast_json = json.dumps(payload["cast"], ensure_ascii=False)
+    if "world" in payload:
+        bible.world_json = json.dumps(payload["world"], ensure_ascii=False)
+    if "glossary" in payload:
+        bible.glossary_json = json.dumps(payload["glossary"], ensure_ascii=False)
+    if "genre_pack_id" in payload:
+        bible.genre_pack_id = payload["genre_pack_id"]
+
+    db.commit()
+    db.refresh(bible)
+    return _db_bible_to_out(bible)
+
+
+@router.get("/projects/{pid}/bibles", response_model=list[BibleOut])
+def list_bible_versions(pid: int, db: Session = Depends(get_db)):
+    """List tất cả Bible versions của project (xem lịch sử)."""
+    _get_project(db, pid)
+    bibles = db.query(DBBible).filter(
+        DBBible.project_id == pid
+    ).order_by(DBBible.version.desc()).all()
+    return [_db_bible_to_out(b) for b in bibles]
+
+
+# ─── Scenes endpoints ─────────────────────────────────────────────────────────
+
+@router.get("/projects/{pid}/scenes", response_model=list[SceneOut])
+def list_scenes(pid: int, db: Session = Depends(get_db)):
+    """List tất cả scenes của project."""
+    _get_project(db, pid)
+    scenes = db.query(DBScene).filter(
+        DBScene.project_id == pid
+    ).order_by(DBScene.scene_index).all()
+    return [_db_scene_to_out(s) for s in scenes]
+
+
+@router.get("/projects/{pid}/scenes/{scene_id}")
+def get_scene_detail(pid: int, scene_id: int, db: Session = Depends(get_db)):
+    """Get 1 scene chi tiết + subtitles trong scene."""
+    _get_project(db, pid)
+    scene = db.query(DBScene).filter(
+        DBScene.id == scene_id, DBScene.project_id == pid
+    ).first()
+    if not scene:
+        raise HTTPException(404, "Scene not found")
+
     subs = db.query(Subtitle).filter(
         Subtitle.project_id == pid,
-        Subtitle.index >= start_line,
-        Subtitle.index <= end_line,
-    ).all()
-    reset_count = 0
-    for s in subs:
-        # Restore text về original (gốc tiếng Trung) nếu đã có original_text,
-        # ngược lại để text rỗng. KHÔNG xóa original_text vì đó là gốc, không phải bản dịch.
-        if s.original_text:
-            s.text = s.original_text
-        else:
-            s.text = ""
-        s.character_id = None
-        reset_count += 1
+        Subtitle.index >= scene.start_line,
+        Subtitle.index <= scene.end_line,
+    ).order_by(Subtitle.index).all()
 
-    # Xóa row translate_chunks (hoặc reset về wait nếu muốn giữ history)
-    if tc:
-        db.delete(tc)
+    return {
+        "scene": _db_scene_to_out(scene),
+        "subtitles": [
+            {
+                "id": s.id, "index": s.index,
+                "start_time": s.start_time, "end_time": s.end_time,
+                "text_zh": s.original_text or "",
+                "text_vi": s.text or "",
+                "speaker_zh": s.speaker_zh,
+                "speaker_vi": s.character.name if s.character else None,
+                "speaker_confidence": s.speaker_confidence or "low",
+                "speaker_reason": s.speaker_reason or "",
+                "emotion": s.emotion, "intensity": s.intensity or 5,
+                "cps_value": s.cps_value,
+                "needs_review": bool(s.needs_review),
+                "review_reason": s.review_reason or "",
+                "character_id": s.character_id,
+                "is_hook": bool(s.is_hook),
+            } for s in subs
+        ],
+    }
 
+
+@router.get("/projects/{pid}/story-arcs", response_model=list[StoryArcOut])
+def list_story_arcs(pid: int, db: Session = Depends(get_db)):
+    """List story arcs."""
+    _get_project(db, pid)
+    arcs = db.query(DBStoryArc).filter(
+        DBStoryArc.project_id == pid
+    ).order_by(DBStoryArc.arc_index).all()
+
+    # Đếm scenes/arc
+    scene_count_by_arc: dict[int, int] = {}
+    for s in db.query(DBScene).filter(DBScene.project_id == pid).all():
+        if s.story_arc_id:
+            scene_count_by_arc[s.story_arc_id] = scene_count_by_arc.get(s.story_arc_id, 0) + 1
+
+    return [_db_arc_to_out(a, scene_count_by_arc.get(a.id, 0)) for a in arcs]
+
+
+# ─── Polish issues ────────────────────────────────────────────────────────────
+
+@router.get("/projects/{pid}/polish-issues", response_model=list[PolishIssueOut])
+def list_polish_issues(pid: int,
+                        resolved: Optional[bool] = None,
+                        issue_type: Optional[str] = None,
+                        db: Session = Depends(get_db)):
+    """List polish issues, có thể filter theo resolved/type."""
+    _get_project(db, pid)
+    q = db.query(DBPolishIssue).filter(DBPolishIssue.project_id == pid)
+    if resolved is not None:
+        q = q.filter(DBPolishIssue.resolved == resolved)
+    if issue_type:
+        q = q.filter(DBPolishIssue.issue_type == issue_type)
+    return q.order_by(DBPolishIssue.line_index).all()
+
+
+@router.post("/projects/{pid}/polish-issues/{issue_id}/apply")
+def apply_issue_suggestion(pid: int, issue_id: int,
+                            db: Session = Depends(get_db)):
+    """Apply suggested_text vào subtitle, đánh dấu issue resolved."""
+    _get_project(db, pid)
+    iss = db.query(DBPolishIssue).filter(
+        DBPolishIssue.id == issue_id,
+        DBPolishIssue.project_id == pid,
+    ).first()
+    if not iss:
+        raise HTTPException(404, "Issue not found")
+
+    if iss.suggested_text and iss.subtitle_id:
+        sub = db.query(Subtitle).filter(Subtitle.id == iss.subtitle_id).first()
+        if sub:
+            sub.text = iss.suggested_text
+            duration = sub.end_time - sub.start_time
+            from core.srt_parser import calculate_cps
+            if duration > 0:
+                sub.cps_value = round(calculate_cps(iss.suggested_text, duration), 2)
+
+    iss.resolved = True
     db.commit()
+    return {"ok": True}
+
+
+@router.post("/projects/{pid}/polish-issues/{issue_id}/dismiss")
+def dismiss_issue(pid: int, issue_id: int, db: Session = Depends(get_db)):
+    """Bỏ qua issue, không apply."""
+    _get_project(db, pid)
+    iss = db.query(DBPolishIssue).filter(
+        DBPolishIssue.id == issue_id,
+        DBPolishIssue.project_id == pid,
+    ).first()
+    if not iss:
+        raise HTTPException(404, "Issue not found")
+    iss.resolved = True
+    db.commit()
+    return {"ok": True}
+
+
+# ─── Retranslate 1 dòng ───────────────────────────────────────────────────────
+
+@router.post("/projects/{pid}/translate/retranslate")
+async def retranslate_single(pid: int, req: RetranslateRequest,
+                              db: Session = Depends(get_db)):
+    """Dịch lại 1 subtitle. Dùng Bible + scene context."""
+    _get_project(db, pid)
+    sub = db.query(Subtitle).filter(
+        Subtitle.id == req.subtitle_id,
+        Subtitle.project_id == pid,
+    ).first()
+    if not sub:
+        raise HTTPException(404, "Subtitle not found")
+
+    bible = load_active_bible_from_db(db, pid)
+    if not bible:
+        raise HTTPException(400, "Project chưa có Bible. Chạy Stage 1 trước.")
+
+    # Build prompt đơn giản
+    from core.llm_client import LLMRequest, call_llm
+    import httpx
+
+    bible_brief = {
+        "characters": [
+            {"vi": c.vi, "zh": c.zh, "self_address": c.self_address.default}
+            for c in bible.cast.characters[:8]
+        ],
+        "glossary": [
+            {"zh": t.zh, "vi": t.vi}
+            for t in bible.glossary.terms[:15]
+        ],
+        "tone": bible.world.tone_overall,
+    }
+
+    # Context: 3 dòng trước/sau
+    ctx_before = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.index < sub.index,
+    ).order_by(Subtitle.index.desc()).limit(3).all()
+    ctx_after = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.index > sub.index,
+    ).order_by(Subtitle.index).limit(3).all()
+
+    ctx_block = "\n".join([
+        *[f"  [{s.index}] {s.original_text or ''} → {s.text or ''}" for s in reversed(ctx_before)],
+        f"→ [{sub.index}] {sub.original_text or ''} → {sub.text or ''}",
+        *[f"  [{s.index}] {s.original_text or ''} → {s.text or ''}" for s in ctx_after],
+    ])
+
+    prompt = f"""Dịch lại 1 dòng phụ đề Trung→Việt cho phim đang dịch.
+
+NGUYÊN BẢN (Trung): {sub.original_text}
+BẢN HIỆN TẠI (Việt): {sub.text}
+YÊU CẦU NGƯỜI DÙNG: {req.hint or "Dịch tốt hơn, giữ cảm xúc"}
+
+THÔNG TIN PHIM:
+{json.dumps(bible_brief, ensure_ascii=False, indent=2)}
+
+MẠCH HỘI THOẠI:
+{ctx_block}
+
+Yêu cầu output: TRẢ VỀ JSON THUẦN với {req.variants} variants:
+{{
+  "variants": [
+    {{"text_vi": "<bản dịch 1>"}},
+    {{"text_vi": "<bản dịch 2>"}}
+  ]
+}}
+
+Chỉ JSON, không markdown, không giải thích."""
+
+    llm_req = LLMRequest(
+        prompt=prompt, model=req.model, api_key=req.api_key,
+        temperature=0.7, max_output=2000, json_mode=True,
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await call_llm(llm_req, client=client)
+    except Exception as e:
+        raise HTTPException(500, f"LLM call failed: {e}")
+
+    from core.llm_client import parse_json_response
+    data = parse_json_response(resp.text, default={"variants": []})
+
     return {
         "ok": True,
-        "chunk_index": chunk_index,
-        "start_line":  start_line,
-        "end_line":    end_line,
-        "subs_reset":  reset_count,
+        "subtitle_id": sub.id,
+        "current_text": sub.text,
+        "variants": [v.get("text_vi", "") for v in data.get("variants", [])],
+        "tokens_in": resp.tokens_in, "tokens_out": resp.tokens_out,
     }
 
 
+# ─── Genre packs ──────────────────────────────────────────────────────────────
 
-
-@router.post("/projects/{pid}/translate/fix-speaker-text")
-async def fix_speaker_text(pid: int, db: Session = Depends(get_db)):
-    """Fix subtitles bị lưu dạng 'Speaker|text' — tách ra lưu đúng."""
-    subs = db.query(Subtitle).filter(Subtitle.project_id == pid).all()
-    chars = db.query(Character).filter(Character.project_id == pid).all()
-    name_to_char = {c.name: c.id for c in chars}
-    
-    fixed = 0
-    for s in subs:
-        if not s.text or '|' not in s.text:
-            continue
-        parts = s.text.split('|', 1)
-        candidate = parts[0].strip()
-        actual_text = parts[1].strip() if len(parts) > 1 else ''
-        # Chỉ fix nếu phần trước | trông như tên (ngắn, không có dấu câu)
-        if (candidate and actual_text and len(candidate) <= 30
-                and not any(x in candidate for x in ['.', '!', '?', '…'])):
-            s.text = actual_text
-            # Thử gán character nếu chưa có
-            if not s.character_id and candidate in name_to_char:
-                s.character_id = name_to_char[candidate]
-            fixed += 1
-    
-    db.commit()
-    return {"fixed": fixed, "total": len(subs)}
-
-# ─── QC Review endpoint ────────────────────────────────────────────────────────
-
-class ReviewEntry(BaseModel):
-    index:      int
-    original:   str
-    translated: str
-    speaker:    str = ""    # tên Hán Việt của nhân vật đang được gán cho dòng này
-
-class ReviewChunkRequest(BaseModel):
-    api_key:     str
-    model:       str = "gemini-2.5-flash"
-    chunk_index: int
-    entries:     list[ReviewEntry]
-
-@router.post("/projects/{pid}/translate/review-chunk")
-async def review_chunk(pid: int, req: ReviewChunkRequest, db: Session = Depends(get_db)):
-    """QC Review 1 chunk — dùng pass4_review_chunk từ translator.
-
-    Publish SSE events trong các stage để FE hiển thị trạng thái rõ ràng:
-      - qc_start:      bắt đầu (đã build prompt, ước tính ETA)
-      - qc_calling:    đang gọi API
-      - qc_retrying:   gặp retry (kèm wait & error)
-      - qc_responding: đã nhận response, đang parse
-      - qc_done:       hoàn tất (kèm tokens, timing)
-      - qc_error:      lỗi
-
-    Output mỗi entry FE: {
-      index, original, translated,
-      fixed, issue,                        # backward-compat (cho bảng cũ)
-      loai_loi,                            # speaker|van_phong|xung_ho|...
-      speaker_hien_tai, speaker_de_xuat,
-      speaker_de_xuat_char_id,             # resolve qua bảng Characters
-      bang_chung, do_tin_cay,
-    }
-    """
-    p = db.query(Project).filter(Project.id == pid).first()
-    if not p or not p.bible_json:
-        raise HTTPException(400, "Project chưa có Bible")
-
-    try:
-        t = _load_translator()
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-
-    bible = json.loads(p.bible_json)
-
-    # Lookup scene_info thật từ Bible.scene_map theo chunk_index.
-    scene_map = bible.get("scene_map") or []
-    scene_info = None
-    if 0 <= req.chunk_index < len(scene_map):
-        scene_info = scene_map[req.chunk_index]
-
-    chunk = {
-        "index":      req.chunk_index,
-        "blocks":     [],
-        "scene_info": scene_info,
-        "tom_tat":    (scene_info or {}).get("tom_tat", ""),
-    }
-    entries_for_p4 = [
-        {
-            "index":           e.index,
-            "original_text":   e.original,
-            "translated_text": e.translated,
-            "speaker":         e.speaker,
-        }
-        for e in req.entries
-    ]
-
-    # ETA dự đoán: dựa trên số dòng × hệ số kinh nghiệm (model output ~10-15 token/giây
-    # cho Gemini Flash, ~5 token/giây cho Pro). Mỗi dòng ~30 token output → 2-6s/dòng.
-    n_lines = len(req.entries)
-    is_pro_model = "pro" in (req.model or "").lower() or "gpt-4" in (req.model or "").lower() or "gpt-5" in (req.model or "").lower()
-    eta_seconds = int(n_lines * (4.5 if is_pro_model else 2.0)) + 5  # +5s overhead
-
-    # SSE: qc_start
-    await _pub(pid, {
-        "stage":       "qc_start",
-        "chunk_index": req.chunk_index,
-        "message":     f"Đang chuẩn bị Pass 4 cho {n_lines} dòng...",
-        "n_lines":     n_lines,
-        "model":       req.model,
-        "eta_seconds": eta_seconds,
-    })
-
-    # Callback từ translator khi retry — forward thành event qc_retrying
-    async def on_retry(attempt: int, max_retry: int, wait: int, err: str):
-        await _pub(pid, {
-            "stage":       "qc_retrying",
-            "chunk_index": req.chunk_index,
-            "attempt":     attempt,
-            "max_retry":   max_retry,
-            "wait":        wait,
-            "error":       str(err)[:200],
-            "message":     f"Retry {attempt}/{max_retry} sau {wait}s ({str(err)[:60]})",
-        })
-
-    # SSE: qc_calling
-    await _pub(pid, {
-        "stage":       "qc_calling",
-        "chunk_index": req.chunk_index,
-        "message":     f"Đang gọi {req.model}... (ETA ~{eta_seconds}s)",
-        "eta_seconds": eta_seconds,
-    })
-
-    try:
-        result = await t.pass4_review_chunk(
-            chunk=chunk,
-            bible=bible,
-            entries=entries_for_p4,
-            api_key=req.api_key,
-            model=req.model,
-            on_retry=on_retry,
-        )
-    except Exception as e:
-        logger.error(f"pass4 error: {e}", exc_info=True)
-        await _pub(pid, {
-            "stage":       "qc_error",
-            "chunk_index": req.chunk_index,
-            "message":     f"Lỗi: {str(e)[:200]}",
-            "error":       str(e),
-        })
-        raise HTTPException(500, f"Pass 4 lỗi: {e}")
-
-    if not result:
-        await _pub(pid, {
-            "stage":       "qc_error",
-            "chunk_index": req.chunk_index,
-            "message":     "Pass 4 không trả về kết quả",
-        })
-        raise HTTPException(500, "Pass 4 không trả về kết quả")
-
-    # SSE: qc_responding — đã nhận response, đang xử lý
-    await _pub(pid, {
-        "stage":       "qc_responding",
-        "chunk_index": req.chunk_index,
-        "message":     "Đã nhận phản hồi, đang phân tích...",
-        "tokens_out":  result.get("_tokens_out", 0),
-    })
-
-    van_de   = result.get("van_de") or []
-    tong_ket = result.get("tong_ket") or {}
-
-    # Resolve speaker_de_xuat → character_id
-    chars = db.query(Character).filter(Character.project_id == pid).all()
-    name_to_id = {c.name: c.id for c in chars}
-
-    issue_map = {v.get("dong"): v for v in van_de if v.get("dong") is not None}
-    fe_entries = []
-    for e in req.entries:
-        issue = issue_map.get(e.index)
-        if not issue:
-            fe_entries.append({
-                "index":                    e.index,
-                "original":                 e.original,
-                "translated":               e.translated,
-                "speaker":                  e.speaker,
-                "fixed":                    e.translated,
-                "issue":                    "",
-                "loai_loi":                 "",
-                "speaker_hien_tai":         e.speaker,
-                "speaker_de_xuat":          "",
-                "speaker_de_xuat_char_id":  None,
-                "bang_chung":               "",
-                "do_tin_cay":               "",
-            })
-            continue
-
-        loai_loi     = (issue.get("loai_loi") or "").strip()
-        speaker_de_x = (issue.get("speaker_de_xuat") or "").strip()
-        char_id      = name_to_id.get(speaker_de_x) if speaker_de_x else None
-        goi_y        = (issue.get("goi_y_sua") or "").strip() or e.translated
-        bang_chung   = (issue.get("bang_chung") or issue.get("mo_ta") or "").strip()
-        do_tin_cay   = (issue.get("do_tin_cay") or "").strip().lower()
-        issue_text   = f"[{loai_loi}] {bang_chung}" if loai_loi else bang_chung
-
-        fe_entries.append({
-            "index":                    e.index,
-            "original":                 e.original,
-            "translated":               e.translated,
-            "speaker":                  e.speaker,
-            "fixed":                    goi_y,
-            "issue":                    issue_text,
-            "loai_loi":                 loai_loi,
-            "speaker_hien_tai":         (issue.get("speaker_hien_tai") or e.speaker or ""),
-            "speaker_de_xuat":          speaker_de_x,
-            "speaker_de_xuat_char_id":  char_id,
-            "bang_chung":               bang_chung,
-            "do_tin_cay":               do_tin_cay,
-        })
-
-    # SSE: qc_done
-    await _pub(pid, {
-        "stage":          "qc_done",
-        "chunk_index":    req.chunk_index,
-        "message":        f"Xong! {len(van_de)} vấn đề phát hiện.",
-        "tokens_in":      result.get("_tokens_in", 0),
-        "tokens_out":     result.get("_tokens_out", 0),
-        "timing_ms":      result.get("_timing_ms", 0),
-        "dong_co_van_de": len(van_de),
-    })
-
-    # Snapshot kết quả QC vào DB để khi user chuyển chunk khác rồi quay lại
-    # (hoặc F5) vẫn còn — không phải chạy lại Pass 4 tốn tiền.
-    try:
-        from datetime import datetime
-        tc_qc = db.query(TranslateChunk).filter(
-            TranslateChunk.project_id  == pid,
-            TranslateChunk.chunk_index == req.chunk_index,
-        ).first()
-        # van_de lưu kèm các field đã resolve (char_id) để FE không phải resolve lại
-        van_de_to_save = []
-        for e in fe_entries:
-            if e.get("loai_loi"):
-                van_de_to_save.append({
-                    "index":                    e["index"],
-                    "loai_loi":                 e["loai_loi"],
-                    "speaker_hien_tai":         e["speaker_hien_tai"],
-                    "speaker_de_xuat":          e["speaker_de_xuat"],
-                    "speaker_de_xuat_char_id":  e["speaker_de_xuat_char_id"],
-                    "bang_chung":               e["bang_chung"],
-                    "do_tin_cay":               e["do_tin_cay"],
-                    "fixed":                    e["fixed"],
-                    "original":                 e["original"],
-                    "translated":               e["translated"],
-                    "speaker":                  e["speaker"],
-                    "issue":                    e["issue"],
-                })
-        if tc_qc:
-            tc_qc.qc_response   = json.dumps(result, ensure_ascii=False)
-            tc_qc.qc_van_de     = json.dumps(van_de_to_save, ensure_ascii=False)
-            tc_qc.qc_tong_ket   = json.dumps(tong_ket, ensure_ascii=False)
-            tc_qc.qc_tokens_in  = result.get("_tokens_in", 0)
-            tc_qc.qc_tokens_out = result.get("_tokens_out", 0)
-            tc_qc.qc_timing_ms  = result.get("_timing_ms", 0)
-            tc_qc.qc_model      = req.model
-            tc_qc.qc_run_at     = datetime.utcnow()
-            db.commit()
-    except Exception as save_err:
-        logger.warning(f"[QC snapshot save] {save_err}")
-        db.rollback()
-
-    return {
-        "entries":      fe_entries,
-        "tong_ket":     tong_ket,
-        "raw_response": json.dumps(result, ensure_ascii=False),
-        "tokens_in":    result.get("_tokens_in", 0),
-        "tokens_out":   result.get("_tokens_out", 0),
-        "timing_ms":    result.get("_timing_ms", 0),
-    }
+@router.get("/translate/genre-packs", response_model=list[GenrePackInfo])
+def list_genre_packs():
+    """List các genre pack có sẵn cho FE chọn."""
+    return get_available_genre_packs()

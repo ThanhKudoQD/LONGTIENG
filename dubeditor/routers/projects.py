@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil, uuid
 
 from dubeditor.database import get_db
-from dubeditor.models import Project, Subtitle
+from dubeditor.models import Project, Subtitle, Bible, Scene
 from dubeditor.schemas import ProjectCreate, ProjectOut
 
 router = APIRouter()
@@ -19,28 +19,43 @@ for d in [STORAGE, VIDEO_DIR, EXPORTS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 
+def _enrich_project_out(p: Project, db: Session) -> ProjectOut:
+    """Build ProjectOut từ Project + tính các counts."""
+    total = db.query(func.count(Subtitle.id)).filter(Subtitle.project_id == p.id).scalar()
+    done  = db.query(func.count(Subtitle.id)).filter(
+        Subtitle.project_id == p.id, Subtitle.tts_done == True  # noqa: E712
+    ).scalar()
+    scene_count = db.query(func.count(Scene.id)).filter(Scene.project_id == p.id).scalar()
+    has_bible = db.query(Bible).filter(
+        Bible.project_id == p.id, Bible.is_active == True  # noqa: E712
+    ).first() is not None
+
+    out = ProjectOut.model_validate(p)
+    out.subtitle_count = total or 0
+    out.tts_done_count = done or 0
+    out.scene_count = scene_count or 0
+    out.has_bible = has_bible
+    out.source_lang = p.source_lang or 'vi'
+    out.project_type = p.project_type or 'short_drama'
+    out.genre_pack = p.genre_pack
+    out.translate_status = p.translate_status or 'idle'
+    out.translate_progress = p.translate_progress or 0.0
+    out.translate_error = p.translate_error
+    return out
+
+
 @router.get("/", response_model=list[ProjectOut])
 def list_projects(db: Session = Depends(get_db)):
     projects = db.query(Project).order_by(Project.updated_at.desc()).all()
-    result = []
-    for p in projects:
-        total = db.query(func.count(Subtitle.id)).filter(Subtitle.project_id == p.id).scalar()
-        done  = db.query(func.count(Subtitle.id)).filter(Subtitle.project_id == p.id, Subtitle.tts_done == True).scalar()
-        out = ProjectOut.model_validate(p)
-        out.subtitle_count = total or 0
-        out.tts_done_count = done or 0
-        out.has_bible  = bool(p.bible_json)
-        out.source_lang = p.source_lang or 'vi'
-        result.append(out)
-    return result
+    return [_enrich_project_out(p, db) for p in projects]
 
 
 @router.post("/", response_model=ProjectOut)
 def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
-    p = Project(name=data.name)
+    p = Project(name=data.name, project_type=data.project_type or 'short_drama')
     db.add(p); db.commit(); db.refresh(p)
     (STORAGE / str(p.id) / "audio").mkdir(parents=True, exist_ok=True)
-    return p
+    return _enrich_project_out(p, db)
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
@@ -48,14 +63,34 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
-    total = db.query(func.count(Subtitle.id)).filter(Subtitle.project_id == p.id).scalar()
-    done  = db.query(func.count(Subtitle.id)).filter(Subtitle.project_id == p.id, Subtitle.tts_done == True).scalar()
-    out = ProjectOut.model_validate(p)
-    out.subtitle_count = total or 0
-    out.tts_done_count = done or 0
-    out.has_bible   = bool(p.bible_json)
-    out.source_lang = p.source_lang or 'vi'
-    return out
+    return _enrich_project_out(p, db)
+
+
+@router.patch("/{project_id}")
+def update_project(project_id: int, body: dict, db: Session = Depends(get_db)):
+    """Update các field cấu hình của project. Hiện tại hỗ trợ:
+      - use_emotion_voice (bool): bật/tắt multi-mode voice cho TTS
+    """
+    p = db.query(Project).filter(Project.id == project_id).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+
+    # Whitelist các field được phép update
+    if "use_emotion_voice" in body:
+        p.use_emotion_voice = bool(body["use_emotion_voice"])
+    if "tts_voice_mode" in body:
+        # null/empty string = clear override (auto theo emotion)
+        v = body["tts_voice_mode"]
+        p.tts_voice_mode = v if (v and str(v).strip()) else None
+    if "name" in body:
+        p.name = str(body["name"])
+
+    db.commit(); db.refresh(p)
+    return {
+        "ok": True,
+        "use_emotion_voice": bool(p.use_emotion_voice),
+        "tts_voice_mode": p.tts_voice_mode,
+    }
 
 
 @router.delete("/{project_id}")
@@ -134,22 +169,94 @@ async def upload_video(project_id: int, file: UploadFile = File(...), db: Sessio
     return {"video_path": p.video_path, "video_name": p.video_name, "duration": video_duration}
 
 @router.post("/{project_id}/import-srt")
-async def import_srt(project_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def import_srt(
+    project_id: int,
+    file: UploadFile = File(...),
+    force: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Import SRT vào project.
+
+    Tự động detect language qua tỉ lệ ký tự CJK.
+    - is_chinese=True (CJK ≥ 30%): set source_lang='zh', dùng cho pipeline v2
+    - is_chinese=False: trả 400 với mã DETECTED_NON_CHINESE
+      → Pipeline v2 cần tiếng Trung gốc. User có thể truyền ?force=true để
+        bypass (ví dụ test pipeline với SRT đã dịch sẵn).
+    """
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
 
-    content = (await file.read()).decode("utf-8")
-    subs = parse_srt(content)
+    raw = await file.read()
+    # Thử nhiều encoding — SRT có thể là utf-8, utf-8-sig (BOM), gbk, gb18030
+    content = None
+    used_encoding = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "gb18030"):
+        try:
+            content = raw.decode(encoding)
+            used_encoding = encoding
+            break
+        except UnicodeDecodeError:
+            continue
+    if content is None:
+        raise HTTPException(400, "Không decode được SRT (đã thử utf-8/utf-8-sig/gbk/gb18030)")
+
+    # Detect language qua tỉ lệ ký tự CJK trên toàn nội dung
+    import re as _re
+    cjk_count = len(_re.findall(r'[\u4e00-\u9fff]', content))
+    text_chars = len(_re.findall(r'\S', content))   # bỏ whitespace
+    cjk_ratio = cjk_count / max(text_chars, 1)
+    is_chinese = cjk_ratio >= 0.3   # 30% trở lên ≈ chắc chắn là Trung
+
+    # Block nếu không phải tiếng Trung (trừ khi force)
+    if not is_chinese and not force:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "DETECTED_NON_CHINESE",
+                "message": (
+                    f"File này không phải SRT tiếng Trung "
+                    f"(chỉ {cjk_count} ký tự Trung / {text_chars} ký tự = "
+                    f"{cjk_ratio*100:.1f}%, cần ≥ 30%). "
+                    f"Pipeline v2 dịch Trung→Việt — không hỗ trợ SRT tiếng Việt làm input. "
+                    f"Nếu bạn vẫn muốn import (vd: chỉ để chạy polish), thêm ?force=true."
+                ),
+                "cjk_count": cjk_count,
+                "total_chars": text_chars,
+                "cjk_ratio": round(cjk_ratio, 3),
+                "encoding": used_encoding,
+            },
+        )
+
+    subs = parse_srt(content, is_chinese=is_chinese)
+    if not subs:
+        raise HTTPException(400, "SRT không có dòng hợp lệ nào (không match được timestamp).")
 
     db.query(Subtitle).filter(Subtitle.project_id == project_id).delete()
     for i, s in enumerate(subs):
-        db.add(Subtitle(project_id=project_id, index=i+1, **s))
+        # Lưu cùng text vào cả `text` (sẽ thay bằng bản dịch sau) và
+        # `original_text` (bản gốc — không bao giờ thay đổi).
+        sub_data = {
+            "start_time":    s["start_time"],
+            "end_time":      s["end_time"],
+            "text":          s["text"],
+            "original_text": s["text"],
+        }
+        db.add(Subtitle(project_id=project_id, index=i+1, **sub_data))
+
+    p.source_lang = "zh" if is_chinese else "vi"
     db.commit()
-    return {"imported": len(subs)}
+    return {
+        "imported": len(subs),
+        "source_lang": p.source_lang,
+        "detected_chinese": is_chinese,
+        "cjk_ratio": round(cjk_ratio, 3),
+        "encoding": used_encoding,
+        "forced": force,
+    }
 
 
-def parse_srt(content: str) -> list[dict]:
+def parse_srt(content: str, is_chinese: bool = False) -> list[dict]:
     import re
     result = []
     TIME_RE = re.compile(r"(\d+:\d+:\d+[,.]\d+)\s*-->\s*(\d+:\d+:\d+[,.]\d+)")
@@ -187,13 +294,14 @@ def parse_srt(content: str) -> list[dict]:
             text = " ".join(text_lines).strip()
 
             if text:
-                # Format: viết hoa chữ đầu + dấu cuối câu
-                text = text[0].upper() + text[1:] if text else text
-                if text:
-                    if text[-1] in ',，':
-                        text = text[:-1] + '.'
-                    elif text[-1] not in '.!?…！？':
-                        text = text + '.'
+                # Format text: chỉ áp dụng cho tiếng Việt/Latin, KHÔNG cho tiếng Trung
+                if not is_chinese:
+                    text = text[0].upper() + text[1:] if text else text
+                    if text:
+                        if text[-1] in ',，':
+                            text = text[:-1] + '.'
+                        elif text[-1] not in '.!?…！？':
+                            text = text + '.'
                 result.append({"start_time": start, "end_time": end, "text": text})
         except Exception:
             continue
@@ -206,3 +314,27 @@ def _srt_to_sec(t: str) -> float:
     h, m, rest = t.split(":")
     s, ms = rest.split(".")
     return int(h)*3600 + int(m)*60 + int(s) + int(ms)/1000
+
+
+@router.post("/{project_id}/backfill-original-text")
+def backfill_original_text(project_id: int, db: Session = Depends(get_db)):
+    """Backfill original_text từ text cho subtitles cũ chưa có gốc.
+
+    Dùng khi project đã import SRT trước khi fix bug original_text.
+    Chỉ áp cho subtitles có translation_version=1 (chưa qua pipeline v2).
+    """
+    p = db.query(Project).filter(Project.id == project_id).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+
+    updated = 0
+    subs = db.query(Subtitle).filter(
+        Subtitle.project_id == project_id,
+        Subtitle.original_text.is_(None),
+    ).all()
+    for s in subs:
+        if s.text:
+            s.original_text = s.text
+            updated += 1
+    db.commit()
+    return {"backfilled": updated, "total": len(subs)}

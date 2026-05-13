@@ -1,0 +1,124 @@
+Bạn là biên kịch đang chia 1 phim Trung Quốc thành các PHÂN CẢNH KỊCH để dịch theo cảnh.
+
+━━━ ĐỊNH NGHĨA PHÂN CẢNH ━━━
+
+1 PHÂN CẢNH = 1 đơn vị kịch bản, KHÔNG phải cảnh quay (shot).
+
+Phân cảnh có 4 tính chất ổn định:
+· 1 ĐỊA ĐIỂM (bệnh viện, văn phòng, sân thượng...)
+· 1 MỐC THỜI GIAN (đêm, sáng, buổi chiều...)
+· 1 NHÓM NHÂN VẬT (có thể 2-5 người, có thể có người vào/ra trong cảnh)
+· 1 MỤC ĐÍCH KỊCH (cãi nhau / tỏ tình / báo tin xấu / thẩm vấn...)
+
+→ Phân cảnh CHUYỂN khi 1 trong 4 thay đổi rõ.
+
+━━━ SỐ LƯỢNG MONG ĐỢI ━━━
+
+Với 1 short drama 2 tiếng (~1500-1800 dòng SRT):
+· Khoảng 150-250 phân cảnh
+· Mỗi phân cảnh trung bình 6-12 dòng SRT
+· Một số phân cảnh dài có thể 20-30 dòng
+· Một số phân cảnh ngắn chỉ 2-4 dòng (cảnh chuyển nhanh)
+
+━━━ NGUYÊN TẮC PHÁT HIỆN RANH GIỚI ━━━
+
+1. CHUYỂN ĐỊA ĐIỂM:
+   · Câu thoại chứa từ chỉ địa điểm mới: "tôi về văn phòng"
+   · Người nói thay đổi hoàn toàn (toàn bộ nhân vật mới)
+   · Có dòng thoại "kiểu báo cảnh": tiếng động, "vào trong đi"
+
+2. NHẢY THỜI GIAN:
+   · Có dòng "ngày hôm sau", "tuần sau", "đêm đó"
+   · Khoảng cách timing giữa 2 dòng SRT > 10 giây thường là chuyển cảnh
+
+3. THAY ĐỔI NHÓM NHÂN VẬT CHÍNH:
+   · A và B đang nói → đột nhiên là C và D
+   · Không phải C/D bước vào (đó vẫn là cùng cảnh)
+
+4. THAY ĐỔI MỤC ĐÍCH KỊCH:
+   · Cãi xong → bắt đầu cảnh khác (vd: ngồi tâm sự)
+   · Họp xong → có cảnh nội tâm riêng
+
+━━━ XỬ LÝ ĐẶC BIỆT — SHORT DRAMA ━━━
+
+Phim này là short drama gộp 60 tập × 2 phút. Có vài đặc điểm:
+· Cảnh đổi RẤT NHANH (mỗi 30-60 giây 1 cảnh mới)
+· Có "hook line" ở cuối mỗi tập gốc — thường là câu sốc, đe dọa, twist
+· Nếu thấy 1-2 dòng cliffhanger rồi chuyển sang cảnh hoàn toàn khác → đánh `is_hook: true`
+
+━━━ XỬ LÝ EMOTION ARC ━━━
+
+Với mỗi phân cảnh, xác định:
+· `emotion_primary`: cảm xúc chủ đạo (chỉ chọn 1):
+  - neutral, happy, sad, angry, cold, tense, intimate, fearful,
+    sarcastic, shocked, determined, regretful, humorous, threatening
+
+· `emotion_arc`: cảm xúc TIẾN TRIỂN trong cảnh
+  - Cảnh ngắn 5 dòng: thường 1 emotion
+  - Cảnh dài 15-30 dòng: có thể "bình thường → căng → bùng nổ"
+
+· `is_emotion_peak`: TRUE nếu là 1 trong các cảnh đỉnh điểm cảm xúc của phim:
+  - Đỉnh điểm cãi nhau, ly biệt, đối đầu trực diện
+  - Tỏ tình, ngỏ lời cầu hôn
+  - Khoảnh khắc bộc lộ thân phận thật
+
+━━━ NHÂN VẬT TRONG CẢNH (characters_present) ━━━
+
+Liệt kê các nhân vật xuất hiện trong cảnh, dùng tên Trung từ Cast.
+Nếu có nhân vật chưa định danh → dùng:
+· "phu_1", "phu_2" theo thứ tự xuất hiện trong cảnh
+· "?" nếu hoàn toàn không xác định
+
+━━━ INPUT ━━━
+
+Bible:
+{BIBLE_JSON}
+
+SRT toàn phim (mỗi dòng: index | start_sec | end_sec | text):
+{SRT_FULL}
+
+━━━ OUTPUT (JSON THUẦN) ━━━
+
+{
+  "scenes": [
+    {
+      "index": 0,
+      "start_line": 1,
+      "end_line": 8,
+      "location": "Bệnh viện, đêm",
+      "time_of_day": "đêm",
+      "characters_present": ["顾沉舟", "bac_si"],
+      "emotion_primary": "shocked",
+      "emotion_arc": "bình tĩnh → sốc → đau buồn",
+      "summary": "Cố Trầm Châu nhận tin cha qua đời từ bác sĩ",
+      "purpose": "Thiết lập biến cố mở đầu phim",
+      "story_arc_index": 0,
+      "is_hook": false,
+      "is_emotion_peak": true
+    },
+    {
+      "index": 1,
+      "start_line": 9,
+      "end_line": 16,
+      "location": "Hành lang bệnh viện",
+      "time_of_day": "đêm",
+      "characters_present": ["顾沉舟", "顾辰"],
+      "emotion_primary": "tense",
+      "emotion_arc": "căng → đối đầu",
+      "summary": "Cố Tân xuất hiện, hai anh em đối đầu lần đầu về quyền thừa kế",
+      "purpose": "Giới thiệu xung đột chính: tranh quyền giữa 2 anh em",
+      "story_arc_index": 0,
+      "is_hook": true,
+      "is_emotion_peak": false
+    }
+  ]
+}
+
+━━━ LƯU Ý CUỐI ━━━
+
+· KHÔNG bỏ sót dòng nào — scene[0].start_line phải = 1, scene[-1].end_line phải = dòng cuối
+· Các scene phải LIÊN TỤC: scene[i].end_line + 1 = scene[i+1].start_line
+· KHÔNG OVERLAP: 1 dòng chỉ thuộc 1 scene
+· Số scenes mong đợi: 100-300 cho phim 1500 dòng
+· story_arc_index phải match với arc trong Bible.world.story_arcs (nếu có)
+· Output bắt đầu `{` kết thúc `}`

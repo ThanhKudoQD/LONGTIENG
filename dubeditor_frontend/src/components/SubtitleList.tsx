@@ -58,6 +58,55 @@ function QueueClock() {
   )
 }
 
+/** Badge cảm xúc + cường độ (từ pipeline v2 dịch).
+ *  14 emotion code chuẩn, mỗi cái 1 màu + nhãn ngắn.
+ */
+const EMOTION_BADGE: Record<string, { label: string; color: string }> = {
+  neutral:     { label: 'BT',     color: '#6B7280' },
+  happy:       { label: 'Vui',    color: '#CA8A04' },
+  sad:         { label: 'Buồn',   color: '#2563EB' },
+  angry:       { label: 'Giận',   color: '#DC2626' },
+  cold:        { label: 'Lạnh',   color: '#475569' },
+  tense:       { label: 'Căng',   color: '#EA580C' },
+  intimate:    { label: 'Thân',   color: '#DB2777' },
+  fearful:     { label: 'Sợ',     color: '#7C3AED' },
+  sarcastic:   { label: 'Mỉa',    color: '#B45309' },
+  shocked:     { label: 'Sốc',    color: '#0891B2' },
+  determined:  { label: 'Quyết',  color: '#059669' },
+  regretful:   { label: 'Hối',    color: '#BE123C' },
+  humorous:    { label: 'Hài',    color: '#65A30D' },
+  threatening: { label: 'Đe dọa', color: '#991B1B' },
+}
+
+function EmotionPill({ emotion, intensity, isActive }: {
+  emotion: string
+  intensity?: number | null
+  isActive: boolean
+}) {
+  const cfg = EMOTION_BADGE[emotion]
+  if (!cfg) return null
+  const showIntensity = intensity != null && intensity !== 5
+  return (
+    <span
+      title={`${emotion}${showIntensity ? ` · cường độ ${intensity}/10` : ''}`}
+      style={{
+        fontSize: 10, fontWeight: 700, padding: '1px 5px', borderRadius: 4,
+        background: isActive ? cfg.color + '55' : cfg.color + '1f',
+        color: isActive ? '#fff' : cfg.color,
+        whiteSpace: 'nowrap',
+        display: 'inline-flex', alignItems: 'center', gap: 2,
+      }}
+    >
+      {cfg.label}
+      {showIntensity && (
+        <span style={{ opacity: 0.7, fontWeight: 600, fontSize: 9 }}>
+          ·{intensity}
+        </span>
+      )}
+    </span>
+  )
+}
+
 // ─── Row component memo ────────────────────────────────────────────────────
 // Tách Row + React.memo để khi 1 sub đổi (TTS xong, click chọn), chỉ row đó
 // re-render thay vì 6000 rows. Đây là chìa khoá hiệu năng khi bulk TTS.
@@ -77,6 +126,8 @@ interface RowProps {
   onDeleteAudio: (e: React.MouseEvent, s: Subtitle) => void
   onDeleteSub: (e: React.MouseEvent, s: Subtitle) => void
   onRetranslate: (s: Subtitle) => void
+  onSetVoiceMode: (s: Subtitle, mode: string) => void
+  emotionVoiceOn: boolean
   top: number
   height: number
 }
@@ -84,7 +135,9 @@ interface RowProps {
 const Row = React.memo(function Row({
   s, isActive, isSel, isDup, isOverlap, isTTSLoading, isPlaying,
   isQueued, isQueueRunning,
-  onClick, onDrop, onTTS, onDeleteAudio, onDeleteSub, onRetranslate, top, height,
+  onClick, onDrop, onTTS, onDeleteAudio, onDeleteSub, onRetranslate,
+  onSetVoiceMode, emotionVoiceOn,
+  top, height,
 }: RowProps) {
   const char = s.character
 
@@ -155,6 +208,39 @@ const Row = React.memo(function Row({
               color: isActive ? 'rgba(255,255,255,0.6)' : '#92400E',
             }}>
               chưa gán
+            </span>
+          )}
+          {/* Emotion badge — từ pipeline v2 */}
+          {s.emotion && <EmotionPill emotion={s.emotion} intensity={s.intensity} isActive={isActive} />}
+          {/* Voice mode override dropdown — hiện khi active + emotion voice ON */}
+          {emotionVoiceOn && isActive && (
+            <select
+              value={s.tts_voice_mode || ''}
+              onChange={e => { e.stopPropagation(); onSetVoiceMode(s, e.target.value) }}
+              onClick={e => e.stopPropagation()}
+              title="Override voice mode khi TTS dòng này"
+              style={{
+                fontSize: 10, fontWeight: 600, padding: '1px 4px', borderRadius: 4,
+                border: '1px solid rgba(255,255,255,0.3)',
+                background: s.tts_voice_mode ? '#A78BFA40' : 'rgba(255,255,255,0.08)',
+                color: '#fff', cursor: 'pointer', outline: 'none',
+              }}>
+              <option value="" style={{ color:'#000' }}>🎯 Auto</option>
+              <option value="normal" style={{ color:'#000' }}>😐 BT</option>
+              <option value="happy" style={{ color:'#000' }}>😊 Vui</option>
+              <option value="sad" style={{ color:'#000' }}>😢 Buồn</option>
+              <option value="angry" style={{ color:'#000' }}>😠 Giận</option>
+              <option value="intimate" style={{ color:'#000' }}>🥺 Thân</option>
+            </select>
+          )}
+          {/* Voice mode badge khi không active nhưng có override */}
+          {emotionVoiceOn && !isActive && s.tts_voice_mode && (
+            <span title={`Voice mode override: ${s.tts_voice_mode}`}
+              style={{
+                fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 3,
+                background: '#A78BFA22', color: '#7C3AED',
+              }}>
+              🎭{s.tts_voice_mode.slice(0,3)}
             </span>
           )}
           {/* Nút Dịch lại — chỉ hiện khi active + có original_text */}
@@ -262,6 +348,9 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const deleteAudioStore = useStore(s => s.deleteAudio)
   const deleteSubStore  = useStore(s => s.deleteSubtitle)
   const setActiveSubId  = useStore(s => s.setActiveSubId)
+  const project         = useStore(s => s.project)
+  // v3: emotion voice flag từ project
+  const emotionVoiceOn = !!project?.use_emotion_voice
 
   // Queue state — show icon trên row
   const ttsQueueRunning = useStore(s => s.ttsQueueRunning)
@@ -281,18 +370,26 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
 
   const handleRetranslate = useCallback(async (s: Subtitle) => {
     const config = loadConfig()
-    const apiKey = getApiKey(config, config.model_retranslate || config.model_pass3)
+    const apiKey = getApiKey(config)
+    if (!apiKey) {
+      setInlineRT({ sub: s, loading: false, alts: [], selected: null,
+        error: 'Chưa có API key. Vào trang Translate → Cấu hình.' })
+      return
+    }
     setInlineRT({ sub: s, loading: true, alts: [], selected: null, error: '' })
     try {
-      const res = await api.post(`/projects/${s.project_id}/translate/retranslate`, {
-        subtitle_id:   s.id,
-        original_text: s.original_text || s.text,
-        current_text:  s.text,
-        variants:      2,
-        api_key:       apiKey,
-        model:         config.model_retranslate || config.model_pass3,
+      // v2 API: dùng translateApi.retranslate, KHÔNG truyền original/current
+      // (backend tự lookup từ DB và build context).
+      const { translateApi } = await import('../api')
+      const res = await translateApi.retranslate(s.project_id, {
+        subtitle_id: s.id,
+        hint:        '',
+        api_key:     apiKey,
+        provider:    config.provider,
+        model:       config.model_medium,
+        variants:    2,
       })
-      const alts = res.data.alternatives || []
+      const alts = (res.variants || []).map((text: string) => ({ text }))
       setInlineRT(r => r ? { ...r, loading: false, alts, selected: alts.length > 0 ? 0 : null } : null)
     } catch (err: any) {
       setInlineRT(r => r ? { ...r, loading: false, error: err?.response?.data?.detail || err?.message || 'Lỗi' } : null)
@@ -466,6 +563,20 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     if (remaining.length > 0) setActiveSubId(remaining[Math.min(idx, remaining.length - 1)].id)
   }, [subtitles, deleteSubStore, setActiveSubId])
 
+  // v3: override voice mode per-line
+  const handleSetVoiceMode = useCallback(async (s: Subtitle, mode: string) => {
+    const newMode = mode || null
+    // Optimistic update
+    updateSubtitle(s.id, { tts_voice_mode: newMode })
+    try {
+      await api.patch(`/subtitles/${s.id}`, { tts_voice_mode: newMode })
+    } catch (err: any) {
+      // Revert on error
+      updateSubtitle(s.id, { tts_voice_mode: s.tts_voice_mode })
+      alert('Lưu thất bại: ' + (err?.message || ''))
+    }
+  }, [updateSubtitle])
+
   return (
     <>
     <div ref={parentRef} className="flex-1 overflow-y-auto bg-[#FAFAF8] dark:bg-zinc-900">
@@ -541,6 +652,8 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
               onDeleteAudio={handleDeleteAudio}
               onDeleteSub={handleDeleteSub}
               onRetranslate={handleRetranslate}
+              onSetVoiceMode={handleSetVoiceMode}
+              emotionVoiceOn={emotionVoiceOn}
               top={vi.start}
               height={vi.size}
             />

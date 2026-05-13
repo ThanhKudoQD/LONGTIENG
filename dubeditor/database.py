@@ -1,3 +1,9 @@
+"""
+DubEditor database — SQLAlchemy + SQLite.
+
+Migration đầy đủ chạy ở migrate_to_v2.py. File này chỉ chạy migrations
+nhẹ on-startup (idempotent).
+"""
 from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -20,80 +26,108 @@ def get_db():
     finally:
         db.close()
 
+
 def init_db():
+    """Tạo tables (idempotent) + chạy migration tự động cho v2."""
     from dubeditor import models  # noqa
     Base.metadata.create_all(bind=engine)
-    _migrate()
+    _migrate_v2()
 
-def _migrate():
+
+def _migrate_v2():
+    """Migration on-startup: thêm cột mới + tạo tables mới nếu thiếu.
+
+    Đây là phiên bản nhẹ, tự động chạy khi app start.
+    Để migrate đầy đủ (kể cả import data cũ), chạy: python migrate_to_v2.py
+    """
     import sqlite3
+    if not DB_PATH.exists():
+        return
+
     conn = sqlite3.connect(str(DB_PATH))
     try:
         cur = conn.cursor()
 
-        # characters
-        cols = [r[1] for r in cur.execute("PRAGMA table_info(characters)").fetchall()]
-        if "shortcut_key" not in cols:
-            cur.execute("ALTER TABLE characters ADD COLUMN shortcut_key TEXT")
-            conn.commit()
-        if "tts_speed" not in cols:
-            cur.execute("ALTER TABLE characters ADD COLUMN tts_speed REAL DEFAULT 1.0")
-            conn.commit()
+        def cols(table):
+            return [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
 
-        # projects
-        cols = [r[1] for r in cur.execute("PRAGMA table_info(projects)").fetchall()]
-        if "current_chapter_id" not in cols:
-            cur.execute("ALTER TABLE projects ADD COLUMN current_chapter_id INTEGER")
-            conn.commit()
-        if "bible_json" not in cols:
-            cur.execute("ALTER TABLE projects ADD COLUMN bible_json TEXT")
-            conn.commit()
-            print("[migrate] Added projects.bible_json")
-        if "source_lang" not in cols:
-            cur.execute("ALTER TABLE projects ADD COLUMN source_lang TEXT DEFAULT 'vi'")
-            conn.commit()
-            print("[migrate] Added projects.source_lang")
+        def has_table(name):
+            return cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,)
+            ).fetchone() is not None
 
-        # subtitles
-        cols = [r[1] for r in cur.execute("PRAGMA table_info(subtitles)").fetchall()]
-        if "tts_speed" not in cols:
-            cur.execute("ALTER TABLE subtitles ADD COLUMN tts_speed REAL DEFAULT NULL")
-            conn.commit()
-        if "original_text" not in cols:
-            cur.execute("ALTER TABLE subtitles ADD COLUMN original_text TEXT")
-            conn.commit()
-            print("[migrate] Added subtitles.original_text")
-
-        # roles
-        tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        if "roles" in tables:
-            cols = [r[1] for r in cur.execute("PRAGMA table_info(roles)").fetchall()]
-            if "lora_path" not in cols:
-                cur.execute("ALTER TABLE roles ADD COLUMN lora_path TEXT DEFAULT ''")
+        def add_col(table, col, type_def):
+            if col not in cols(table):
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {type_def}")
                 conn.commit()
 
-        # translate_chunks table (tạo nếu chưa có)
-        tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-        if "translate_chunks" not in tables:
-            cur.execute("""CREATE TABLE translate_chunks (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id  INTEGER NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                start_line  INTEGER NOT NULL DEFAULT 0,
-                end_line    INTEGER NOT NULL DEFAULT 0,
-                prompt      TEXT,
-                response    TEXT,
-                tokens_in   INTEGER DEFAULT 0,
-                tokens_out  INTEGER DEFAULT 0,
-                timing_ms   INTEGER DEFAULT 0,
-                model       TEXT,
-                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-            )""")
+        # projects v2 fields
+        if has_table("projects"):
+            add_col("projects", "current_chapter_id", "INTEGER")
+            add_col("projects", "source_lang", "TEXT DEFAULT 'vi'")
+            add_col("projects", "project_type", "TEXT DEFAULT 'short_drama'")
+            add_col("projects", "genre_pack", "TEXT")
+            add_col("projects", "translate_status", "TEXT DEFAULT 'idle'")
+            add_col("projects", "translate_progress", "REAL DEFAULT 0.0")
+            add_col("projects", "translate_error", "TEXT")
+            # v3: emotion voice toggle (global per-project)
+            add_col("projects", "use_emotion_voice", "BOOLEAN DEFAULT 0")
+            add_col("projects", "tts_voice_mode", "TEXT")
+
+        # characters v2 fields
+        if has_table("characters"):
+            add_col("characters", "shortcut_key", "TEXT")
+            add_col("characters", "tts_speed", "REAL DEFAULT 1.0")
+            add_col("characters", "name_zh", "TEXT")
+            add_col("characters", "aliases_zh", "TEXT")
+            add_col("characters", "aliases_vi", "TEXT")
+            add_col("characters", "role", "TEXT DEFAULT 'phu'")
+            add_col("characters", "gender", "TEXT DEFAULT '?'")
+            add_col("characters", "age_group", "TEXT")
+            add_col("characters", "social_status", "TEXT")
+            add_col("characters", "personality", "TEXT DEFAULT ''")
+            add_col("characters", "speaking_style", "TEXT DEFAULT ''")
+            add_col("characters", "self_address", "TEXT")
+            add_col("characters", "addresses", "TEXT")
+            add_col("characters", "relationships_json", "TEXT")
+            add_col("characters", "notes", "TEXT DEFAULT ''")
+
+        # subtitles v2 fields
+        if has_table("subtitles"):
+            add_col("subtitles", "tts_speed", "REAL")
+            add_col("subtitles", "original_text", "TEXT")
+            add_col("subtitles", "scene_id", "INTEGER")
+            add_col("subtitles", "speaker_zh", "TEXT")
+            add_col("subtitles", "speaker_confidence", "TEXT DEFAULT 'low'")
+            add_col("subtitles", "speaker_reason", "TEXT DEFAULT ''")
+            add_col("subtitles", "emotion", "TEXT")
+            add_col("subtitles", "intensity", "INTEGER DEFAULT 5")
+            add_col("subtitles", "cps_value", "REAL")
+            add_col("subtitles", "needs_review", "BOOLEAN DEFAULT 0")
+            add_col("subtitles", "review_reason", "TEXT DEFAULT ''")
+            add_col("subtitles", "text_draft", "TEXT")
+            add_col("subtitles", "is_hook", "BOOLEAN DEFAULT 0")
+            add_col("subtitles", "translation_version", "INTEGER DEFAULT 1")
+            # v3: per-line voice mode override
+            add_col("subtitles", "tts_voice_mode", "TEXT")
+
+        # roles
+        if has_table("roles"):
+            add_col("roles", "lora_path", "TEXT DEFAULT ''")
+            # v3: multi-mode voice refs (toggle ở project level)
+            add_col("roles", "voice_modes", "TEXT")
+
+        # Drop old translate_chunks if exists (deprecated)
+        if has_table("translate_chunks"):
+            cur.execute("DROP TABLE translate_chunks")
             conn.commit()
-            print("[migrate] Created translate_chunks table")
+            print("[migrate v2] Dropped deprecated table: translate_chunks")
+
+        # Note: tables bibles, scenes, story_arcs, polish_issues được tạo
+        # tự động bởi Base.metadata.create_all (SQLAlchemy).
 
     except Exception as e:
-        print(f"[migrate] Error: {e}")
+        print(f"[migrate v2] Warning: {e}")
     finally:
         conn.close()
