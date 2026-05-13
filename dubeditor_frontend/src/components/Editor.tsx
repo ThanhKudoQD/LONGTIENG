@@ -171,17 +171,14 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   }
 
   // ── Emotion voice toggle (v3) ────────────────────────────────────────────
+  // OFF: tất cả TTS dùng mode "normal"
+  // ON:  TTS dùng mode theo emotion (qua emotion_to_mode), có thể override per-line
   const [emotionVoiceOn, setEmotionVoiceOn] = useState(false)
-  const [globalVoiceMode, setGlobalVoiceMode] = useState<string>('')  // '' = auto
-  // Sync state khi project load
   useEffect(() => {
-    if (project) {
-      if (typeof project.use_emotion_voice === 'boolean') {
-        setEmotionVoiceOn(project.use_emotion_voice)
-      }
-      setGlobalVoiceMode(project.tts_voice_mode || '')
+    if (project && typeof project.use_emotion_voice === 'boolean') {
+      setEmotionVoiceOn(project.use_emotion_voice)
     }
-  }, [project?.id, project?.use_emotion_voice, project?.tts_voice_mode])
+  }, [project?.id, project?.use_emotion_voice])
 
   const toggleEmotionVoice = async () => {
     if (!project) return
@@ -191,18 +188,6 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
       await api.patch(`/projects/${project.id}`, { use_emotion_voice: next })
     } catch (e: any) {
       setEmotionVoiceOn(!next)   // revert
-      alert('Lưu thất bại: ' + (e?.message || ''))
-    }
-  }
-
-  const setGlobalMode = async (mode: string) => {
-    if (!project) return
-    const prev = globalVoiceMode
-    setGlobalVoiceMode(mode)   // optimistic
-    try {
-      await api.patch(`/projects/${project.id}`, { tts_voice_mode: mode || null })
-    } catch (e: any) {
-      setGlobalVoiceMode(prev)   // revert
       alert('Lưu thất bại: ' + (e?.message || ''))
     }
   }
@@ -541,39 +526,23 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           {(modelStatus==='unloaded'||modelStatus==='unknown') && <><span className="w-1.5 h-1.5 rounded-full bg-zinc-400"/>Model OFF</>}
         </button>
 
-        {/* Emotion Voice toggle — v3 multi-mode TTS */}
+        {/* Emotion Voice toggle — v3 (3 mode: BT / Buồn / Giận)
+            OFF → tất cả TTS dùng mode "Bình thường"
+            ON  → TTS dùng mode theo cảm xúc của mỗi dòng (qua emotion_to_mode) */}
         <button
           onClick={toggleEmotionVoice}
           disabled={!project}
           title={emotionVoiceOn
-            ? "TTS dùng audio mẫu theo cảm xúc của từng câu. Click để tắt."
-            : "TTS dùng audio mẫu mặc định. Click để bật theo cảm xúc."}
+            ? "TTS theo mode cảm xúc của từng câu (BT/Buồn/Giận). Click để tắt → tất cả dùng BT."
+            : "TTS luôn dùng mode Bình thường. Click để bật theo cảm xúc câu."}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0 disabled:opacity-50
             ${emotionVoiceOn
               ? 'border-fuchsia-300 dark:border-fuchsia-700 bg-fuchsia-50 dark:bg-fuchsia-950/40 text-fuchsia-700 dark:text-fuchsia-400 hover:bg-fuchsia-100'
               : 'border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-500 hover:bg-fuchsia-50 hover:border-fuchsia-300 hover:text-fuchsia-600'
             }`}>
           <span>🎭</span>
-          {emotionVoiceOn ? 'Giọng cảm xúc ON' : 'Giọng cảm xúc OFF'}
+          {emotionVoiceOn ? 'Mode cảm xúc ON' : 'Mode cảm xúc OFF'}
         </button>
-
-        {/* Global override dropdown — chỉ hiện khi emotion voice ON */}
-        {emotionVoiceOn && (
-          <select
-            value={globalVoiceMode}
-            onChange={e => setGlobalMode(e.target.value)}
-            disabled={!project}
-            title="Override mode toàn project (mỗi dòng có thể override riêng)"
-            className="px-2 py-1.5 rounded-lg border border-fuchsia-200 dark:border-fuchsia-800 bg-white dark:bg-zinc-900 text-[12px] text-fuchsia-700 dark:text-fuchsia-400 flex-shrink-0 focus:outline-none focus:ring-1 focus:ring-fuchsia-400"
-          >
-            <option value="">🎯 Auto (theo emotion)</option>
-            <option value="normal">😐 Bình thường (tất cả)</option>
-            <option value="happy">😊 Vui vẻ (tất cả)</option>
-            <option value="sad">😢 Buồn (tất cả)</option>
-            <option value="angry">😠 Tức giận (tất cả)</option>
-            <option value="intimate">🥺 Nhẹ nhàng (tất cả)</option>
-          </select>
-        )}
 
         <button onClick={onTranslate}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0"

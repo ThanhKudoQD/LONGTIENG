@@ -89,6 +89,8 @@ export interface Subtitle {
   translation_version?: number
   // v3: per-line voice mode override
   tts_voice_mode?: string | null
+  // v3 computed: mode hiện đang dùng (sẵn từ backend)
+  voice_mode?: string
 }
 
 export interface Project {

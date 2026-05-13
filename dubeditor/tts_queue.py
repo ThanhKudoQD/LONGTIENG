@@ -20,6 +20,10 @@ class ProjectQueue:
         self.project_id = project_id
         self.pending: deque[int] = deque()
         self.running: Optional[int] = None
+        # v3: reference task đang chạy để cancel được
+        self.current_task: Optional[asyncio.Task] = None
+        # v3: flag báo user đã hủy → worker bỏ qua mọi pending/running còn lại
+        self.cancelled: bool = False
         self._lock = asyncio.Lock()
 
     def state(self) -> dict:
@@ -31,6 +35,8 @@ class ProjectQueue:
 
     async def enqueue(self, sub_ids: list[int], priority: str = "normal"):
         async with self._lock:
+            # Reset cancelled flag khi user enqueue mới
+            self.cancelled = False
             if priority == "high":
                 # Insert đầu — duyệt ngược để giữ thứ tự ban đầu
                 for sid in reversed(sub_ids):
@@ -51,8 +57,14 @@ class ProjectQueue:
             return self.pending.popleft()
 
     async def cancel_all(self):
+        """Hủy toàn bộ — clear pending + cancel task đang chạy."""
         async with self._lock:
             self.pending.clear()
+            self.cancelled = True
+            # Cancel task đang chạy (nếu có)
+            if self.current_task and not self.current_task.done():
+                self.current_task.cancel()
+                logger.info(f"[TTSQueue] Cancelled running task for project {self.project_id}")
 
 
 class TTSQueueManager:
@@ -144,7 +156,22 @@ class TTSQueueManager:
 
             try:
                 if self._generate_fn:
-                    await self._generate_fn(sub_id)
+                    # v3: wrap thành task để cancel_all() có thể cancel
+                    target_q.current_task = asyncio.create_task(
+                        self._generate_fn(sub_id)
+                    )
+                    try:
+                        await target_q.current_task
+                    except asyncio.CancelledError:
+                        logger.info(f"[TTSQueue] Cancelled sub={sub_id}")
+                        # Broadcast cancellation
+                        if self._broadcast_fn:
+                            try:
+                                await self._broadcast_fn(target_pid, {
+                                    "type": "tts_queue_cancelled",
+                                    "subtitle_id": sub_id,
+                                })
+                            except: pass
             except Exception as e:
                 logger.error(f"[TTSQueue] gen failed sub={sub_id}: {e}", exc_info=True)
                 if self._broadcast_fn:
@@ -157,6 +184,7 @@ class TTSQueueManager:
                     except: pass
             finally:
                 target_q.running = None
+                target_q.current_task = None
                 await self._broadcast_state(target_pid)
 
 

@@ -716,14 +716,12 @@ async def delete_voice_mode(role_id: str, mode: str,
 class TTSRequest(BaseModel):
     role_id: str
     text: str
-    mode: str = "clone"           # "clone" | "ultimate"
-    control_instruction: str = ""
+    mode: str = "ultimate"        # "clone" | "ultimate" (Hi-Fi)
     cfg_value: float = 3.0
     locdit_steps: int = 40
     use_lora: bool = False
-    # v3: chọn voice mode (ref audio đã upload cho role)
-    # Values: 'normal' | 'happy' | 'sad' | 'angry' | 'intimate' | '' (= dùng role.audio cũ)
-    voice_mode: str = ""
+    # v3: chọn voice mode (3 mode). '' = dùng role.audio mặc định
+    voice_mode: str = ""          # 'normal' | 'sad' | 'angry' | ''
 
 @app.post("/api/tts/generate")
 async def tts_generate(body: TTSRequest):
@@ -736,8 +734,9 @@ async def tts_generate(body: TTSRequest):
             raise HTTPException(404, f"Không tìm thấy role: {body.role_id}")
 
         # Resolve audio + ref_text:
-        # 1. Nếu voice_mode được set + role có voice_modes[mode] → dùng mode đó
-        # 2. Fallback: role.audio + role.reference_audio_text (mặc định)
+        # 1. Nếu voice_mode set + role có voice_modes[mode] → dùng mode đó
+        # 2. Fallback normal mode nếu mode đó chưa upload
+        # 3. Fallback cuối: role.audio + role.reference_audio_text
         audio_url = role.audio or ""
         ref_text  = role.reference_audio_text or ""
         voice_mode_used = "default"
@@ -777,25 +776,17 @@ async def tts_generate(body: TTSRequest):
     if not audio_path and not lora_path:
         raise HTTPException(400, "Role này chưa có audio mẫu hoặc LoRA. Không thể generate.")
 
-    target_text = _build_text(body.text, body.control_instruction)
-
-    # Log để debug — chi tiết reference audio + mode
-    has_instruction = bool((body.control_instruction or "").strip())
     logger.info(
         f"[GEN] mode={body.mode} cfg={body.cfg_value} "
         f"role={body.role_id} voice_mode={voice_mode_used} "
-        f"audio_url={audio_url!r} audio_path={audio_path!r} "
-        f"ref_text_len={len(ref_text)} "
-        f"instruction={body.control_instruction!r} "
-        f"text={body.text!r}"[:450]
+        f"audio_url={audio_url!r} ref_text_len={len(ref_text)} "
+        f"text={body.text!r}"[:380]
     )
 
     loop = asyncio.get_event_loop()
     try:
-        # Ultimate mode (Hi-Fi) CHỈ khi không có instruction.
-        # VoxCPM docs: "When Hi-Fi mode is enabled, the control instruction is ignored."
-        # → Có instruction phải dùng Controllable Cloning (chỉ reference_wav_path).
-        if body.mode == "ultimate" and audio_path and ref_text and not has_instruction:
+        # Ultimate (Hi-Fi): cần audio_path + ref_text → giọng giống ref nhất
+        if body.mode == "ultimate" and audio_path and ref_text:
             wav = await loop.run_in_executor(None, lambda: _generate_sync(
                 target_text=body.text.strip(),
                 reference_wav_path=audio_path,
@@ -804,20 +795,19 @@ async def tts_generate(body: TTSRequest):
                 cfg_value=body.cfg_value,
                 lora_path=lora_path,
             ))
-            mode_used = "ultimate"
+            mode_used = f"ultimate ({voice_mode_used})"
         elif audio_path:
+            # Controllable Cloning: chỉ ref audio, không prompt_text
             wav = await loop.run_in_executor(None, lambda: _generate_sync(
-                target_text=target_text,    # đã prefix instruction
+                target_text=body.text.strip(),
                 reference_wav_path=audio_path,
                 cfg_value=body.cfg_value,
                 lora_path=lora_path,
             ))
-            mode_used = "clone" + (" + lora" if lora_path else "")
-            if has_instruction and body.mode == "ultimate":
-                mode_used += " (downgraded from ultimate: has instruction)"
+            mode_used = f"clone ({voice_mode_used})" + (" + lora" if lora_path else "")
         else:
             wav = await loop.run_in_executor(None, lambda: _generate_sync(
-                target_text=target_text,
+                target_text=body.text.strip(),
                 cfg_value=body.cfg_value,
                 lora_path=lora_path,
             ))

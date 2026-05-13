@@ -3,7 +3,7 @@ Pydantic schemas cho DubEditor v2.
 
 Schema cũ giữ tương thích ngược, schema mới thêm cho translate v2.
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, Literal
 from datetime import datetime
 
@@ -117,8 +117,21 @@ class SubtitleOut(SubtitleBase):
     text_draft:         Optional[str] = None
     is_hook:            bool          = False
     translation_version: int          = 1
-    # v3: per-line voice mode override
+    # v3: per-line voice mode override (user set manually)
     tts_voice_mode:     Optional[str] = None
+    # v3 computed: mode được resolve từ (emotion, intensity, tts_voice_mode)
+    # — hiển thị làm badge trên FE. Backend tính sẵn để FE consistent.
+    voice_mode:         str           = "normal"
+
+    @model_validator(mode="after")
+    def _compute_voice_mode(self):
+        from dubeditor.voice_modes import emotion_to_mode
+        if self.tts_voice_mode and self.tts_voice_mode in ("normal", "sad", "angry"):
+            self.voice_mode = self.tts_voice_mode
+        else:
+            self.voice_mode = emotion_to_mode(self.emotion, self.intensity)
+        return self
+
     class Config:
         from_attributes = True
 
@@ -194,9 +207,13 @@ class SetCurrentChapterRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     subtitle_id: int
+    # v3: force voice mode chỉ cho lần TTS này
+    force_voice_mode: Optional[str] = None
 
 class BulkTTSRequest(BaseModel):
     subtitle_ids: list[int]
+    # v3: force voice mode cho cả bulk
+    force_voice_mode: Optional[str] = None
 
 class BulkAssignRequest(BaseModel):
     subtitle_ids: list[int]
@@ -213,6 +230,10 @@ class CharacterSetSpeedRequest(BaseModel):
 class TTSEnqueueRequest(BaseModel):
     subtitle_ids: list[int]
     priority:     str = "normal"
+    # v3: force voice mode cho lần TTS này (không lưu vào sub).
+    # Values: 'normal' | 'sad' | 'angry' | None
+    # Khi set: tự động bật use_emotion_voice tạm cho TTS này
+    force_voice_mode: Optional[str] = None
 
 
 # ─── Translate v2 schemas ─────────────────────────────────────────────────────
@@ -337,4 +358,4 @@ class GenrePackInfo(BaseModel):
     id:          str
     name_vi:     str
     name_zh:     str
-    description: str
+description: str

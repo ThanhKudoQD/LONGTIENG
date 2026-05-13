@@ -53,23 +53,26 @@ def get_role(role_id: str, db: Session) -> Role | None:
 def _run_tts(text: str, role_id: str, emotion: Optional[str] = None,
              intensity: int = 5, use_emotion_voice: bool = False,
              force_mode: Optional[str] = None):
-    """role_id + text + emotion → _generate_sync (lấy từ app module).
+    """role_id + text + (emotion, intensity, mode) → VoxCPM.
 
     Args:
-        text: nội dung TTS (có thể có prefix `(instruction)`)
+        text: nội dung TTS (KHÔNG có instruction prefix nữa — đã bỏ)
         role_id: VoxCPM role id
-        emotion: emotion code của subtitle (sad/angry/...)
+        emotion: emotion code v2 của subtitle (sad/angry/tense/...)
         intensity: 1-10
-        use_emotion_voice: nếu True → resolve ref theo voice_modes;
-                            nếu False → dùng role.audio mặc định
-        force_mode: override mode (bỏ qua emotion). VD: 'sad', 'angry'...
+        use_emotion_voice: True → resolve ref theo emotion+intensity (qua emotion_to_mode);
+                            False → luôn dùng mode "normal"
+        force_mode: override (subtitle.tts_voice_mode). VD: 'sad', 'angry', 'normal'
+
+    Mode VoxCPM:
+        - Có ref_path + ref_text → Hi-Fi (giọng giống ref nhất)
+        - Chỉ ref_path           → Controllable Cloning
+        - Không có gì            → Voice Design (chỉ lora hoặc random)
     """
     main = sys.modules.get("__main__") or sys.modules.get("app")
     generate_sync = getattr(main, "_generate_sync", None)
     if generate_sync is None:
         raise RuntimeError("_generate_sync không tìm thấy")
-
-    has_instruction = text.strip().startswith("(") and ")" in text[:300]
 
     db = SessionLocal()
     try:
@@ -102,12 +105,11 @@ def _run_tts(text: str, role_id: str, emotion: Optional[str] = None,
         logger.info(
             f"[TTS-MODE] role={role_id} emotion={emotion or '-'} "
             f"intensity={intensity} → mode_used={mode_used} "
-            f"ref={'✓' if ref_path else '✗'} ref_text={'✓' if ref_text else '✗'} "
-            f"has_instruction={has_instruction}"
+            f"ref={'✓' if ref_path else '✗'} ref_text={'✓' if ref_text else '✗'}"
         )
 
-        # Hi-Fi CHỈ khi đủ ref+text VÀ không có instruction
-        if ref_path and ref_text and not has_instruction:
+        # Hi-Fi khi đủ ref + ref_text
+        if ref_path and ref_text:
             return generate_sync(
                 target_text=text,
                 reference_wav_path=ref_path,
@@ -159,47 +161,46 @@ async def do_generate(subtitle_id: int):
         if not text:
             raise RuntimeError(f"Sub {subtitle_id} không có text")
 
-        # Resolve voice strategy: toggle ở Project level (global per-project)
+        # Resolve voice strategy:
+        # Toggle ON  → mode theo emotion (qua emotion_to_mode 14→3)
+        # Toggle OFF → luôn dùng mode "normal"
         from dubeditor.models import Project
         project = db.query(Project).filter(Project.id == s.project_id).first()
         use_emotion_voice = bool(project and project.use_emotion_voice)
 
-        # Force mode resolution (precedence: subtitle > project > auto)
+        # Per-line override (Subtitle.tts_voice_mode) — chỉ áp khi toggle ON
         force_mode = None
         if use_emotion_voice:
-            force_mode = (s.tts_voice_mode or "").strip() or None
-            if not force_mode and project:
-                force_mode = (project.tts_voice_mode or "").strip() or None
-
-        if use_emotion_voice:
-            # Multi-mode Hi-Fi: pipeline tự chọn ref theo emotion, KHÔNG instruction
-            text_for_tts = text
-            tts_instruction = ""
-        else:
-            # Legacy: prefix instruction từ emotion + character context
-            from dubeditor.tts_instruction import build_tts_instruction, prefix_instruction
-            tts_instruction = build_tts_instruction(
-                emotion=s.emotion,
-                intensity=s.intensity,
-                gender=getattr(char, "gender", None),
-                age_group=getattr(char, "age_group", None),
-                role=getattr(char, "role", None),
-            )
-            text_for_tts = prefix_instruction(text, tts_instruction)
+            v = (s.tts_voice_mode or "").strip()
+            if v in ("normal", "sad", "angry"):
+                force_mode = v
 
         logger.info(
             f"[DubTTS] subtitle={subtitle_id} role={role_id} "
             f"emotion={s.emotion or '-'} intensity={s.intensity or '-'} "
             f"use_emotion_voice={use_emotion_voice} force_mode={force_mode or '-'} "
-            f"instruction={tts_instruction or '(none)'} "
-            f"text={text!r}"[:340]
+            f"text={text!r}"[:300]
         )
 
         loop = asyncio.get_event_loop()
-        wav  = await loop.run_in_executor(
-            None, _run_tts, text_for_tts, role_id,
-            s.emotion, s.intensity or 5, use_emotion_voice, force_mode,
-        )
+        # v3: dùng shield để chờ executor xong, sau đó check cancellation
+        # (executor task không cancel được thật, chỉ có thể bỏ qua kết quả)
+        try:
+            wav = await asyncio.shield(loop.run_in_executor(
+                None, _run_tts, text, role_id,
+                s.emotion, s.intensity or 5, use_emotion_voice, force_mode,
+            ))
+        except asyncio.CancelledError:
+            logger.info(f"[DubTTS] Cancelled before/during exec subtitle={subtitle_id}")
+            raise
+
+        # Check cancellation sau khi executor xong (worker đã được set cancelled)
+        from dubeditor.tts_queue import queue_manager
+        pq = queue_manager.queues.get(s.project_id)
+        if pq and pq.cancelled:
+            logger.info(f"[DubTTS] Skipped save (cancelled) subtitle={subtitle_id}")
+            return
+
         wav  = _trim_silence(wav, sr=48000)
 
         sr      = 48000
@@ -233,18 +234,27 @@ async def do_generate(subtitle_id: int):
 
 @router.post("/generate")
 async def generate_single(data: TTSRequest):
-    """Single TTS — đẩy queue priority HIGH."""
+    """Single TTS — đẩy queue priority HIGH. Có thể force voice mode."""
     db = SessionLocal()
     try:
         s = db.query(Subtitle).filter(Subtitle.id == data.subtitle_id).first()
         if not s:
             raise HTTPException(404, "Subtitle not found")
         project_id = s.project_id
+
+        # v3: nếu force voice mode → ghi tạm tts_voice_mode + bật toggle project
+        if data.force_voice_mode and data.force_voice_mode in ("normal", "sad", "angry"):
+            from dubeditor.models import Project
+            s.tts_voice_mode = data.force_voice_mode
+            p = db.query(Project).filter(Project.id == project_id).first()
+            if p and not p.use_emotion_voice:
+                p.use_emotion_voice = True
+            db.commit()
     finally:
         db.close()
 
     await queue_manager.enqueue(project_id, [data.subtitle_id], priority="high")
-    return {"queued": 1, "priority": "high"}
+    return {"queued": 1, "priority": "high", "force_voice_mode": data.force_voice_mode}
 
 
 @router.post("/bulk")
@@ -270,14 +280,27 @@ async def queue_enqueue(data: TTSEnqueueRequest):
         raise HTTPException(400, "Empty subtitle_ids")
     db = SessionLocal()
     try:
-        s = db.query(Subtitle).filter(Subtitle.id == data.subtitle_ids[0]).first()
-        if not s:
+        subs = db.query(Subtitle).filter(Subtitle.id.in_(data.subtitle_ids)).all()
+        if not subs:
             raise HTTPException(404, "Subtitle not found")
-        project_id = s.project_id
+        project_id = subs[0].project_id
+
+        # v3: nếu user chỉ định force_voice_mode → set tạm tts_voice_mode
+        # + bật use_emotion_voice cho project (để pipeline TTS dùng mode)
+        if data.force_voice_mode and data.force_voice_mode in ("normal", "sad", "angry"):
+            from dubeditor.models import Project
+            for s in subs:
+                s.tts_voice_mode = data.force_voice_mode
+            # Bật toggle project tạm thời nếu chưa bật
+            p = db.query(Project).filter(Project.id == project_id).first()
+            if p and not p.use_emotion_voice:
+                p.use_emotion_voice = True
+            db.commit()
     finally:
         db.close()
     await queue_manager.enqueue(project_id, data.subtitle_ids, data.priority)
-    return {"queued": len(data.subtitle_ids), "priority": data.priority}
+    return {"queued": len(data.subtitle_ids), "priority": data.priority,
+            "force_voice_mode": data.force_voice_mode}
 
 
 @router.get("/queue/{project_id}")

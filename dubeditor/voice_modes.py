@@ -1,98 +1,100 @@
 """
-Voice mode resolver — map emotion → mode bucket → reference audio.
+Voice mode resolver — map emotion → 3 mode buckets.
 
-5 mode buckets:
-  - normal    (BT)    : neutral, cold, shocked nhẹ
-  - happy     (Vui)   : happy, humorous
-  - sad       (Buồn)  : sad, regretful, fearful nặng
-  - angry     (Giận)  : angry, threatening, tense, sarcastic, determined, shocked mạnh
-  - intimate  (Thân)  : intimate, fearful nhẹ
+3 mode buckets (rút từ 5):
+  - normal  (BT)    : tất cả emotion thường, kể cả căng thẳng nhẹ
+  - sad     (Buồn)  : đau khổ tuyệt vọng, buồn muốn khóc, hối hận sâu sắc
+  - angry   (Giận)  : cực kỳ tức giận, căm phẫn, quát mắng dữ dội
+
+Logic strict: chỉ map sang sad/angry khi cảm xúc CỰC MẠNH (intensity ≥ 8).
+Cảm xúc nhẹ/vừa → normal hết.
+
+Toggle OFF (Project.use_emotion_voice=False) → luôn dùng "normal"
+Toggle ON  → resolve theo emotion+intensity của subtitle
 """
 from __future__ import annotations
 import json
 from typing import Optional
 
 
-# Tên hiển thị tiếng Việt
+# ─────────────────────────────────────────────────────────────────
+# 3 MODES
+# ─────────────────────────────────────────────────────────────────
+
 MODE_LABELS = {
-    "normal":   "Bình thường",
-    "happy":    "Vui vẻ",
-    "sad":      "Buồn",
-    "angry":    "Tức giận",
-    "intimate": "Nhẹ nhàng / Thân mật",
+    "normal": "Bình thường",
+    "sad":    "Buồn",
+    "angry":  "Tức giận",
 }
 
-# Thứ tự render trong UI
-MODE_ORDER = ["normal", "happy", "sad", "angry", "intimate"]
+MODE_ORDER = ["normal", "sad", "angry"]
 
-
-# ─────────────────────────────────────────────────────────────────
-# EMOTION → BUCKET MAPPING
-# ─────────────────────────────────────────────────────────────────
-# Map 14 emotion code chuẩn → 5 mode bucket.
-# Một số emotion phụ thuộc intensity → resolve riêng (xem resolve_mode_bucket)
-
-_BASE_BUCKET: dict[str, str] = {
-    # Direct mapping
-    "neutral":     "normal",
-    "cold":        "normal",     # lạnh nhưng vẫn neutral về tone
-
-    "happy":       "happy",
-    "humorous":    "happy",
-
-    "sad":         "sad",
-    "regretful":   "sad",
-    "fearful":     "sad",        # sợ → buồn (default)
-
-    "angry":       "angry",
-    "threatening": "angry",
-    "tense":       "angry",
-    "sarcastic":   "angry",
-    "determined":  "angry",
-
-    "intimate":    "intimate",
-
-    # Phụ thuộc intensity — set ở resolve_mode_bucket
-    "shocked":     "normal",     # default; nếu intensity ≥ 8 → angry
+# Màu hiển thị FE (cho consistency, FE có thể đọc)
+MODE_COLORS = {
+    "normal": "#6B7280",   # xám
+    "sad":    "#2563EB",   # xanh dương
+    "angry":  "#DC2626",   # đỏ
 }
 
 
-def resolve_mode_bucket(emotion: Optional[str], intensity: int = 5) -> str:
-    """Resolve emotion + intensity → mode bucket.
+# ─────────────────────────────────────────────────────────────────
+# EMOTION (14) → MODE (3) MAPPING — strict logic
+# ─────────────────────────────────────────────────────────────────
 
-    Logic đặc biệt:
-      - shocked intensity ≥ 8 → angry (giận quát)
-      - fearful intensity ≤ 4 → intimate (sợ rụt rè, không khóc)
-      - default → từ _BASE_BUCKET
+# Threshold: chỉ map sang sad/angry khi intensity cực mạnh.
+# Tất cả còn lại (kể cả căng nhẹ, lạnh lùng, mỉa mai) → normal.
+SAD_INTENSITY_THRESHOLD   = 8
+ANGRY_INTENSITY_THRESHOLD = 8
+
+# Emotion thuộc nhóm "có khả năng" map sang sad nếu intensity cao
+SAD_EMOTIONS = {"sad", "regretful", "fearful"}
+
+# Emotion thuộc nhóm "có khả năng" map sang angry nếu intensity cao
+ANGRY_EMOTIONS = {"angry", "threatening"}
+
+
+def emotion_to_mode(emotion: Optional[str], intensity: Optional[int] = 5) -> str:
+    """Map 14 emotion code → 3 mode bucket.
+
+    Logic strict:
+      - sad/regretful/fearful + intensity ≥ 8  → 'sad'  (đau khổ tuyệt vọng)
+      - angry/threatening    + intensity ≥ 8  → 'angry' (cực kỳ giận)
+      - Tất cả còn lại                         → 'normal'
+
+    Examples:
+      emotion_to_mode('sad', 5)     → 'normal'   (buồn nhẹ → BT)
+      emotion_to_mode('sad', 8)     → 'sad'      (buồn rất mạnh)
+      emotion_to_mode('angry', 9)   → 'angry'    (giận dữ dội)
+      emotion_to_mode('angry', 6)   → 'normal'   (giận vừa → BT)
+      emotion_to_mode('tense', 9)   → 'normal'   (căng thẳng cao nhưng không phải sad/angry)
+      emotion_to_mode('shocked', 9) → 'normal'   (sốc → BT)
+      emotion_to_mode('happy', 9)   → 'normal'   (vui → BT)
+      emotion_to_mode(None, 5)      → 'normal'
     """
     e = (emotion or "").lower().strip()
     if not e:
         return "normal"
-    i = intensity or 5
+    i = intensity if intensity is not None else 5
 
-    # Edge cases theo intensity
-    if e == "shocked" and i >= 8:
+    if e in SAD_EMOTIONS and i >= SAD_INTENSITY_THRESHOLD:
+        return "sad"
+    if e in ANGRY_EMOTIONS and i >= ANGRY_INTENSITY_THRESHOLD:
         return "angry"
-    if e == "fearful" and i <= 4:
-        return "intimate"
-
-    return _BASE_BUCKET.get(e, "normal")
+    return "normal"
 
 
 # ─────────────────────────────────────────────────────────────────
-# VOICE MODES PARSER (lưu trong Role.voice_modes JSON)
+# VOICE MODES PARSER (Role.voice_modes JSON)
 # ─────────────────────────────────────────────────────────────────
 
-def parse_voice_modes(raw: Optional[str]) -> dict:
+def parse_voice_modes(raw) -> dict:
     """Parse JSON string từ Role.voice_modes → dict.
 
     Format: {
-      "normal":   {"audio": "/uploads/...", "text": "...", "duration": 3.5},
-      "happy":    {...},
-      ...
+      "normal": {"audio": "/uploads/...", "text": "...", "duration": 3.5},
+      "sad":    {...},
+      "angry":  {...},
     }
-
-    Trả {} nếu raw rỗng/invalid.
     """
     if not raw:
         return {}
@@ -106,12 +108,11 @@ def parse_voice_modes(raw: Optional[str]) -> dict:
 
 
 def dump_voice_modes(modes: dict) -> str:
-    """dict → JSON string để lưu DB."""
     return json.dumps(modes or {}, ensure_ascii=False)
 
 
 # ─────────────────────────────────────────────────────────────────
-# REF RESOLVER (logic chính cho TTS pipeline)
+# REF RESOLVER — logic chính cho TTS pipeline
 # ─────────────────────────────────────────────────────────────────
 
 def resolve_ref_for_emotion(
@@ -122,55 +123,58 @@ def resolve_ref_for_emotion(
     use_emotion_voice: bool = False,
     force_mode: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], str]:
-    """Resolve audio path + transcript cho TTS dựa trên emotion.
+    """Resolve audio path + transcript cho TTS dựa trên mode.
 
     Args:
         role: Role object có voice_modes + audio + reference_audio_text
-        emotion: emotion code của subtitle
+        emotion: emotion code của subtitle (14 enum)
         intensity: 1-10
         use_emotion_voice: flag từ Project.use_emotion_voice
-            True → resolve theo voice_modes
-            False → dùng role.audio (legacy)
-        force_mode: nếu set → bỏ qua emotion+intensity, dùng thẳng mode này.
-            Values: 'normal' | 'happy' | 'sad' | 'angry' | 'intimate' | None
+            True  → dùng mode theo emotion (qua emotion_to_mode)
+            False → LUÔN dùng mode "normal" (toggle off = bình thường hết)
+        force_mode: nếu set → override emotion auto. VD: 'sad', 'angry'
 
-    Logic khi use_emotion_voice=True:
-      1. Nếu force_mode → bucket = force_mode (override)
-      2. Nếu không → bucket = resolve_mode_bucket(emotion, intensity)
-      3. Tìm voice_modes[bucket] → có thì dùng
+    Logic:
+      1. Toggle OFF → mode = "normal"
+      2. Toggle ON:
+         a. force_mode set → dùng force_mode
+         b. Không → mode = emotion_to_mode(emotion, intensity)
+      3. Tìm voice_modes[mode] → có thì dùng
       4. Không có → fallback voice_modes["normal"]
       5. Vẫn không có → fallback role.audio (legacy)
 
     Returns:
         (audio_path, transcript, mode_used)
-        mode_used: "normal" / "happy" / ... / "legacy" / "missing"
+        mode_used: 'normal' / 'sad' / 'angry' / 'legacy' / 'missing'
+                   kèm chú thích nếu là forced/fallback
     """
-    # Toggle off → legacy mode
-    if not use_emotion_voice:
-        return (role.audio or None, role.reference_audio_text or None, "legacy")
-
     modes = parse_voice_modes(getattr(role, "voice_modes", None))
 
-    # Determine bucket: force_mode override hoặc auto resolve
-    if force_mode and force_mode in MODE_LABELS:
-        bucket = force_mode
-        bucket_source = "forced"
+    # Determine target mode
+    if not use_emotion_voice:
+        target = "normal"
+        source = "off"
+    elif force_mode and force_mode in MODE_LABELS:
+        target = force_mode
+        source = "forced"
     else:
-        bucket = resolve_mode_bucket(emotion, intensity)
-        bucket_source = "auto"
+        target = emotion_to_mode(emotion, intensity)
+        source = "auto"
 
-    # Tìm ref theo bucket
-    ref = modes.get(bucket)
-    used = f"{bucket} ({bucket_source})"
+    # Lookup ref
+    ref = modes.get(target)
+    used = f"{target} ({source})"
+
     if not ref or not ref.get("audio"):
-        # Fallback normal
-        ref = modes.get("normal")
-        used = f"normal (fallback from {bucket})"
+        # Fallback normal nếu target khác
+        if target != "normal":
+            ref = modes.get("normal")
+            used = f"normal (fallback from {target})"
 
     if not ref or not ref.get("audio"):
         # Last resort: legacy audio
         if role.audio:
-            return (role.audio, role.reference_audio_text or "", "legacy (fallback)")
+            return (role.audio, role.reference_audio_text or "", "legacy")
         return (None, None, "missing")
 
     return (ref.get("audio"), ref.get("text", "") or "", used)

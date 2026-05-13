@@ -21,6 +21,8 @@ export default function BulkTTSProgress({ projectId }: Props) {
   const [errors, setErrors] = useState<{ subtitle_id: number, error: string }[]>([])
   const [showErrors, setShowErrors] = useState(false)
   const [confirmCancel, setConfirmCancel] = useState(false)
+  // v3: track cancel state để show title "Đã hủy" và đóng nhanh
+  const [cancelled, setCancelled] = useState(false)
   const hideTimerRef = useRef<number | null>(null)
   const startedAtRef = useRef<number | null>(null)
   const completedRef = useRef<number>(0)
@@ -47,6 +49,7 @@ export default function BulkTTSProgress({ projectId }: Props) {
       }
       if (!visible) {
         setVisible(true)
+        setCancelled(false)   // reset cancel flag mỗi lần bắt đầu mới
         startedAtRef.current = Date.now()
         completedRef.current = 0
         totalRef.current = (running ? 1 : 0) + pending.length
@@ -57,23 +60,24 @@ export default function BulkTTSProgress({ projectId }: Props) {
         const cur = (running ? 1 : 0) + pending.length
         const remaining = totalRef.current - completedRef.current
         if (cur > remaining) {
-          // Có sub mới enqueue → tăng total
           totalRef.current += (cur - remaining)
         }
       }
     } else {
-      // Queue rỗng → tăng completed = total, ẩn sau 3s
+      // Queue rỗng → ẩn ngay nếu cancelled (500ms), hoặc 3s nếu hoàn tất bình thường
       if (visible && hideTimerRef.current == null) {
         completedRef.current = totalRef.current
+        const closeDelay = cancelled ? 1500 : 3000
         hideTimerRef.current = window.setTimeout(() => {
           setVisible(false)
+          setCancelled(false)
           startedAtRef.current = null
           completedRef.current = 0
           totalRef.current = 0
-        }, 3000)
+        }, closeDelay)
       }
     }
-  }, [running, pending.length, visible])
+  }, [running, pending.length, visible, cancelled])
 
   // Track completed: mỗi khi running đổi từ X → null hoặc X → Y, tính 1 sub xong
   const prevRunningRef = useRef<number | null>(null)
@@ -112,6 +116,7 @@ export default function BulkTTSProgress({ projectId }: Props) {
 
   const doCancel = async () => {
     setConfirmCancel(false)
+    setCancelled(true)   // ← để title hiện "Đã hủy" và close sau 1.5s
     try {
       await api.post(`/tts/queue/cancel/${projectId}`)
       // Reset total ngay để UI cập nhật đúng (chỉ còn sub đang chạy nếu có)
@@ -132,7 +137,10 @@ export default function BulkTTSProgress({ projectId }: Props) {
 
   let bgColor = 'bg-blue-600'
   let title = '🎙️ Đang tạo TTS'
-  if (isComplete) {
+  if (cancelled) {
+    bgColor = 'bg-zinc-600'
+    title = '⏹ Đã hủy'
+  } else if (isComplete) {
     bgColor = errors.length > 0 ? 'bg-amber-600' : 'bg-emerald-600'
     title = errors.length > 0 ? '⚠️ Hoàn tất (có lỗi)' : '✅ Hoàn tất'
   }

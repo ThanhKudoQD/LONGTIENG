@@ -58,51 +58,43 @@ function QueueClock() {
   )
 }
 
-/** Badge cảm xúc + cường độ (từ pipeline v2 dịch).
- *  14 emotion code chuẩn, mỗi cái 1 màu + nhãn ngắn.
+/** Badge mode giọng (3 mode: BT / Buồn / Giận).
+ *  Đã được backend tính sẵn qua emotion_to_mode → trả về field `voice_mode`.
+ *  Click vào để xem emotion gốc + intensity (tooltip).
  */
-const EMOTION_BADGE: Record<string, { label: string; color: string }> = {
-  neutral:     { label: 'BT',     color: '#6B7280' },
-  happy:       { label: 'Vui',    color: '#CA8A04' },
-  sad:         { label: 'Buồn',   color: '#2563EB' },
-  angry:       { label: 'Giận',   color: '#DC2626' },
-  cold:        { label: 'Lạnh',   color: '#475569' },
-  tense:       { label: 'Căng',   color: '#EA580C' },
-  intimate:    { label: 'Thân',   color: '#DB2777' },
-  fearful:     { label: 'Sợ',     color: '#7C3AED' },
-  sarcastic:   { label: 'Mỉa',    color: '#B45309' },
-  shocked:     { label: 'Sốc',    color: '#0891B2' },
-  determined:  { label: 'Quyết',  color: '#059669' },
-  regretful:   { label: 'Hối',    color: '#BE123C' },
-  humorous:    { label: 'Hài',    color: '#65A30D' },
-  threatening: { label: 'Đe dọa', color: '#991B1B' },
+const MODE_BADGE: Record<string, { label: string; color: string; icon: string }> = {
+  normal: { label: 'BT',     color: '#6B7280', icon: '😐' },
+  sad:    { label: 'Buồn',   color: '#2563EB', icon: '😢' },
+  angry:  { label: 'Giận',   color: '#DC2626', icon: '😠' },
 }
 
-function EmotionPill({ emotion, intensity, isActive }: {
-  emotion: string
+function VoiceModePill({ mode, emotion, intensity, isOverride, isActive }: {
+  mode: string
+  emotion?: string | null
   intensity?: number | null
+  isOverride?: boolean
   isActive: boolean
 }) {
-  const cfg = EMOTION_BADGE[emotion]
-  if (!cfg) return null
-  const showIntensity = intensity != null && intensity !== 5
+  const cfg = MODE_BADGE[mode] || MODE_BADGE.normal
+  // Tooltip: hiển thị emotion gốc để user biết LLM đã gán gì
+  const tip = isOverride
+    ? `Mode (user set): ${cfg.label}${emotion ? ` · gốc: ${emotion} ·${intensity ?? 5}` : ''}`
+    : `Mode: ${cfg.label}${emotion ? ` · từ ${emotion} ·${intensity ?? 5}` : ''}`
   return (
     <span
-      title={`${emotion}${showIntensity ? ` · cường độ ${intensity}/10` : ''}`}
+      title={tip}
       style={{
         fontSize: 10, fontWeight: 700, padding: '1px 5px', borderRadius: 4,
         background: isActive ? cfg.color + '55' : cfg.color + '1f',
         color: isActive ? '#fff' : cfg.color,
         whiteSpace: 'nowrap',
         display: 'inline-flex', alignItems: 'center', gap: 2,
+        border: isOverride ? `1.5px solid ${cfg.color}` : 'none',
       }}
     >
+      <span style={{ fontSize: 11 }}>{cfg.icon}</span>
       {cfg.label}
-      {showIntensity && (
-        <span style={{ opacity: 0.7, fontWeight: 600, fontSize: 9 }}>
-          ·{intensity}
-        </span>
-      )}
+      {isOverride && <span style={{ opacity: 0.7, fontSize: 9 }}>✋</span>}
     </span>
   )
 }
@@ -122,12 +114,15 @@ interface RowProps {
   isQueueRunning: boolean // đang xử lý ở GPU (queue running)
   onClick: (e: React.MouseEvent, s: Subtitle) => void
   onDrop: (e: React.DragEvent, id: number) => void
-  onTTS: (e: React.MouseEvent, s: Subtitle) => void
+  // v3: onTTS có thêm forceMode (null = dùng auto theo emotion / mode hiện tại)
+  onTTS: (e: React.MouseEvent, s: Subtitle, forceMode?: string | null) => void
   onDeleteAudio: (e: React.MouseEvent, s: Subtitle) => void
   onDeleteSub: (e: React.MouseEvent, s: Subtitle) => void
   onRetranslate: (s: Subtitle) => void
   onSetVoiceMode: (s: Subtitle, mode: string) => void
   emotionVoiceOn: boolean
+  // v3: list mode khả dụng cho character của row này (đã upload audio)
+  availableModes: string[]
   top: number
   height: number
 }
@@ -136,7 +131,7 @@ const Row = React.memo(function Row({
   s, isActive, isSel, isDup, isOverlap, isTTSLoading, isPlaying,
   isQueued, isQueueRunning,
   onClick, onDrop, onTTS, onDeleteAudio, onDeleteSub, onRetranslate,
-  onSetVoiceMode, emotionVoiceOn,
+  onSetVoiceMode, emotionVoiceOn, availableModes,
   top, height,
 }: RowProps) {
   const char = s.character
@@ -210,15 +205,15 @@ const Row = React.memo(function Row({
               chưa gán
             </span>
           )}
-          {/* Emotion badge — từ pipeline v2 */}
-          {s.emotion && <EmotionPill emotion={s.emotion} intensity={s.intensity} isActive={isActive} />}
+          {/* Voice mode badge (3 mode: BT / Buồn / Giận) — computed từ emotion+intensity */}
+          <VoiceModePill mode={s.voice_mode || 'normal'} emotion={s.emotion} intensity={s.intensity} isOverride={!!s.tts_voice_mode} isActive={isActive} />
           {/* Voice mode override dropdown — hiện khi active + emotion voice ON */}
           {emotionVoiceOn && isActive && (
             <select
               value={s.tts_voice_mode || ''}
               onChange={e => { e.stopPropagation(); onSetVoiceMode(s, e.target.value) }}
               onClick={e => e.stopPropagation()}
-              title="Override voice mode khi TTS dòng này"
+              title="Override mode khi TTS dòng này"
               style={{
                 fontSize: 10, fontWeight: 600, padding: '1px 4px', borderRadius: 4,
                 border: '1px solid rgba(255,255,255,0.3)',
@@ -227,21 +222,9 @@ const Row = React.memo(function Row({
               }}>
               <option value="" style={{ color:'#000' }}>🎯 Auto</option>
               <option value="normal" style={{ color:'#000' }}>😐 BT</option>
-              <option value="happy" style={{ color:'#000' }}>😊 Vui</option>
               <option value="sad" style={{ color:'#000' }}>😢 Buồn</option>
               <option value="angry" style={{ color:'#000' }}>😠 Giận</option>
-              <option value="intimate" style={{ color:'#000' }}>🥺 Thân</option>
             </select>
-          )}
-          {/* Voice mode badge khi không active nhưng có override */}
-          {emotionVoiceOn && !isActive && s.tts_voice_mode && (
-            <span title={`Voice mode override: ${s.tts_voice_mode}`}
-              style={{
-                fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 3,
-                background: '#A78BFA22', color: '#7C3AED',
-              }}>
-              🎭{s.tts_voice_mode.slice(0,3)}
-            </span>
           )}
           {/* Nút Dịch lại — chỉ hiện khi active + có original_text */}
           {s.original_text && isActive && (
@@ -284,53 +267,76 @@ const Row = React.memo(function Row({
         </span>
       </div>
 
-      {/* Col 4: action buttons — hiện khi hover hoặc active */}
-      <div className="sub-actions flex items-center gap-1 px-1.5 py-1.5 flex-shrink-0"
+      {/* Col 4: action buttons — 2x2 grid */}
+      <div className="sub-actions flex flex-col gap-1 px-1.5 py-1.5 flex-shrink-0"
         style={{ opacity: isActive ? 1 : 0, transition: 'opacity .12s' }}>
-        {/* TTS */}
-        <button onClick={e => onTTS(e, s)} disabled={isTTSLoading}
-          className="flex items-center gap-1 px-2 h-7 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40 flex-shrink-0"
-          style={{
-            background: isActive ? 'rgba(255,255,255,0.15)' : '#EFF6FF',
-            border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : '#BFDBFE'}`,
-            color: isActive ? '#fff' : '#3B82F6',
-          }}>
-          {isTTSLoading
-            ? <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin"/>
-            : <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M10 6A4 4 0 1 1 6 2a4 4 0 0 1 2.83 1.17L10 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M10 2v2.5H7.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          }
-          TTS
-        </button>
-
-        {/* Xóa audio */}
-        <button onClick={e => onDeleteAudio(e, s)} disabled={!s.audio_path}
-          className="flex items-center justify-center w-7 h-7 rounded transition-all active:scale-95 disabled:opacity-25 flex-shrink-0"
-          style={{
-            background: isActive ? 'rgba(255,255,255,0.1)' : '#fff',
-            border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : s.tts_done ? '#FCA5A5' : '#E5E7EB'}`,
-            color: isActive ? '#fff' : s.tts_done ? '#EF4444' : '#9CA3AF',
-          }}
-          title="Xóa audio">
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-            <path d="M2 4H4L6 1.5V10.5L4 8H2V4Z" fill="currentColor" opacity="0.7"/>
-            <line x1="8" y1="4" x2="11" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-            <line x1="11" y1="4" x2="8" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
-        </button>
-
-        {/* Xóa sub */}
-        <button onClick={e => onDeleteSub(e, s)}
-          className="flex items-center justify-center w-7 h-7 rounded transition-all active:scale-95 flex-shrink-0"
-          style={{
-            background: isActive ? 'rgba(255,255,255,0.1)' : '#fff',
-            border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : '#FECACA'}`,
-            color: isActive ? '#fff' : '#F87171',
-          }}
-          title="Xóa dòng">
-          <svg width="12" height="12" viewBox="0 0 13 13" fill="none">
-            <path d="M2 3h9M5 3V2h3v1M4 3l.5 7.5h4L9 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-        </button>
+        {/* Row 1: TTS BT + Xóa audio */}
+        <div className="flex items-center gap-1">
+          <button onClick={e => onTTS(e, s)} disabled={isTTSLoading}
+            className="flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40 flex-shrink-0 w-[68px]"
+            style={{
+              background: isActive ? 'rgba(255,255,255,0.15)' : '#EFF6FF',
+              border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : '#BFDBFE'}`,
+              color: isActive ? '#fff' : '#3B82F6',
+            }}
+            title="TTS — Bình thường">
+            {isTTSLoading
+              ? <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin"/>
+              : <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M10 6A4 4 0 1 1 6 2a4 4 0 0 1 2.83 1.17L10 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M10 2v2.5H7.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            }
+            <span>BT</span>
+          </button>
+          <button onClick={e => onDeleteAudio(e, s)} disabled={!s.audio_path}
+            className="flex items-center justify-center h-6 rounded transition-all active:scale-95 disabled:opacity-25 flex-shrink-0 w-[68px]"
+            style={{
+              background: isActive ? 'rgba(255,255,255,0.1)' : '#fff',
+              border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : s.tts_done ? '#FCA5A5' : '#E5E7EB'}`,
+              color: isActive ? '#fff' : s.tts_done ? '#EF4444' : '#9CA3AF',
+            }}
+            title="Xóa audio">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+              <path d="M2 4H4L6 1.5V10.5L4 8H2V4Z" fill="currentColor" opacity="0.7"/>
+              <line x1="8" y1="4" x2="11" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              <line x1="11" y1="4" x2="8" y2="7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+            <span className="text-[10px] ml-1">Xóa</span>
+          </button>
+        </div>
+        {/* Row 2: TTS Buồn + TTS Giận */}
+        <div className="flex items-center gap-1">
+          {(() => {
+            const hasSad = availableModes.includes('sad')
+            return (
+              <button onClick={e => onTTS(e, s, 'sad')} disabled={isTTSLoading || !hasSad}
+                className="flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-25 disabled:cursor-not-allowed flex-shrink-0 w-[68px]"
+                style={{
+                  background: isActive ? 'rgba(37,99,235,0.25)' : (hasSad ? '#EFF6FF' : '#F3F4F6'),
+                  border: `1px solid ${isActive ? 'rgba(147,197,253,0.5)' : (hasSad ? '#93C5FD' : '#D1D5DB')}`,
+                  color: isActive ? '#BFDBFE' : (hasSad ? '#2563EB' : '#9CA3AF'),
+                }}
+                title={hasSad ? "TTS — Buồn" : "Chưa upload ref audio Buồn"}>
+                <span style={{ fontSize: 11 }}>😢</span>
+                Buồn
+              </button>
+            )
+          })()}
+          {(() => {
+            const hasAngry = availableModes.includes('angry')
+            return (
+              <button onClick={e => onTTS(e, s, 'angry')} disabled={isTTSLoading || !hasAngry}
+                className="flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-25 disabled:cursor-not-allowed flex-shrink-0 w-[68px]"
+                style={{
+                  background: isActive ? 'rgba(220,38,38,0.25)' : (hasAngry ? '#FEF2F2' : '#F3F4F6'),
+                  border: `1px solid ${isActive ? 'rgba(252,165,165,0.5)' : (hasAngry ? '#FCA5A5' : '#D1D5DB')}`,
+                  color: isActive ? '#FECACA' : (hasAngry ? '#DC2626' : '#9CA3AF'),
+                }}
+                title={hasAngry ? "TTS — Tức giận" : "Chưa upload ref audio Tức giận"}>
+                <span style={{ fontSize: 11 }}>😠</span>
+                Giận
+              </button>
+            )
+          })()}
+        </div>
       </div>
     </div>
   )
@@ -351,6 +357,8 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const project         = useStore(s => s.project)
   // v3: emotion voice flag từ project
   const emotionVoiceOn = !!project?.use_emotion_voice
+  // v3: map character_id → available modes
+  const voiceModesByChar = useStore(s => s.voiceModesByCharacter)
 
   // Queue state — show icon trên row
   const ttsQueueRunning = useStore(s => s.ttsQueueRunning)
@@ -521,13 +529,15 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     window.dispatchEvent(new CustomEvent('subs_assigned', { detail: { subtitle_ids: [subId] } }))
   }, [characters, updateSubtitle])
 
-  const handleTTS = useCallback(async (e: React.MouseEvent, s: Subtitle) => {
+  const handleTTS = useCallback(async (e: React.MouseEvent, s: Subtitle, forceMode?: string | null) => {
     e.stopPropagation()
     // Đang xử lý ở GPU thì bỏ qua, đợi xong sẽ có kết quả
     if (useStore.getState().ttsQueueRunning === s.id) return
     // Gọi /tts/generate → backend tự enqueue priority high (move lên đầu)
     try {
-      await api.post('/tts/generate', { subtitle_id: s.id })
+      const body: any = { subtitle_id: s.id }
+      if (forceMode) body.force_voice_mode = forceMode
+      await api.post('/tts/generate', body)
     } catch (err) {
       console.error(err)
     }
@@ -654,6 +664,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
               onRetranslate={handleRetranslate}
               onSetVoiceMode={handleSetVoiceMode}
               emotionVoiceOn={emotionVoiceOn}
+              availableModes={s.character_id ? (voiceModesByChar[s.character_id] || []) : []}
               top={vi.start}
               height={vi.size}
             />

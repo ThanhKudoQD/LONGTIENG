@@ -21,6 +21,8 @@ interface EditorStore {
   project: Project | null
   subtitles: Subtitle[]
   characters: Character[]
+  // v3: map character_id → list mode khả dụng (đã upload audio)
+  voiceModesByCharacter: Record<number, string[]>
   activeSubId: number | null
   selectedIds: Set<number>
 
@@ -62,6 +64,7 @@ const useStore = create<EditorStore>((set, get) => ({
   project: null,
   subtitles: [],
   characters: [],
+  voiceModesByCharacter: {},
   activeSubId: null,
   selectedIds: new Set(),
   seekRequest: null,
@@ -176,15 +179,27 @@ const useStore = create<EditorStore>((set, get) => ({
   },
 
   loadProject: async (projectId) => {
-    const [proj, subs, chars] = await Promise.all([
+    const [proj, subs, chars, vmRes] = await Promise.all([
       api.get(`/projects/${projectId}`).then(r => r.data),
       api.get(`/subtitles/project/${projectId}`).then(r => r.data),
       api.get(`/characters/project/${projectId}`).then(r => r.data),
+      api.get(`/characters/project/${projectId}/voice-modes`).then(r => r.data).catch((e) => {
+        console.warn('[Store] voice-modes endpoint failed, fallback to empty:', e?.message)
+        return {}
+      }),
     ])
+    // vmRes là dict { "<char_id>": ["normal", "sad", ...] }
+    // Convert key sang number cho dễ dùng FE
+    const vm: Record<number, string[]> = {}
+    for (const [k, v] of Object.entries(vmRes || {})) {
+      vm[Number(k)] = Array.isArray(v) ? (v as string[]) : []
+    }
+    console.log('[Store] voiceModesByCharacter:', vm)
     set({
       project: proj,
       subtitles: subs,
       characters: chars,
+      voiceModesByCharacter: vm,
       activeSubId: null,
       selectedIds: new Set(),
     })
