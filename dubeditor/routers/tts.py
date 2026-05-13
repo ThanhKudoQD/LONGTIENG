@@ -215,17 +215,28 @@ async def do_generate(subtitle_id: int):
         s.audio_path  = audio_url
         s.tts_done    = True
         s.wav_duration = wav_dur
+        # v3: lưu mode đã thực sự dùng để FE hiển thị icon cạnh audio
+        if use_emotion_voice:
+            # Resolve lại mode đã dùng cho clear
+            actual_mode = force_mode
+            if not actual_mode:
+                from dubeditor.voice_modes import emotion_to_mode
+                actual_mode = emotion_to_mode(s.emotion, s.intensity)
+            s.audio_voice_mode = actual_mode
+        else:
+            s.audio_voice_mode = "normal"   # toggle OFF → luôn dùng normal
         db.commit()
         db.refresh(s)
 
         await broadcast(s.project_id, {
-            "type":        "tts_done",
-            "subtitle_id": s.id,
-            "audio_path":  audio_url,
-            "wav_duration": wav_dur,
+            "type":          "tts_done",
+            "subtitle_id":   s.id,
+            "audio_path":    audio_url,
+            "wav_duration":  wav_dur,
+            "audio_voice_mode": s.audio_voice_mode,
         })
 
-        logger.info(f"[DubTTS] DONE subtitle={subtitle_id} dur={wav_dur:.2f}s")
+        logger.info(f"[DubTTS] DONE subtitle={subtitle_id} dur={wav_dur:.2f}s mode={s.audio_voice_mode}")
     finally:
         db.close()
 

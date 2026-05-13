@@ -201,10 +201,27 @@ async def import_srt(
     if content is None:
         raise HTTPException(400, "Không decode được SRT (đã thử utf-8/utf-8-sig/gbk/gb18030)")
 
-    # Detect language qua tỉ lệ ký tự CJK trên toàn nội dung
+    # Detect language qua tỉ lệ ký tự CJK — CHỈ count trên TEXT LINES
+    # (bỏ qua SRT index lines + timestamp lines, vì chúng toàn ASCII)
     import re as _re
-    cjk_count = len(_re.findall(r'[\u4e00-\u9fff]', content))
-    text_chars = len(_re.findall(r'\S', content))   # bỏ whitespace
+
+    # Lọc ra các dòng text thuần (không phải số STT, không phải timestamp)
+    TS_RE = _re.compile(r'^\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->')
+    INDEX_RE = _re.compile(r'^\d+$')
+    text_only_lines = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if INDEX_RE.match(stripped):
+            continue
+        if TS_RE.match(stripped):
+            continue
+        text_only_lines.append(stripped)
+
+    text_blob = "\n".join(text_only_lines)
+    cjk_count = len(_re.findall(r'[\u4e00-\u9fff]', text_blob))
+    text_chars = len(_re.findall(r'\S', text_blob))
     cjk_ratio = cjk_count / max(text_chars, 1)
     is_chinese = cjk_ratio >= 0.3   # 30% trở lên ≈ chắc chắn là Trung
 

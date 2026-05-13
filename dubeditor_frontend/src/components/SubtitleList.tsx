@@ -36,6 +36,28 @@ function MicIcon({ active }: { active: boolean }) {
   )
 }
 
+/** v3: Icon mode đã dùng khi tạo audio (BT/Buồn/Giận) */
+const AUDIO_MODE_META: Record<string, { icon: string; color: string; label: string }> = {
+  normal: { icon: '😐', color: '#6B7280', label: 'Bình thường' },
+  sad:    { icon: '😭', color: '#2563EB', label: 'Buồn' },
+  angry:  { icon: '😡', color: '#DC2626', label: 'Tức giận' },
+}
+function AudioModeIcon({ mode, isActive }: { mode: string; isActive: boolean }) {
+  const meta = AUDIO_MODE_META[mode]
+  if (!meta) return null
+  return (
+    <span title={`Audio đã tạo với mode: ${meta.label}`}
+      style={{
+        fontSize: 18, lineHeight: 1, padding: '2px 4px', borderRadius: 4,
+        background: isActive ? 'rgba(255,255,255,0.15)' : meta.color + '20',
+        border: `1px solid ${isActive ? 'rgba(255,255,255,0.3)' : meta.color + '60'}`,
+        display: 'inline-flex', alignItems: 'center',
+      }}>
+      {meta.icon}
+    </span>
+  )
+}
+
 /** Icon spinner xoay khi sub đang xử lý ở queue worker */
 function QueueSpinner() {
   return (
@@ -64,8 +86,8 @@ function QueueClock() {
  */
 const MODE_BADGE: Record<string, { label: string; color: string; icon: string }> = {
   normal: { label: 'BT',     color: '#6B7280', icon: '😐' },
-  sad:    { label: 'Buồn',   color: '#2563EB', icon: '😢' },
-  angry:  { label: 'Giận',   color: '#DC2626', icon: '😠' },
+  sad:    { label: 'Buồn',   color: '#2563EB', icon: '😭' },
+  angry:  { label: 'Giận',   color: '#DC2626', icon: '😡' },
 }
 
 function VoiceModePill({ mode, emotion, intensity, isOverride, isActive }: {
@@ -88,11 +110,11 @@ function VoiceModePill({ mode, emotion, intensity, isOverride, isActive }: {
         background: isActive ? cfg.color + '55' : cfg.color + '1f',
         color: isActive ? '#fff' : cfg.color,
         whiteSpace: 'nowrap',
-        display: 'inline-flex', alignItems: 'center', gap: 2,
+        display: 'inline-flex', alignItems: 'center', gap: 3,
         border: isOverride ? `1.5px solid ${cfg.color}` : 'none',
       }}
     >
-      <span style={{ fontSize: 11 }}>{cfg.icon}</span>
+      <span style={{ fontSize: 18, lineHeight: 1 }}>{cfg.icon}</span>
       {cfg.label}
       {isOverride && <span style={{ opacity: 0.7, fontSize: 9 }}>✋</span>}
     </span>
@@ -165,10 +187,14 @@ const Row = React.memo(function Row({
         if (btns && !isActive) btns.style.opacity = '0'
       }}>
 
-      {/* Col 1: index + mic icon */}
+      {/* Col 1: index + mic icon + mode icon */}
       <div className="w-8 flex-shrink-0 flex flex-col items-center justify-center gap-1 py-2">
         <span style={{ fontSize: 11, fontFamily: 'monospace', color: isActive ? 'rgba(255,255,255,0.6)' : '#9CA3AF', fontWeight: 600 }}>{s.index}</span>
         {isQueueRunning ? <QueueSpinner /> : isQueued ? <QueueClock /> : <MicIcon active={s.tts_done} />}
+        {/* v3: icon mode đã dùng cho audio hiện tại */}
+        {s.tts_done && s.audio_voice_mode && (
+          <AudioModeIcon mode={s.audio_voice_mode} isActive={isActive} />
+        )}
       </div>
 
       {/* Col 2: color bar */}
@@ -207,25 +233,6 @@ const Row = React.memo(function Row({
           )}
           {/* Voice mode badge (3 mode: BT / Buồn / Giận) — computed từ emotion+intensity */}
           <VoiceModePill mode={s.voice_mode || 'normal'} emotion={s.emotion} intensity={s.intensity} isOverride={!!s.tts_voice_mode} isActive={isActive} />
-          {/* Voice mode override dropdown — hiện khi active + emotion voice ON */}
-          {emotionVoiceOn && isActive && (
-            <select
-              value={s.tts_voice_mode || ''}
-              onChange={e => { e.stopPropagation(); onSetVoiceMode(s, e.target.value) }}
-              onClick={e => e.stopPropagation()}
-              title="Override mode khi TTS dòng này"
-              style={{
-                fontSize: 10, fontWeight: 600, padding: '1px 4px', borderRadius: 4,
-                border: '1px solid rgba(255,255,255,0.3)',
-                background: s.tts_voice_mode ? '#A78BFA40' : 'rgba(255,255,255,0.08)',
-                color: '#fff', cursor: 'pointer', outline: 'none',
-              }}>
-              <option value="" style={{ color:'#000' }}>🎯 Auto</option>
-              <option value="normal" style={{ color:'#000' }}>😐 BT</option>
-              <option value="sad" style={{ color:'#000' }}>😢 Buồn</option>
-              <option value="angry" style={{ color:'#000' }}>😠 Giận</option>
-            </select>
-          )}
           {/* Nút Dịch lại — chỉ hiện khi active + có original_text */}
           {s.original_text && isActive && (
             <button
@@ -272,14 +279,14 @@ const Row = React.memo(function Row({
         style={{ opacity: isActive ? 1 : 0, transition: 'opacity .12s' }}>
         {/* Row 1: TTS BT + Xóa audio */}
         <div className="flex items-center gap-1">
-          <button onClick={e => onTTS(e, s)} disabled={isTTSLoading}
+          <button onClick={e => onTTS(e, s, 'normal')} disabled={isTTSLoading}
             className="flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40 flex-shrink-0 w-[68px]"
             style={{
               background: isActive ? 'rgba(255,255,255,0.15)' : '#EFF6FF',
               border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : '#BFDBFE'}`,
               color: isActive ? '#fff' : '#3B82F6',
             }}
-            title="TTS — Bình thường">
+            title="TTS — Bình thường (force mode normal)">
             {isTTSLoading
               ? <div className="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin"/>
               : <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M10 6A4 4 0 1 1 6 2a4 4 0 0 1 2.83 1.17L10 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M10 2v2.5H7.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
@@ -315,7 +322,7 @@ const Row = React.memo(function Row({
                   color: isActive ? '#BFDBFE' : (hasSad ? '#2563EB' : '#9CA3AF'),
                 }}
                 title={hasSad ? "TTS — Buồn" : "Chưa upload ref audio Buồn"}>
-                <span style={{ fontSize: 11 }}>😢</span>
+                <span style={{ fontSize: 18, lineHeight: 1 }}>😭</span>
                 Buồn
               </button>
             )
@@ -331,7 +338,7 @@ const Row = React.memo(function Row({
                   color: isActive ? '#FECACA' : (hasAngry ? '#DC2626' : '#9CA3AF'),
                 }}
                 title={hasAngry ? "TTS — Tức giận" : "Chưa upload ref audio Tức giận"}>
-                <span style={{ fontSize: 11 }}>😠</span>
+                <span style={{ fontSize: 18, lineHeight: 1 }}>😡</span>
                 Giận
               </button>
             )

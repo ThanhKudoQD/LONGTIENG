@@ -14,6 +14,7 @@ interface TtsBatch {
   id: number
   audio_path: string
   wav_duration?: number
+  audio_voice_mode?: string | null
 }
 
 const BATCH_INTERVAL_MS = 200
@@ -47,6 +48,7 @@ export function useProjectWS(projectId: number | null) {
               tts_done: true,
               audio_path: upd.audio_path,
               ...(upd.wav_duration !== undefined ? { wav_duration: upd.wav_duration } : {}),
+              ...(upd.audio_voice_mode !== undefined ? { audio_voice_mode: upd.audio_voice_mode } : {}),
             }
             changed = true
           }
@@ -56,8 +58,8 @@ export function useProjectWS(projectId: number | null) {
       })
     }
 
-    const enqueueTts = (id: number, audio_path: string, wav_duration?: number) => {
-      batchRef.current.push({ id, audio_path, wav_duration })
+    const enqueueTts = (id: number, audio_path: string, wav_duration?: number, audio_voice_mode?: string | null) => {
+      batchRef.current.push({ id, audio_path, wav_duration, audio_voice_mode })
       if (flushTimerRef.current == null) {
         flushTimerRef.current = window.setTimeout(flushBatch, BATCH_INTERVAL_MS)
       }
@@ -71,7 +73,7 @@ export function useProjectWS(projectId: number | null) {
       const msg = JSON.parse(e.data)
       if (msg.type === 'tts_done') {
         // PERF: batch thay vì gọi markTTSDone ngay
-        enqueueTts(msg.subtitle_id, msg.audio_path, msg.wav_duration)
+        enqueueTts(msg.subtitle_id, msg.audio_path, msg.wav_duration, msg.audio_voice_mode)
         return
       }
       if (msg.type === 'video_upload') {

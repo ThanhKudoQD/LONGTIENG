@@ -91,6 +91,8 @@ export interface Subtitle {
   tts_voice_mode?: string | null
   // v3 computed: mode hiện đang dùng (sẵn từ backend)
   voice_mode?: string
+  // v3: mode đã dùng khi tạo audio hiện tại
+  audio_voice_mode?: string | null
 }
 
 export interface Project {

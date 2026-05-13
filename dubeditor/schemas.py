@@ -119,6 +119,8 @@ class SubtitleOut(SubtitleBase):
     translation_version: int          = 1
     # v3: per-line voice mode override (user set manually)
     tts_voice_mode:     Optional[str] = None
+    # v3: mode đã dùng khi tạo audio hiện tại (read-only)
+    audio_voice_mode:   Optional[str] = None
     # v3 computed: mode được resolve từ (emotion, intensity, tts_voice_mode)
     # — hiển thị làm badge trên FE. Backend tính sẵn để FE consistent.
     voice_mode:         str           = "normal"
@@ -358,4 +360,4 @@ class GenrePackInfo(BaseModel):
     id:          str
     name_vi:     str
     name_zh:     str
-description: str
+    description: str

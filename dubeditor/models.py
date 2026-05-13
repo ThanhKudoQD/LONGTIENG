@@ -85,6 +85,9 @@ class Subtitle(Base):
     tts_done      = Column(Boolean, default=False)
     wav_duration  = Column(Float, nullable=True)
     tts_speed     = Column(Float, nullable=True)
+    # v3: mode đã dùng khi tạo audio (track cho UI hiển thị icon)
+    # Values: 'normal' | 'sad' | 'angry' | None
+    audio_voice_mode = Column(String, nullable=True)
     # ── v2 fields ────────────────────────────────────────────────────────────
     speaker_zh           = Column(String, nullable=True)      # Tên Trung của speaker (raw)
     speaker_confidence   = Column(String, default='low')      # high|mid|low

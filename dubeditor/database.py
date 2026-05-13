@@ -111,6 +111,8 @@ def _migrate_v2():
             add_col("subtitles", "translation_version", "INTEGER DEFAULT 1")
             # v3: per-line voice mode override
             add_col("subtitles", "tts_voice_mode", "TEXT")
+            # v3: mode đã dùng khi tạo audio (track cho UI)
+            add_col("subtitles", "audio_voice_mode", "TEXT")
 
         # roles
         if has_table("roles"):
