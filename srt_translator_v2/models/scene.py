@@ -1,185 +1,143 @@
 """
-Pydantic models cho Scene — phân cảnh kịch.
+Scene + Chunk models — v3.
 
-Khác với "shot" (cảnh quay), "scene" ở đây là đơn vị kịch bản:
-1 địa điểm + 1 mốc thời gian + 1 nhóm nhân vật + 1 mục đích kịch.
+Cấu trúc 3 tầng: Arc → Chunk → Scene
+- Arc (đã có trong Bible.world.arcs): 3-8 đoạn cốt truyện lớn
+- Chunk: 3-5 chunks/arc, ~250-400 dòng. Là "chương" có ý nghĩa kịch
+- Scene: chia tiếp trong chunk (nếu chunk > 100 dòng). Là cảnh con
+
+Bước 2 trả về Chunks + Scenes lồng nhau trong 1 call/arc.
 """
 from __future__ import annotations
-from typing import Optional, Literal
-from pydantic import BaseModel, Field, field_validator
+from typing import Optional
+from pydantic import BaseModel, Field
 
 
-EmotionTag = Literal[
-    "neutral",       # bình thường
-    "happy",         # vui
-    "sad",           # buồn
-    "angry",         # giận
-    "cold",          # lạnh nhạt
-    "tense",         # căng thẳng
-    "intimate",      # thân mật
-    "fearful",       # sợ hãi
-    "sarcastic",     # mỉa mai
-    "shocked",       # sốc
-    "determined",    # quyết tâm
-    "regretful",     # hối hận
-    "humorous",      # hài hước
-    "threatening",   # đe dọa
-]
+# ─────────────────────────────────────────────────────────────────
+# EMOTION (chuẩn 14 loại)
+# ─────────────────────────────────────────────────────────────────
 
-
-# Map các biến thể LLM hay trả → emotion chuẩn.
-# Bao gồm: synonyms tiếng Anh, gerund forms, lower/upper case, tiếng Việt.
-_EMOTION_MAP = {
-    # Chuẩn (case-insensitive)
-    "neutral": "neutral", "happy": "happy", "sad": "sad", "angry": "angry",
-    "cold": "cold", "tense": "tense", "intimate": "intimate", "fearful": "fearful",
-    "sarcastic": "sarcastic", "shocked": "shocked", "determined": "determined",
-    "regretful": "regretful", "humorous": "humorous", "threatening": "threatening",
-
-    # Synonyms / variations tiếng Anh
-    "calm": "neutral", "normal": "neutral", "casual": "neutral", "matter-of-fact": "neutral",
-    "joyful": "happy", "cheerful": "happy", "excited": "happy", "delighted": "happy",
-    "amused": "happy", "satisfied": "happy", "pleased": "happy", "content": "happy",
-    "sorrowful": "sad", "depressed": "sad", "melancholy": "sad", "down": "sad",
-    "heartbroken": "sad", "disappointed": "sad", "tearful": "sad", "grief": "sad",
-    "mad": "angry", "furious": "angry", "irritated": "angry", "annoyed": "angry",
-    "frustrated": "angry", "rage": "angry", "outraged": "angry", "indignant": "angry",
-    "distant": "cold", "aloof": "cold", "detached": "cold", "indifferent": "cold",
-    "icy": "cold", "stern": "cold",
-    "anxious": "tense", "nervous": "tense", "stressed": "tense", "uneasy": "tense",
-    "worried": "tense", "apprehensive": "tense",
-    "loving": "intimate", "affectionate": "intimate", "tender": "intimate",
-    "romantic": "intimate", "passionate": "intimate", "warm": "intimate",
-    "afraid": "fearful", "scared": "fearful", "frightened": "fearful", "terrified": "fearful",
-    "panic": "fearful", "panicked": "fearful",
-    "mocking": "sarcastic", "ironic": "sarcastic", "snarky": "sarcastic", "scornful": "sarcastic",
-    "contemptuous": "sarcastic", "derisive": "sarcastic",
-    "surprised": "shocked", "astonished": "shocked", "stunned": "shocked",
-    "amazed": "shocked", "shock": "shocked",
-    "resolute": "determined", "firm": "determined", "decisive": "determined",
-    "confident": "determined", "assertive": "determined",
-    "remorseful": "regretful", "apologetic": "regretful", "guilty": "regretful",
-    "ashamed": "regretful", "rueful": "regretful",
-    "funny": "humorous", "playful": "humorous", "teasing": "humorous", "witty": "humorous",
-    "menacing": "threatening", "intimidating": "threatening", "ominous": "threatening",
-    "warning": "threatening", "hostile": "threatening",
-
-    # Map "không nằm trong enum" → emotion gần nhất theo nghĩa
-    "innocent": "neutral",       # vô tư / ngây thơ → tone bình thường
-    "confused": "tense",         # bối rối → căng thẳng
-    "shy": "intimate",           # ngại → thân mật nhẹ
-    "embarrassed": "intimate",   # ngượng → thân mật
-    "hopeful": "happy",
-    "hopeless": "sad",
-    "lonely": "sad",
-    "bored": "neutral",
-    "curious": "neutral",
-    "thoughtful": "neutral",
-    "pensive": "neutral",
-    "skeptical": "sarcastic",
-    "suspicious": "tense",
-    "jealous": "angry",
-    "envious": "angry",
-    "proud": "determined",
-    "arrogant": "cold",
-    "humble": "neutral",
-    "grateful": "happy",
-    "disgusted": "sarcastic",
-    "tired": "neutral",
-    "exhausted": "sad",
-    "energetic": "happy",
-    "longing": "intimate",
-    "nostalgic": "regretful",
-    "bitter": "regretful",
-    "vengeful": "threatening",
-
-    # Tiếng Việt — phòng trường hợp LLM trả tiếng Việt
-    "bình thường": "neutral", "vui": "happy", "buồn": "sad", "giận": "angry",
-    "lạnh nhạt": "cold", "căng thẳng": "tense", "thân mật": "intimate",
-    "sợ": "fearful", "sợ hãi": "fearful", "mỉa mai": "sarcastic",
-    "sốc": "shocked", "quyết tâm": "determined", "hối hận": "regretful",
-    "hài hước": "humorous", "đe dọa": "threatening",
+EMOTIONS = {
+    "neutral", "happy", "sad", "angry", "cold", "tense",
+    "intimate", "fearful", "sarcastic", "shocked", "determined",
+    "regretful", "humorous", "threatening",
 }
 
 
-def normalize_emotion(v) -> Optional[str]:
-    """Chuẩn hóa giá trị emotion từ LLM về enum chuẩn.
+def normalize_emotion(value: Optional[str]) -> str:
+    """Normalize emotion từ output LLM về 1 trong 14 loại chuẩn."""
+    if not value:
+        return "neutral"
+    v = str(value).strip().lower()
+    if v in EMOTIONS:
+        return v
+    # Aliases
+    aliases = {
+        "calm": "neutral", "joyful": "happy", "joy": "happy",
+        "depressed": "sad", "melancholy": "sad", "grief": "sad",
+        "furious": "angry", "mad": "angry", "rage": "angry",
+        "indifferent": "cold", "distant": "cold",
+        "anxious": "tense", "nervous": "tense", "worried": "tense",
+        "loving": "intimate", "tender": "intimate", "romantic": "intimate",
+        "scared": "fearful", "afraid": "fearful",
+        "mocking": "sarcastic", "ironic": "sarcastic",
+        "surprised": "shocked", "astonished": "shocked",
+        "resolute": "determined", "firm": "determined",
+        "remorseful": "regretful", "guilty": "regretful",
+        "playful": "humorous", "funny": "humorous",
+        "menacing": "threatening", "ominous": "threatening",
+    }
+    return aliases.get(v, "neutral")
 
-    Trả về None nếu input rỗng/None.
-    Trả về 'neutral' nếu không match được tag nào (fallback an toàn).
-    """
-    if v is None:
-        return None
-    v = str(v).strip().lower()
-    if not v:
-        return None
-    # Bỏ ký tự dư (vd: "angry!" → "angry")
-    v_clean = v.rstrip(".,!?:;").strip()
-    return _EMOTION_MAP.get(v_clean, "neutral")
 
+# ─────────────────────────────────────────────────────────────────
+# SCENE — cảnh con trong chunk
+# ─────────────────────────────────────────────────────────────────
 
 class Scene(BaseModel):
     """1 phân cảnh kịch."""
-    index: int = Field(description="Thứ tự trong phim, 0-based")
+    r: tuple[int, int]                                # [start_line, end_line]
+    ch: list[str] = Field(default_factory=list)       # characters_present (zh names)
+    e: str = "neutral"                                # emotion_primary
+    loc: str = ""                                     # location
+    tag: Optional[str] = None                         # "HOOK" / "PEAK" / None
 
-    # Ranh giới
-    start_line: int = Field(description="Index dòng SRT bắt đầu (1-based)")
-    end_line: int = Field(description="Index dòng SRT kết thúc (inclusive)")
-    start_time_sec: float = Field(description="Thời gian bắt đầu")
-    end_time_sec: float = Field(description="Thời gian kết thúc")
+    # Suy ra từ tag
+    @property
+    def is_hook(self) -> bool:
+        return self.tag == "HOOK"
 
-    # Bối cảnh
-    location: str = Field(default="", description="vd: 'bệnh viện, đêm'")
-    time_of_day: Optional[str] = Field(default=None, description="vd: 'đêm', 'sáng sớm'")
+    @property
+    def is_emotion_peak(self) -> bool:
+        return self.tag == "PEAK"
 
-    # Nhân vật trong cảnh (zh names, để match Bible.cast)
-    characters_present: list[str] = Field(
-        default_factory=list,
-        description="List tên Trung của nhân vật xuất hiện. Có thể có 'phụ_1', '?' cho chưa rõ"
-    )
+    @property
+    def start_line(self) -> int:
+        return self.r[0]
 
-    # Cảm xúc
-    emotion_primary: EmotionTag = "neutral"
-    emotion_arc: str = Field(
-        default="",
-        description="Cảm xúc tiến triển trong cảnh, vd: 'bình thường → căng → bùng nổ'"
-    )
+    @property
+    def end_line(self) -> int:
+        return self.r[1]
 
-    # Nội dung
-    summary: str = Field(description="Tóm tắt 1 câu cảnh xảy ra cái gì")
-    purpose: str = Field(
-        default="",
-        description="Mục đích kịch, vd: 'thiết lập xung đột giữa A và B'"
-    )
-
-    # Liên kết arc
-    story_arc_index: Optional[int] = Field(default=None, description="Thuộc arc số mấy")
-
-    # Flags
-    is_hook: bool = Field(default=False, description="Cảnh cliffhanger / hook quan trọng")
-    is_emotion_peak: bool = Field(default=False, description="Cảnh đỉnh cảm xúc — cần review tay")
-
-    # Status (sau khi xử lý)
-    speaker_done: bool = False
-    translation_done: bool = False
-    polish_done: bool = False
-
-    @field_validator("emotion_primary", mode="before")
-    @classmethod
-    def _norm_emotion(cls, v):
-        norm = normalize_emotion(v)
-        return norm if norm else "neutral"
+    @property
+    def emotion_primary(self) -> str:
+        return normalize_emotion(self.e)
 
 
-class SceneMap(BaseModel):
-    """Tập hợp toàn bộ scene của 1 phim."""
-    scenes: list[Scene] = Field(default_factory=list)
-    total_lines: int = 0
-    total_duration_sec: float = 0.0
+# ─────────────────────────────────────────────────────────────────
+# CHUNK — chương trong arc
+# ─────────────────────────────────────────────────────────────────
 
-    def get_scene_for_line(self, line_index: int) -> Optional[Scene]:
-        """Tìm scene chứa 1 dòng SRT cụ thể."""
-        for s in self.scenes:
-            if s.start_line <= line_index <= s.end_line:
-                return s
+class Chunk(BaseModel):
+    """1 chunk (chương) trong arc."""
+    r: tuple[int, int]                                # [start_line, end_line]
+    t: str = ""                                       # Title chunk (vd "Lần đầu gặp gỡ")
+    arc_index: int = 0                                # Thuộc arc nào
+    scenes: list[Scene] = Field(default_factory=list) # Scenes con (có thể rỗng nếu chunk ngắn)
+
+    @property
+    def start_line(self) -> int:
+        return self.r[0]
+
+    @property
+    def end_line(self) -> int:
+        return self.r[1]
+
+    @property
+    def line_count(self) -> int:
+        return self.r[1] - self.r[0] + 1
+
+    def get_characters_in_chunk(self) -> list[str]:
+        """Tổng hợp characters present trong tất cả scenes của chunk."""
+        if not self.scenes:
+            return []
+        seen = set()
+        result = []
+        for sc in self.scenes:
+            for ch in sc.ch:
+                if ch not in seen:
+                    seen.add(ch)
+                    result.append(ch)
+        return result
+
+
+class ChunkMap(BaseModel):
+    """Toàn bộ chunks của phim."""
+    chunks: list[Chunk] = Field(default_factory=list)
+
+    def get_chunk_for_line(self, line_idx: int) -> Optional[Chunk]:
+        """Tìm chunk chứa dòng line_idx."""
+        for c in self.chunks:
+            if c.start_line <= line_idx <= c.end_line:
+                return c
+        return None
+
+    def get_scene_for_line(self, line_idx: int) -> Optional[Scene]:
+        """Tìm scene chứa dòng line_idx."""
+        chunk = self.get_chunk_for_line(line_idx)
+        if not chunk:
+            return None
+        for sc in chunk.scenes:
+            if sc.start_line <= line_idx <= sc.end_line:
+                return sc
         return None

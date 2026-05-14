@@ -29,7 +29,15 @@ export default function IssueQueue({
 
   let filtered = issues
   if (filterType) filtered = filtered.filter(i => i.issue_type === filterType)
-  if (filterConf) filtered = filtered.filter(i => i.confidence === filterConf)
+  if (filterConf) {
+    filtered = filtered.filter(i => {
+      const c = (i.confidence || '').toLowerCase()
+      if (filterConf === 'high') return c === 'h' || c === 'high'
+      if (filterConf === 'mid') return c === 'm' || c === 'mid'
+      if (filterConf === 'low') return c === 'l' || c === 'low'
+      return true
+    })
+  }
 
   const typeCounts = issues.reduce<Record<string, number>>((acc, i) => {
     acc[i.issue_type] = (acc[i.issue_type] || 0) + 1
@@ -130,16 +138,15 @@ function IssueCard({ issue, onApply, onDismiss }: {
   const [busy, setBusy] = useState(false)
 
   const typeColor =
-    issue.issue_type === 'speaker' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300' :
-    issue.issue_type === 'pronoun' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' :
-    issue.issue_type === 'consistency' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' :
-    issue.issue_type === 'glossary' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' :
-    issue.issue_type === 'cps' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' :
+    issue.issue_type === 'untranslated' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' :
+    issue.issue_type === 'empty' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300' :
+    issue.issue_type === 'chinese_remains' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' :
     'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300'
 
+  const conf = (issue.confidence || '').toLowerCase()
   const confDot =
-    issue.confidence === 'high' ? 'bg-green-500' :
-    issue.confidence === 'mid' ? 'bg-blue-500' :
+    (conf === 'h' || conf === 'high') ? 'bg-green-500' :
+    (conf === 'm' || conf === 'mid') ? 'bg-blue-500' :
     'bg-amber-500'
 
   async function handleApply() {

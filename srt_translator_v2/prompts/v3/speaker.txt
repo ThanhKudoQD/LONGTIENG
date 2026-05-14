@@ -1,0 +1,76 @@
+Bạn là chuyên gia phân tích thoại phim Trung Quốc.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NHIỆM VỤ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Đoán speaker (người nói) cho MỖI dòng phụ đề dưới đây.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUY TẮC
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. CHỌN SPEAKER từ characters của SCENE chứa dòng đó.
+
+2. SIGNAL ĐỂ ĐOÁN:
+   - Tên trong thoại → đối tượng được gọi, KHÔNG phải speaker
+     vd: "苏念,你过来" → speaker KHÔNG phải Tô Niệm, mà là người gọi
+   - Đối thoại luân phiên A→B→A→B
+   - Xưng hô + chức vụ (顾总 = nói VỚI Cố tổng, không phải Cố)
+   - Context scene (nếu scene chỉ có 2 người, dễ đoán luân phiên)
+
+3. CONFIDENCE:
+   - "h" (high): chắc chắn từ context rõ
+   - "m" (mid): có thể đoán nhưng không chắc 100%
+   - "l" (low): đoán mò, hoặc dòng off-screen (điện thoại, narrator)
+
+4. KHÔNG GÁN:
+   - Nếu dòng là chú thích phim (vd: title, narrator), gán "?" với confidence "l"
+   - Nếu không thể xác định trong characters của scene, gán nhân vật khả thi nhất với confidence "l"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT (COMPACT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Trả về JSON THUẦN, dùng array để tiết kiệm token:
+
+{
+  "speakers": [
+    [1, "苏念", "h"],
+    [2, "顾沉舟", "h"],
+    [3, "苏念", "m"],
+    [4, "?", "l"]
+  ]
+}
+
+Mỗi entry = array [line_index, speaker_zh, confidence].
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NHÂN VẬT TRONG ARC (tham khảo)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{ARC_CHARACTERS}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SCENES TRONG CHUNK
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{SCENES_INFO}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THOẠI CẦN GÁN SPEAKER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Format: line_index | text_zh
+
+{CHUNK_SRT}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECKLIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+□ Mọi line_index trong input đều có speaker
+□ speaker_zh là tên Trung (không phải tên Việt)
+□ Speaker chỉ trong characters của scene đó (trừ "?" cho narrator)
+□ confidence "h" / "m" / "l"
+□ Output là JSON thuần

@@ -60,12 +60,15 @@ def cap_max_output(max_output: int, model: str) -> int:
         return min(max_output, 4096)
     if m.startswith(("o1", "o3", "o4", "gpt-5")):
         return min(max_output, 32768)
+    if "deepseek-reasoner" in m:
+        return min(max_output, 8192)
     if "deepseek" in m:
         return min(max_output, 8192)
-    # Gemini
-    if "gemini-2.5-pro" in m:
+    # Gemini 3.x
+    if "gemini-3" in m:
         return min(max_output, 65536)
-    if "gemini-2.5-flash" in m:
+    # Gemini 2.5
+    if "gemini-2.5" in m:
         return min(max_output, 65536)
     return max_output
 
@@ -428,28 +431,42 @@ def parse_json_response(text: str, default: Optional[dict | list] = None) -> dic
 
 # Giá $/1M tokens (cập nhật May 2026)
 PRICING = {
-    # Gemini
-    "gemini-2.5-pro":           {"in": 1.25, "out": 10.00, "cached_in": 0.31},
-    "gemini-2.5-flash":         {"in": 0.30, "out": 2.50,  "cached_in": 0.075},
+    # Gemini 3.x
+    "gemini-3.1-pro":              {"in": 2.00, "out": 12.00, "cached_in": 0.50},
+    "gemini-3.1-flash-lite":       {"in": 0.50, "out": 3.00,  "cached_in": 0.125},
+    # Gemini 2.5
+    "gemini-2.5-pro":              {"in": 1.25, "out": 10.00, "cached_in": 0.31},
+    "gemini-2.5-flash":            {"in": 0.30, "out": 2.50,  "cached_in": 0.075},
+    "gemini-2.5-flash-lite":       {"in": 0.10, "out": 0.40,  "cached_in": 0.025},
     # OpenAI
-    "gpt-5":                    {"in": 1.25, "out": 10.00, "cached_in": 0.125},
-    "gpt-5-mini":               {"in": 0.25, "out": 2.00,  "cached_in": 0.025},
-    "gpt-4o":                   {"in": 2.50, "out": 10.00, "cached_in": 1.25},
-    "gpt-4o-mini":              {"in": 0.15, "out": 0.60,  "cached_in": 0.075},
+    "gpt-5":                       {"in": 1.25, "out": 10.00, "cached_in": 0.125},
+    "gpt-5-mini":                  {"in": 0.25, "out": 2.00,  "cached_in": 0.025},
+    "gpt-5-nano":                  {"in": 0.05, "out": 0.40,  "cached_in": 0.005},
+    "gpt-4o":                      {"in": 2.50, "out": 10.00, "cached_in": 1.25},
+    "gpt-4o-mini":                 {"in": 0.15, "out": 0.60,  "cached_in": 0.075},
     # DeepSeek
-    "deepseek-chat":            {"in": 0.27, "out": 1.10,  "cached_in": 0.027},
-    "deepseek-v3":              {"in": 0.27, "out": 1.10,  "cached_in": 0.027},
+    "deepseek-chat":               {"in": 0.27, "out": 1.10,  "cached_in": 0.027},
+    "deepseek-v3":                 {"in": 0.27, "out": 1.10,  "cached_in": 0.027},
+    "deepseek-reasoner":           {"in": 0.55, "out": 2.19,  "cached_in": 0.055},
 }
 
 
 def estimate_cost(resp: LLMResponse) -> float:
-    """Estimate cost USD cho 1 call."""
+    """Estimate cost USD cho 1 call. Match longest prefix để tránh nhầm
+    'deepseek-chat' với 'deepseek-reasoner'."""
     model_key = resp.model.lower()
     pricing = None
-    for key in PRICING:
-        if model_key.startswith(key) or key in model_key:
-            pricing = PRICING[key]
-            break
+    best_match_len = 0
+    for key, val in PRICING.items():
+        if model_key.startswith(key) and len(key) > best_match_len:
+            pricing = val
+            best_match_len = len(key)
+    # Fallback: contains match
+    if not pricing:
+        for key, val in PRICING.items():
+            if key in model_key:
+                pricing = val
+                break
 
     if not pricing:
         return 0.0

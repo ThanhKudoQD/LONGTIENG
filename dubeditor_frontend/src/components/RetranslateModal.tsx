@@ -1,10 +1,13 @@
 /**
- * RetranslateModal v2 — dịch lại 1 dòng phụ đề với hint từ user.
+ * RetranslateModal v3 — dịch lại 1 dòng phụ đề.
  *
- * Dùng Bible đã lưu trong DB làm context, có ngữ cảnh 3 dòng trước/sau.
- * Cho phép 1-3 variants, user chọn 1 để áp dụng.
+ * Backend luôn trả 2 bản:
+ * - new_text_v1: sát nghĩa (cho subtitle)
+ * - new_text_v2: thoát ý (cho lồng tiếng)
+ * 
+ * User chọn 1 bản để apply (lưu vào text active). Backend tự lưu cả 2 vào DB.
  */
-import React, { useState, useEffect } from 'react'
+import React, { useState } from 'react'
 import { translateApi } from '../api'
 
 interface Props {
@@ -13,7 +16,12 @@ interface Props {
   originalText: string
   currentText: string
   onClose: () => void
-  onApply: (newText: string) => void
+  onApply: (params: {
+    text: string
+    variant: 1 | 2
+    text_v1: string
+    text_v2: string | null
+  }) => void
 }
 
 interface StoredSettings {
@@ -22,7 +30,7 @@ interface StoredSettings {
   model: string
 }
 
-const STORAGE_KEY = 'translate_config_v2'
+const STORAGE_KEY = 'translate_config_v3'
 
 function loadSettings(): StoredSettings {
   try {
@@ -43,14 +51,22 @@ export default function RetranslateModal({
   projectId, subtitleId, originalText, currentText, onClose, onApply,
 }: Props) {
   const [hint, setHint] = useState('')
-  const [variants, setVariants] = useState(2)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [results, setResults] = useState<string[]>([])
+  const [resultV1, setResultV1] = useState<string>('')
+  const [resultV2, setResultV2] = useState<string | null>(null)
+  const [resultEmotion, setResultEmotion] = useState<string | null>(null)
+  const [resultIntensity, setResultIntensity] = useState<number | null>(null)
   const [tokens, setTokens] = useState<{ in: number; out: number } | null>(null)
 
   async function handleRun() {
-    setErr(''); setResults([])
+    setErr('')
+    setResultV1('')
+    setResultV2(null)
+    setResultEmotion(null)
+    setResultIntensity(null)
+    setTokens(null)
+
     const settings = loadSettings()
     if (!settings.api_key) {
       setErr('Chưa có API key. Vào trang Translate → Cấu hình để set.')
@@ -65,15 +81,27 @@ export default function RetranslateModal({
         api_key: settings.api_key,
         provider: settings.provider,
         model: settings.model,
-        variants,
       })
-      setResults(r.variants || [])
+      setResultV1(r.new_text_v1 || '')
+      setResultV2(r.new_text_v2 || null)
+      setResultEmotion(r.emotion || null)
+      setResultIntensity(r.intensity ?? null)
       setTokens({ in: r.tokens_in, out: r.tokens_out })
     } catch (e: any) {
       setErr(e?.response?.data?.detail || e?.message || 'Lỗi không rõ')
     } finally {
       setBusy(false)
     }
+  }
+
+  function pick(variant: 1 | 2) {
+    const text = variant === 1 ? resultV1 : (resultV2 || resultV1)
+    onApply({
+      text,
+      variant,
+      text_v1: resultV1,
+      text_v2: resultV2,
+    })
   }
 
   return (
@@ -84,7 +112,7 @@ export default function RetranslateModal({
 
         <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center">
           <h2 className="text-base font-semibold text-zinc-800 dark:text-zinc-100">
-            🔄 Dịch lại
+            🔄 Dịch lại — 2 phương án
           </h2>
           <div className="flex-1" />
           <button onClick={onClose} className="btn">✕</button>
@@ -125,25 +153,11 @@ export default function RetranslateModal({
             />
           </div>
 
-          {/* Variants */}
+          {/* Run button */}
           <div className="flex items-center gap-3">
-            <label className="text-[12px] text-zinc-600 dark:text-zinc-400">Số phương án:</label>
-            <div className="flex gap-1">
-              {[1, 2, 3].map(n => (
-                <button
-                  key={n}
-                  onClick={() => setVariants(n)}
-                  className={`px-3 py-1.5 rounded text-[12px] font-medium ${
-                    variants === n
-                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-                      : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600'
-                  }`}
-                >
-                  {n}
-                </button>
-              ))}
+            <div className="text-[11px] text-zinc-500 flex-1">
+              Tự động trả 2 bản: sát nghĩa (v1) + thoát ý (v2)
             </div>
-            <div className="flex-1" />
             <button
               onClick={handleRun}
               disabled={busy}
@@ -161,28 +175,63 @@ export default function RetranslateModal({
           )}
 
           {/* Results */}
-          {results.length > 0 && (
+          {resultV1 && (
             <div>
-              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-2">
-                Phương án mới {tokens && <span className="text-zinc-400 normal-case font-normal">· {tokens.in}/{tokens.out} tokens</span>}
+              <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-2 flex items-center gap-2">
+                <span>Kết quả</span>
+                {resultEmotion && (
+                  <span className="text-zinc-400 normal-case font-normal">
+                    · emotion: {resultEmotion}{resultIntensity ? `·${resultIntensity}` : ''}
+                  </span>
+                )}
+                {tokens && (
+                  <span className="text-zinc-400 normal-case font-normal ml-auto">
+                    {tokens.in}/{tokens.out} tokens
+                  </span>
+                )}
               </div>
-              <div className="space-y-2">
-                {results.map((text, i) => (
-                  <div
-                    key={i}
-                    className="px-3 py-2 rounded-lg border border-zinc-200 dark:border-zinc-700 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 cursor-pointer transition-colors group"
-                    onClick={() => onApply(text)}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-zinc-500">#{i + 1}</span>
-                      <span className="flex-1 text-sm text-zinc-800 dark:text-zinc-100">{text}</span>
-                      <button className="btn-primary text-[11px] opacity-0 group-hover:opacity-100 transition-opacity">
-                        Chọn
-                      </button>
-                    </div>
+
+              {/* V1 — sát nghĩa */}
+              <div className="px-3 py-3 rounded-lg border-2 border-blue-200 dark:border-blue-900 hover:border-blue-500 dark:hover:border-blue-500 bg-blue-50/30 dark:bg-blue-900/10 cursor-pointer transition-all group mb-2"
+                onClick={() => pick(1)}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[10px] font-bold text-blue-700 dark:text-blue-300 px-1.5 rounded bg-blue-100 dark:bg-blue-900/40">
+                    v1 · SÁT NGHĨA
+                  </span>
+                  <span className="text-[10px] text-zinc-500">Phù hợp subtitle, chính xác cao</span>
+                  <div className="flex-1" />
+                  <button className="btn-primary text-[11px] opacity-0 group-hover:opacity-100 transition-opacity">
+                    Chọn v1
+                  </button>
+                </div>
+                <div className="text-[14px] text-zinc-800 dark:text-zinc-100">
+                  {resultV1}
+                </div>
+              </div>
+
+              {/* V2 — thoát ý (nếu có) */}
+              {resultV2 ? (
+                <div className="px-3 py-3 rounded-lg border-2 border-purple-200 dark:border-purple-900 hover:border-purple-500 dark:hover:border-purple-500 bg-purple-50/30 dark:bg-purple-900/10 cursor-pointer transition-all group"
+                  onClick={() => pick(2)}>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] font-bold text-purple-700 dark:text-purple-300 px-1.5 rounded bg-purple-100 dark:bg-purple-900/40">
+                      v2 · THOÁT Ý
+                    </span>
+                    <span className="text-[10px] text-zinc-500">Phù hợp lồng tiếng, tự nhiên hơn</span>
+                    <div className="flex-1" />
+                    <button className="text-[11px] px-2 py-0.5 rounded bg-purple-600 hover:bg-purple-700 text-white opacity-0 group-hover:opacity-100 transition-opacity">
+                      Chọn v2
+                    </button>
                   </div>
-                ))}
-              </div>
+                  <div className="text-[14px] text-zinc-800 dark:text-zinc-100">
+                    {resultV2}
+                  </div>
+                </div>
+              ) : (
+                <div className="px-3 py-2 rounded-lg border border-dashed border-zinc-300 dark:border-zinc-700 text-[11px] text-zinc-400 italic">
+                  AI không tạo bản v2 (dòng đơn giản hoặc chỉ có 1 cách dịch tự nhiên)
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -17,12 +17,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import api, { translateApi, openProgressSSE, type ProgressMessage, type LLMCallMessage } from '../api'
 import type {
-  Project, TranslateStatus, Bible, Scene, StoryArc,
-  PolishIssue, GenrePackInfo, TranslateConfig,
+  Project, TranslateStatus, Bible, Scene, StoryArc, Chunk,
+  PolishIssue, TranslateConfig,
 } from '../types'
 import {
   EMOTION_LABELS, EMOTION_COLORS, ROLE_LABELS,
-  GENRE_MAIN_LABELS, GENRE_SUB_LABELS, ISSUE_TYPE_LABELS,
+  ISSUE_TYPE_LABELS,
 } from '../types'
 
 import ConfigPanel from './translate/ConfigPanel'
@@ -41,10 +41,10 @@ export default function TranslatePage({
   const [project, setProject] = useState<Project | null>(null)
   const [status, setStatus] = useState<TranslateStatus | null>(null)
   const [bible, setBible] = useState<Bible | null>(null)
+  const [chunks, setChunks] = useState<Chunk[]>([])
   const [scenes, setScenes] = useState<Scene[]>([])
   const [arcs, setArcs] = useState<StoryArc[]>([])
   const [issues, setIssues] = useState<PolishIssue[]>([])
-  const [genrePacks, setGenrePacks] = useState<GenrePackInfo[]>([])
 
   const [tab, setTab] = useState<Tab>('overview')
   const [showConfig, setShowConfig] = useState(false)
@@ -63,23 +63,23 @@ export default function TranslatePage({
     let cancelled = false
     async function load() {
       try {
-        const [proj, st, bib, scs, ars, iss, packs] = await Promise.all([
+        const [proj, st, bib, chks, scs, ars, iss] = await Promise.all([
           api.get<Project>(`/projects/${projectId}`).then(r => r.data),
           translateApi.getStatus(projectId),
           translateApi.getBible(projectId).catch(() => null),
+          translateApi.listChunks(projectId).catch(() => []),
           translateApi.listScenes(projectId).catch(() => []),
           translateApi.listStoryArcs(projectId).catch(() => []),
           translateApi.listIssues(projectId, { resolved: false }).catch(() => []),
-          translateApi.listGenrePacks().catch(() => []),
         ])
         if (cancelled) return
         setProject(proj)
         setStatus(st)
         setBible(bib)
+        setChunks(chks)
         setScenes(scs)
         setArcs(ars)
         setIssues(iss)
-        setGenrePacks(packs)
         setCurrentProgress(st.progress)
         setIsRunning(st.status === 'running')
       } catch (e: any) {
@@ -100,7 +100,6 @@ export default function TranslatePage({
         setCurrentProgress(msg.progress)
         setCurrentMessage(msg.message)
 
-        // Chỉ tắt isRunning khi nhận terminal event.
         if (msg.stage === 'done') {
           setIsRunning(false)
           refreshAll()
@@ -111,14 +110,13 @@ export default function TranslatePage({
 
         // Auto-refresh key data when corresponding stage completes
         if (msg.stage === 'bible_done') refreshBible()
-        if (msg.stage === 'scenes_done') refreshScenes()
+        if (msg.stage === 'chunks_done' || msg.stage === 'scenes_done') refreshChunks()
         if (msg.stage === 'speaker_done' || msg.stage === 'translate_done')
           refreshStatus()
         if (msg.stage === 'polish_done') refreshAll()
       },
       (call) => {
-        // LLM call event — append vào danh sách
-        setLlmCalls(prev => [...prev.slice(-99), call])  // keep last 100
+        setLlmCalls(prev => [...prev.slice(-99), call])
       },
       (err) => {
         console.warn('[SSE] error', err)
@@ -131,15 +129,17 @@ export default function TranslatePage({
   // ─── Refresh helpers ──────────────────────────────────────────────────────
 
   async function refreshAll() {
-    const [st, bib, scs, ars, iss] = await Promise.all([
+    const [st, bib, chks, scs, ars, iss] = await Promise.all([
       translateApi.getStatus(projectId),
       translateApi.getBible(projectId).catch(() => null),
+      translateApi.listChunks(projectId).catch(() => []),
       translateApi.listScenes(projectId).catch(() => []),
       translateApi.listStoryArcs(projectId).catch(() => []),
       translateApi.listIssues(projectId, { resolved: false }).catch(() => []),
     ])
     setStatus(st)
     setBible(bib)
+    setChunks(chks)
     setScenes(scs)
     setArcs(ars)
     setIssues(iss)
@@ -156,15 +156,20 @@ export default function TranslatePage({
     refreshStatus()
   }
 
-  async function refreshScenes() {
-    const [scs, ars] = await Promise.all([
+  async function refreshChunks() {
+    const [chks, scs, ars] = await Promise.all([
+      translateApi.listChunks(projectId).catch(() => []),
       translateApi.listScenes(projectId).catch(() => []),
       translateApi.listStoryArcs(projectId).catch(() => []),
     ])
+    setChunks(chks)
     setScenes(scs)
     setArcs(ars)
     refreshStatus()
   }
+
+  // Alias backwards compat
+  const refreshScenes = refreshChunks
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
@@ -320,7 +325,7 @@ export default function TranslatePage({
           📖 Bible {bible && <Pill>{bible.cast?.characters?.length || 0}</Pill>}
         </TabButton>
         <TabButton active={tab === 'scenes'} onClick={() => setTab('scenes')}>
-          🎬 Phân cảnh {scenes.length > 0 && <Pill>{scenes.length}</Pill>}
+          🎬 Chunks {chunks.length > 0 && <Pill>{chunks.length}</Pill>}
         </TabButton>
         <TabButton active={tab === 'subtitles'} onClick={() => setTab('subtitles')}>
           📝 Phụ đề {project.subtitle_count > 0 && <Pill>{project.subtitle_count}</Pill>}
@@ -342,6 +347,7 @@ export default function TranslatePage({
             project={project}
             status={status}
             bible={bible}
+            chunks={chunks}
             scenes={scenes}
             arcs={arcs}
             issues={issues}
@@ -360,6 +366,7 @@ export default function TranslatePage({
         {tab === 'scenes' && (
           <SceneList
             projectId={projectId}
+            chunks={chunks}
             scenes={scenes}
             arcs={arcs}
             issues={issues}
@@ -389,7 +396,6 @@ export default function TranslatePage({
         <ConfigPanel
           project={project}
           status={status}
-          genrePacks={genrePacks}
           onClose={() => setShowConfig(false)}
           onStart={handleStart}
           onRunStage={handleRunStage}
@@ -460,10 +466,11 @@ function Pill({ children, className = '' }: { children: React.ReactNode; classNa
 
 // ─── Overview tab ────────────────────────────────────────────────────────────
 
-function Overview({ project, status, bible, scenes, arcs, issues, stageDoneIcon }: {
+function Overview({ project, status, bible, chunks, scenes, arcs, issues, stageDoneIcon }: {
   project: Project
   status: TranslateStatus | null
   bible: Bible | null
+  chunks: Chunk[]
   scenes: Scene[]
   arcs: StoryArc[]
   issues: PolishIssue[]
@@ -472,6 +479,7 @@ function Overview({ project, status, bible, scenes, arcs, issues, stageDoneIcon 
   const totalLines = project.subtitle_count
   const speakerAssigned = status?.speaker_assigned_count || 0
   const translated = status?.translated_count || 0
+  const variants = status?.variants_count || 0
   const review = status?.review_count || 0
   const avgCps = status?.avg_cps || 0
   const cost = status?.cost_usd || 0
@@ -484,14 +492,19 @@ function Overview({ project, status, bible, scenes, arcs, issues, stageDoneIcon 
       {/* Stage pipeline */}
       <div className="bg-white dark:bg-zinc-950 rounded-xl border border-zinc-200 dark:border-zinc-800 p-5">
         <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-widest mb-3">
-          Pipeline 5 stage
+          Pipeline 5 stage (v3)
         </div>
         <div className="grid grid-cols-5 gap-2">
-          <StageCard icon={stageDoneIcon('bible')} title="1. Bible" desc={bible ? `${bible.cast.characters.length} nhân vật · ${bible.glossary.terms?.length || 0} thuật ngữ` : 'Phân tích phim'} />
-          <StageCard icon={stageDoneIcon('scenes')} title="2. Phân cảnh" desc={`${scenes.length} scenes · ${arcs.length} arcs`} />
-          <StageCard icon={stageDoneIcon('speaker')} title="3. Speaker" desc={speakerAssigned > 0 ? `${speakerAssigned}/${totalLines} dòng` : 'Gán nhân vật'} />
-          <StageCard icon={stageDoneIcon('translate')} title="4. Dịch" desc={translated > 0 ? `${translated} dòng` : 'Dịch per scene'} />
-          <StageCard icon={stageDoneIcon('polish')} title="5. Polish" desc={avgCps > 0 ? `CPS ${avgCps.toFixed(1)}` : 'CPS + QC'} />
+          <StageCard icon={stageDoneIcon('bible')} title="1. Bible"
+            desc={bible ? `${bible.cast.characters.length} nhân vật · ${bible.glossary.terms?.length || 0} thuật ngữ` : 'Phân tích phim'} />
+          <StageCard icon={stageDoneIcon('chunks')} title="2. Chunks"
+            desc={`${chunks.length} chunks · ${arcs.length} arcs · ${scenes.length} scenes`} />
+          <StageCard icon={stageDoneIcon('speaker')} title="3. Speaker"
+            desc={speakerAssigned > 0 ? `${speakerAssigned}/${totalLines} dòng` : 'Gán nhân vật'} />
+          <StageCard icon={stageDoneIcon('translate')} title="4. Dịch"
+            desc={translated > 0 ? `${translated} dòng${variants > 0 ? ` · ${variants} v2` : ''}` : 'Dịch per chunk'} />
+          <StageCard icon={stageDoneIcon('polish')} title="5. Retry"
+            desc={avgCps > 0 ? `CPS ${avgCps.toFixed(1)}` : 'Retry dòng thiếu'} />
         </div>
       </div>
 
@@ -522,32 +535,25 @@ function Overview({ project, status, bible, scenes, arcs, issues, stageDoneIcon 
             <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-widest">
               Bible v{bible.version}
             </div>
-            {bible.genre_pack_id && (
-              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
-                🎭 {bible.genre_pack_id}
-              </span>
-            )}
           </div>
 
           {/* Genre */}
-          {bible.world && (
+          {bible.world && bible.world.genre && bible.world.genre.length > 0 && (
             <div className="mb-3 text-sm">
               <span className="text-zinc-500">Thể loại: </span>
               <span className="font-medium text-zinc-800 dark:text-zinc-200">
-                {GENRE_MAIN_LABELS[bible.world.genre_main] || bible.world.genre_main}
+                {bible.world.genre.join(' · ')}
               </span>
-              {bible.world.genre_sub?.length > 0 && (
-                <span className="text-zinc-500">
-                  {' · '}{bible.world.genre_sub.map(g => GENRE_SUB_LABELS[g] || g).join(', ')}
-                </span>
+              {bible.world.era && (
+                <span className="text-zinc-500"> · {bible.world.era}</span>
               )}
             </div>
           )}
 
           {/* Plot */}
-          {bible.world?.plot_summary && (
+          {bible.world?.plot && (
             <div className="text-sm text-zinc-700 dark:text-zinc-300 mb-3">
-              {bible.world.plot_summary}
+              {bible.world.plot}
             </div>
           )}
 
@@ -557,7 +563,7 @@ function Overview({ project, status, bible, scenes, arcs, issues, stageDoneIcon 
               {bible.cast.characters.slice(0, 8).map((c, i) => (
                 <span key={i} className="px-2 py-1 rounded text-[11px] bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300">
                   <span className="font-medium">{c.vi}</span>
-                  <span className="ml-1 text-zinc-400">({ROLE_LABELS[c.role] || c.role})</span>
+                  <span className="ml-1 text-zinc-400">({ROLE_LABELS[c.role || 'phu'] || c.role || 'phụ'})</span>
                 </span>
               ))}
               {bible.cast.characters.length > 8 && (

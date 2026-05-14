@@ -1,141 +1,109 @@
 """
-Pydantic models cho Translation — output dịch.
+Translation models — v3.
+
+Thay đổi so với v2:
+- Mỗi dòng có 2 bản dịch: text_v1 (sát nghĩa) + text_v2 (thoát ý)
+- text_v2 có thể null nếu AI không tạo variant (dòng quá ngắn / không quan trọng)
+- variant_selected: 1 hoặc 2 (user chọn bản nào dùng cho TTS/export)
 """
 from __future__ import annotations
-from typing import Optional, Literal
-from pydantic import BaseModel, Field, field_validator
-
-from models.scene import EmotionTag, normalize_emotion
-
-
-ConfidenceLevel = Literal["high", "mid", "low"]
+from typing import Optional
+from pydantic import BaseModel, Field
+from .scene import normalize_emotion
 
 
-# Confidence: LLM hay trả "medium" thay vì "mid"
-_CONFIDENCE_MAP = {
-    "high": "high", "h": "high", "cao": "high",
-    "mid": "mid", "medium": "mid", "med": "mid", "m": "mid", "trung bình": "mid",
-    "low": "low", "l": "low", "thấp": "low",
-    "unknown": "low", "none": "low", "?": "low", "": "low",
-}
-
-
-def normalize_confidence(v) -> str:
-    if v is None:
-        return "low"
-    v = str(v).strip().lower()
-    return _CONFIDENCE_MAP.get(v, "low")
-
+# ─────────────────────────────────────────────────────────────────
+# SUBTITLE LINE (1 dòng phụ đề đã xử lý)
+# ─────────────────────────────────────────────────────────────────
 
 class SubtitleLine(BaseModel):
-    """1 dòng SRT đã xử lý."""
-    index: int = Field(description="STT trong SRT, 1-based")
+    """1 dòng phụ đề trong pipeline (in-memory)."""
+    index: int                                # line_index
+    start_time_sec: float = 0.0
+    end_time_sec: float = 0.0
+    text_zh: str = ""                         # Gốc tiếng Trung
 
-    # Timing
-    start_time_sec: float
-    end_time_sec: float
-
-    # Văn bản
-    text_zh: str = Field(description="Văn bản tiếng Trung gốc")
-    text_vi: str = Field(default="", description="Bản dịch tiếng Việt")
-    text_vi_draft: Optional[str] = Field(default=None, description="Bản nháp trước polish")
+    # Translation — 2 bản
+    text_v1: Optional[str] = None             # Sát nghĩa
+    text_v2: Optional[str] = None             # Thoát ý (nullable)
+    variant_selected: int = 1                 # 1 hoặc 2
 
     # Speaker
-    speaker_zh: Optional[str] = Field(default=None, description="Tên Trung của speaker, hoặc '?'")
-    speaker_vi: Optional[str] = Field(default=None, description="Tên Việt của speaker")
-    speaker_confidence: ConfidenceLevel = "low"
-    speaker_reason: str = Field(default="", description="Lý do gán speaker (debug)")
+    speaker_zh: Optional[str] = None
+    speaker_vi: Optional[str] = None
+    speaker_confidence: str = "low"           # h/m/l (high/mid/low)
+    speaker_reason: str = ""
 
-    # Cảm xúc
-    emotion: Optional[EmotionTag] = None
-    intensity: int = Field(default=5, ge=1, le=10, description="Cường độ cảm xúc 1-10")
+    # Emotion
+    emotion: Optional[str] = None
+    intensity: int = 5
 
-    # Liên kết scene
+    # Reference
+    chunk_index: Optional[int] = None
     scene_index: Optional[int] = None
-
-    # CPS
-    cps_value: Optional[float] = None
-    needs_condense: bool = False
-    condensed_from: Optional[str] = Field(default=None, description="Bản trước khi rút gọn")
+    arc_index: Optional[int] = None
 
     # Flags
     is_hook: bool = False
+    is_emotion_peak: bool = False
     needs_review: bool = False
     review_reason: str = ""
 
-    @field_validator("emotion", mode="before")
-    @classmethod
-    def _norm_emotion(cls, v):
-        # Cho phép None (chưa gán)
-        if v is None or v == "":
-            return None
-        return normalize_emotion(v)
+    # CPS (computed sau translate)
+    cps_value: Optional[float] = None
 
-    @field_validator("speaker_confidence", mode="before")
-    @classmethod
-    def _norm_conf(cls, v):
-        return normalize_confidence(v)
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end_time_sec - self.start_time_sec)
 
-    @field_validator("intensity", mode="before")
-    @classmethod
-    def _clamp_intensity(cls, v):
-        if v is None:
-            return 5
-        try:
-            i = int(float(v))   # LLM hay trả "7" hoặc 7.0
-        except (TypeError, ValueError):
-            return 5
-        return max(1, min(10, i))
+    @property
+    def text_active(self) -> str:
+        """Bản dịch đang dùng (theo variant_selected)."""
+        if self.variant_selected == 2 and self.text_v2:
+            return self.text_v2
+        return self.text_v1 or ""
 
+    @property
+    def has_chinese(self) -> bool:
+        """Còn ký tự tiếng Trung trong bản dịch active không."""
+        import re
+        text = self.text_active
+        if not text:
+            return False
+        return bool(re.search(r'[\u4e00-\u9fff]', text))
+
+
+# ─────────────────────────────────────────────────────────────────
+# TRANSLATION RESULT (kết quả cuối)
+# ─────────────────────────────────────────────────────────────────
 
 class TranslationResult(BaseModel):
-    """Kết quả cuối của 1 phim."""
+    """Kết quả pipeline."""
     lines: list[SubtitleLine] = Field(default_factory=list)
     total_lines: int = 0
+    translated_count: int = 0                 # Số dòng có text_v1
+    variants_count: int = 0                   # Số dòng có cả text_v2
     avg_cps: float = 0.0
     lines_needing_review: int = 0
 
-    def to_srt(self) -> str:
-        """Render thành SRT chuẩn."""
-        from core.srt_parser import format_time
-        blocks = []
-        for line in self.lines:
-            blocks.append(
-                f"{line.index}\n"
-                f"{format_time(line.start_time_sec)} --> {format_time(line.end_time_sec)}\n"
-                f"{line.text_vi}\n"
-            )
-        return "\n".join(blocks)
-
 
 # ─────────────────────────────────────────────────────────────────
-# Review issues (Polish output)
+# REVIEW ISSUE
 # ─────────────────────────────────────────────────────────────────
-
-IssueType = Literal[
-    "speaker",        # speaker gán sai
-    "pronoun",        # xưng hô không đúng
-    "consistency",    # không nhất quán xuyên phim
-    "glossary",       # tên/thuật ngữ sai so với Bible
-    "intensity",      # cường độ cảm xúc sai
-    "literal",        # dịch literal
-    "tts_unfriendly", # khó phát âm cho TTS
-    "cps",            # vẫn vượt CPS sau condense
-    "other",
-]
-
 
 class ReviewIssue(BaseModel):
+    """1 issue cần user review (chỉ dùng cho Bước 5 retry)."""
     line_index: int
-    issue_type: IssueType
-    description: str
-    current_text: str
+    issue_type: str = "untranslated"          # untranslated/empty/chinese_remains
+    current_text: str = ""
     suggested_text: Optional[str] = None
-    confidence: ConfidenceLevel = "mid"
-    evidence: str = ""
+    reason: str = ""
 
 
 class PolishReport(BaseModel):
+    """Kết quả Bước 5 (chỉ retry-based)."""
     issues: list[ReviewIssue] = Field(default_factory=list)
-    summary: dict[str, int] = Field(default_factory=dict, description="Đếm theo issue_type")
-    overall_rating: Literal["excellent", "good", "needs_minor_fix", "needs_major_fix"] = "good"
+    retried_count: int = 0                    # Số dòng đã retry
+    fixed_count: int = 0                      # Số dòng retry thành công
+    still_problematic: int = 0                # Vẫn còn vấn đề sau retry
+    summary: str = ""

@@ -36,6 +36,7 @@ class Project(Base):
     bibles     = relationship("Bible",     back_populates="project", cascade="all, delete")
     scenes     = relationship("Scene",     back_populates="project", cascade="all, delete", order_by="Scene.scene_index")
     story_arcs = relationship("StoryArc",  back_populates="project", cascade="all, delete", order_by="StoryArc.arc_index")
+    chunks     = relationship("Chunk",     back_populates="project", cascade="all, delete", order_by="Chunk.chunk_index")
 
 class Character(Base):
     __tablename__ = "characters"
@@ -100,6 +101,16 @@ class Subtitle(Base):
     text_draft           = Column(Text, nullable=True)        # Bản nháp trước polish
     is_hook              = Column(Boolean, default=False)
     translation_version  = Column(Integer, default=1)
+    # ── v3: 2 bản dịch (variant) ─────────────────────────────────────────────
+    # text_v1 = sát nghĩa (mặc định, dùng cho subtitle)
+    # text_v2 = thoát ý (cho lồng tiếng tự nhiên, nullable)
+    # variant_selected: 1 hoặc 2 — user chọn bản nào dùng cho TTS/export
+    # Field `text` luôn = text_v1 hoặc text_v2 theo variant_selected
+    text_v1              = Column(Text, nullable=True)
+    text_v2              = Column(Text, nullable=True)
+    variant_selected     = Column(Integer, default=1)
+    # ── v3: Reference chunk (để FE group) ────────────────────────────────────
+    chunk_id             = Column(Integer, ForeignKey("chunks.id"), nullable=True, index=True)
     # ── v3: TTS per-line override ────────────────────────────────────────────
     # Override voice mode khi TTS dòng này. Null = auto theo emotion.
     # Values: 'normal' | 'happy' | 'sad' | 'angry' | 'intimate' | null
@@ -168,6 +179,32 @@ class StoryArc(Base):
     scenes  = relationship("Scene", back_populates="story_arc")
 
 
+class Chunk(Base):
+    """Chunk v3 — chương trong arc.
+
+    Cấu trúc 3 tầng: Arc → Chunk → Scene
+    Mỗi arc có 3-8 chunks. Mỗi chunk ~250-400 dòng.
+    Chunk ≤ 100 dòng KHÔNG chia scenes (chunk = scene duy nhất).
+    """
+    __tablename__ = "chunks"
+    id              = Column(Integer, primary_key=True, index=True)
+    project_id      = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    arc_index       = Column(Integer, nullable=False)         # Thuộc arc nào
+    chunk_index     = Column(Integer, nullable=False)         # Index trong project (0-based)
+    title           = Column(String, default="")
+    start_line      = Column(Integer, nullable=False)
+    end_line        = Column(Integer, nullable=False)
+    # Status pipeline
+    status          = Column(String, default="pending")       # pending|speaker|translated|done|error
+    error_message   = Column(Text, nullable=True)
+    # Timestamps
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at      = Column(DateTime(timezone=True), onupdate=func.now())
+    # Relationships
+    project = relationship("Project", back_populates="chunks")
+    scenes  = relationship("Scene", back_populates="chunk", order_by="Scene.scene_index")
+
+
 class Scene(Base):
     """Phân cảnh kịch — đơn vị xử lý của pipeline v2.
 
@@ -195,6 +232,7 @@ class Scene(Base):
     purpose             = Column(Text, default="")
     # ── Liên kết ─────────────────────────────────────────────────────────────
     story_arc_id        = Column(Integer, ForeignKey("story_arcs.id"), nullable=True)
+    chunk_id            = Column(Integer, ForeignKey("chunks.id"), nullable=True, index=True)
     # ── Flags ────────────────────────────────────────────────────────────────
     is_hook             = Column(Boolean, default=False)
     is_emotion_peak     = Column(Boolean, default=False)
@@ -212,6 +250,7 @@ class Scene(Base):
     # ── Relationships ────────────────────────────────────────────────────────
     project   = relationship("Project", back_populates="scenes")
     story_arc = relationship("StoryArc", back_populates="scenes")
+    chunk     = relationship("Chunk", back_populates="scenes")
     subtitles = relationship("Subtitle", back_populates="scene")
 
 

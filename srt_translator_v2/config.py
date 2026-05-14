@@ -1,43 +1,45 @@
 """
-Cấu hình toàn cục cho pipeline.
+Cấu hình toàn cục cho pipeline v3.
 
-Đặt mặc định cho Short Drama (TTS-ready):
-- CPS tối đa 15 (Netflix là 17, nhưng short drama xem trên điện thoại nên chặt hơn)
-- Câu dịch độ dài tương đương câu gốc (±20%) — để TTS đồng bộ
+Thay đổi so với v2:
+- Bỏ Genre Pack (gộp vào Glossary của Bible)
+- Thêm ChunkConfig (size chunk + overlap)
+- Thêm VariantConfig (2 bản dịch)
+- Thêm CacheConfig được dùng thực sự (cached_prefix)
+- combine_b2_b3 cho phim ngắn
+
+CPS cho lồng tiếng:
+- TTS VoxCPM có thể chỉnh speed → CPS cao hơn subtitle thường được
+- Câu KHÔNG được < 1s (TTS lỗi giọng)
+- Câu rút phải ≥ 4-5 âm tiết
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 
 # ─────────────────────────────────────────────────────────────────
-# CPS & DURATION
+# CPS & DURATION (cho lồng tiếng)
 # ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class CPSConfig:
-    """Characters per second — kiểm soát tốc độ đọc phụ đề.
-
-    Lưu ý: hệ thống này dịch cho TTS LỒNG TIẾNG, không phải subtitle để đọc.
-    → CPS cho phép cao hơn chuẩn subtitle (Netflix ~17). TTS có thể chỉnh speed.
-    """
-    target: float = 17.0           # Mức lý tưởng (tự nhiên cho TTS)
-    max: float = 22.0              # Ngưỡng "trên ngưỡng" — vẫn OK
-    condense_threshold: float = 22.0  # Chỉ rút gọn khi VƯỢT mức này
-    emergency_max: float = 28.0    # Sau rút gọn vẫn không đạt → flag review
+    """Characters per second cho TTS lồng tiếng."""
+    target: float = 17.0           # Mức lý tưởng
+    max: float = 22.0              # Ngưỡng tối đa OK
+    condense_threshold: float = 22.0  # Vượt mức này mới rút (Bước 5 retry)
+    emergency_max: float = 28.0    # Sau retry vẫn vượt → flag review
+    min_duration: float = 1.0      # KHÔNG tạo câu dịch cho dòng < 1s
+    min_syllables: int = 4         # Câu rút phải ≥ 4 âm tiết
 
 
 @dataclass
 class DurationConfig:
-    """Đồng bộ độ dài câu Việt với câu Trung để TTS phát đúng nhịp.
-
-    Tỉ lệ char ZH → char VI: ~2.5-3.5 (1 char ZH ≈ 1 syllable, mất nhiều
-    thời gian phát âm; 1 char VI là 1 chữ cái Latin, nhanh hơn nhiều).
-    """
+    """Match độ dài câu Việt với câu Trung."""
     match_source: bool = True
-    tolerance_pct: float = 40.0    # ±40% — rộng rãi cho dịch tròn ý
-    zh_to_vi_ratio: float = 3.0    # Mặc định 3 char VI / 1 char ZH
+    tolerance_pct: float = 40.0    # ±40%
+    zh_to_vi_ratio: float = 3.0
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -48,67 +50,85 @@ ModelTier = Literal["heavy", "medium", "light"]
 
 @dataclass
 class ModelConfig:
-    """Phân tầng model theo độ phức tạp công việc."""
-    heavy: str = "gemini-2.5-pro"      # Bible, Translate (cần đọc dài + sáng tạo)
-    medium: str = "gemini-2.5-flash"   # Speaker, Scene detect, Consistency
-    light: str = "gemini-2.5-flash"    # CPS condense (đơn giản)
+    """Phân tầng model theo độ phức tạp."""
+    heavy: str = "gemini-2.5-pro"      # Bible (Cast), Translate
+    medium: str = "gemini-2.5-flash"   # Scene chia chunk, Speaker, Bible (World, Glossary)
+    light: str = "gemini-2.5-flash"    # Retry, Polish
 
 
 # ─────────────────────────────────────────────────────────────────
-# CACHING
+# CACHING (cached_prefix dùng cho Bước 4)
 # ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class CacheConfig:
-    """Prompt caching để tiết kiệm token."""
+    """Prompt caching cho Bước 4 Translate."""
     enabled: bool = True
-    min_tokens_to_cache: int = 1024  # Phần Bible phải > 1K token mới đáng cache
-    ttl_seconds: int = 3600          # 1 giờ — Gemini explicit cache
+    min_tokens_to_cache: int = 1024   # Phần cached_prefix phải > 1K mới đáng cache
+    ttl_seconds: int = 3600           # 1 giờ cho Gemini explicit cache
 
 
 # ─────────────────────────────────────────────────────────────────
-# BATCH STRATEGY (v3 — giảm LLM calls)
+# CHUNK STRATEGY (mới v3)
 # ─────────────────────────────────────────────────────────────────
 
 @dataclass
-class BatchConfig:
-    """Cấu hình batch để gộp calls, giảm overhead.
+class ChunkConfig:
+    """Cấu hình chia chunks ở Bước 2."""
+    target_lines: int = 300                   # Target ~250-400 dòng/chunk
+    min_lines: int = 100                      # Chunk ≤ này thì không chia scenes
+    max_lines: int = 500                      # Chunk vượt này → AI buộc chia nhỏ
+    overlap_lines: int = 30                   # Sliding window overlap cho Bước 4
+    max_chunks_per_arc: int = 8               # Max chunks/arc
 
-    Mỗi stage có 1 "lines per call" target. Pipeline sẽ gộp các unit nhỏ
-    (scene, hoặc chunk) cho đến khi đạt target hoặc tới boundary tự nhiên.
-    """
-    # Speaker: gom N dòng liên tiếp vào 1 call (bỏ scene boundary)
-    # Càng to càng tiết kiệm, nhưng prompt to → LLM dễ nhầm. ~80-100 là sweet spot.
-    speaker_lines_per_call: int = 80
 
-    # Translate: gom scenes thành arc-batches. Mỗi call ~N dòng MAX.
-    # Vẫn giữ scene info trong prompt (LLM track pronoun/emotion theo scene).
-    translate_lines_per_call: int = 60
-
-    # Polish: gom chunks lớn hơn (CPS check + glossary check)
-    polish_lines_per_call: int = 80
-
+# ─────────────────────────────────────────────────────────────────
+# COMPACT MODE (phim ngắn)
+# ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class CompactModeConfig:
-    """Mode compact cho phim ngắn (<200 subs).
+    """Mode cho phim ngắn — gộp một số bước để tiết kiệm calls."""
+    enabled: bool = False                       # Auto-bật theo size
+    auto_threshold_subs: int = 500              # < threshold → bật compact
+    combine_b2_b3: bool = False                 # Gộp Bước 2+3 vào 1 call/arc
 
-    Khi bật:
-      - Scene detect: ép max 5 scenes
-      - Speaker + Translate: thường 1 call duy nhất
-      - Polish: gộp 3 sub-stage thành 1 call/sub-stage
-    """
-    enabled: bool = False                   # Auto-bật theo size
-    auto_threshold_subs: int = 200          # < threshold → bật compact
-    max_scenes: int = 5                     # Ép tối đa 5 scenes
 
+# ─────────────────────────────────────────────────────────────────
+# VARIANT (2 bản dịch — mới v3)
+# ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class VariantConfig:
+    """Cấu hình 2 bản dịch (v1 sát nghĩa, v2 thoát ý)."""
+    mode: Literal["off", "important_only", "always"] = "important_only"
+    # off: chỉ 1 bản (text_v1)
+    # important_only: dòng quan trọng có 2 bản, dòng thường chỉ 1 bản
+    # always: tất cả dòng có 2 bản (tốn token nhất)
+
+    # Điều kiện coi dòng "quan trọng" (cho mode important_only)
+    min_chars: int = 5                          # Bỏ dòng quá ngắn
+    important_emotions: list[str] = field(default_factory=lambda: [
+        "intimate", "angry", "shocked", "determined", "sad", "fearful"
+    ])
+    important_intensity_min: int = 7            # Intensity ≥ 7 coi quan trọng
+    important_scenes: list[str] = field(default_factory=lambda: [
+        "HOOK", "PEAK"
+    ])
+
+
+# ─────────────────────────────────────────────────────────────────
+# CONCURRENCY
+# ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class ConcurrencyConfig:
-    """Số call API song song tối đa cho mỗi stage."""
-    speaker: int = 5      # Stage 3
-    translate: int = 5    # Stage 4
-    polish: int = 3       # Stage 5
+    """Số call API song song tối đa."""
+    bible: int = 3                  # Bible 3 sub-calls song song
+    chunks: int = 5                 # Bước 2: 5 arcs song song
+    speaker: int = 5                # Bước 3: 5 chunks song song
+    translate: int = 5              # Bước 4: 5 chunks song song
+    polish: int = 5                 # Bước 5: retry
     retry_max: int = 3
     retry_backoff_sec: float = 2.0
 
@@ -119,10 +139,9 @@ class ConcurrencyConfig:
 
 @dataclass
 class QualityConfig:
-    """Ngưỡng chất lượng để flag review."""
-    speaker_min_confidence: Literal["high", "mid", "low"] = "mid"
-    emotion_peaks_review: bool = True   # Cảnh emotion peak luôn review
-    back_translation: bool = False      # Bật cho Phase 2
+    """Ngưỡng chất lượng."""
+    speaker_min_confidence: Literal["h", "m", "l"] = "m"
+    emotion_peaks_review: bool = True
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -131,14 +150,10 @@ class QualityConfig:
 
 PROJECT_TYPES = {
     "short_drama": {
-        "description": "Short drama TQ gộp 60 tập × 2 phút thành 1 file",
-        # CPS cao hơn bình thường: TTS dub không phải subtitle đọc.
-        # Người xem nghe lồng tiếng, không phải đọc — CPS lên 22-25 OK.
-        # Chỉ rút gọn khi THỰC SỰ quá dài (CPS > 22).
+        "description": "Short drama TQ — gộp tập 2-4 phút thành 1 file",
         "cps_max": 22.0,
-        "cps_condense_threshold": 22.0,  # Stage 5A chỉ rút khi vượt mức này
-        "scene_avg_lines": 8,
-        "expected_scenes": 200,
+        "cps_condense_threshold": 22.0,
+        "expected_chunks_per_arc": 3,
         "tts_friendly": True,
         "hook_enhancement": True,
     },
@@ -146,8 +161,7 @@ PROJECT_TYPES = {
         "description": "Drama truyền hình 40-45 phút/tập",
         "cps_max": 20.0,
         "cps_condense_threshold": 22.0,
-        "scene_avg_lines": 30,
-        "expected_scenes": 20,
+        "expected_chunks_per_arc": 4,
         "tts_friendly": True,
         "hook_enhancement": False,
     },
@@ -155,8 +169,7 @@ PROJECT_TYPES = {
         "description": "Phim điện ảnh 90-120 phút",
         "cps_max": 20.0,
         "cps_condense_threshold": 22.0,
-        "scene_avg_lines": 25,
-        "expected_scenes": 50,
+        "expected_chunks_per_arc": 3,
         "tts_friendly": False,
         "hook_enhancement": False,
     },
@@ -169,7 +182,7 @@ PROJECT_TYPES = {
 
 @dataclass
 class PipelineConfig:
-    """Cấu hình tổng cho 1 lần chạy pipeline."""
+    """Cấu hình tổng cho 1 lần chạy pipeline v3."""
     project_type: str = "short_drama"
     target_language: str = "vi"
     source_language: str = "zh"
@@ -178,20 +191,17 @@ class PipelineConfig:
     duration: DurationConfig = field(default_factory=DurationConfig)
     models: ModelConfig = field(default_factory=ModelConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
-    batch: BatchConfig = field(default_factory=BatchConfig)
+    chunk: ChunkConfig = field(default_factory=ChunkConfig)
     compact: CompactModeConfig = field(default_factory=CompactModeConfig)
+    variant: VariantConfig = field(default_factory=VariantConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
     quality: QualityConfig = field(default_factory=QualityConfig)
 
     provider: Literal["gemini", "openai", "deepseek"] = "gemini"
     api_key: str = ""
 
-    # Genre — None = auto detect, hoặc chỉ định pack ID
-    genre_pack: str | None = None
-
     # Paths
-    prompts_dir: Path = field(default_factory=lambda: Path(__file__).parent / "prompts" / "v2")
-    genre_packs_dir: Path = field(default_factory=lambda: Path(__file__).parent / "genre_packs")
+    prompts_dir: Path = field(default_factory=lambda: Path(__file__).parent / "prompts" / "v3")
 
     def apply_project_type(self):
         """Áp preset cho project_type đã chọn."""
@@ -204,40 +214,35 @@ class PipelineConfig:
         return self
 
     def auto_tune_for_size(self, total_subs: int):
-        """Tự động chỉnh batch size + compact mode theo số subs.
+        """Tự động chỉnh chunk + compact mode theo số subs.
 
-        Nguyên tắc:
-          - < 200 subs: compact mode — ít scenes, gom call tối đa nhưng < 50 lines/call
-          - 200-800: medium batches (40-50 lines/call)
-          - 800-2000: standard (50-70 lines/call) — như default
-          - > 2000: large batches (70-90 lines/call) — phim dài 4h+
-
-        Mục đích: số calls không scale tuyến tính theo size.
-        Giữ batch ≤ 50 dòng để response JSON không bị truncate.
+        - < 500 subs: bật compact (gộp B2+B3), chunk nhỏ
+        - 500-1500: standard, chunk vừa
+        - 1500-3000: chunk lớn hơn
+        - > 3000: chunk lớn, concurrency cao hơn
         """
         if total_subs < self.compact.auto_threshold_subs:
-            # Compact mode cho phim ngắn / test
+            # Phim ngắn — bật compact
             self.compact.enabled = True
-            # Giới hạn ≤ 40 dòng/call để response không truncate
-            self.batch.speaker_lines_per_call = min(40, total_subs)
-            self.batch.translate_lines_per_call = min(40, total_subs)
-            self.batch.polish_lines_per_call = min(50, total_subs)
-        elif total_subs < 800:
+            self.compact.combine_b2_b3 = True
+            self.chunk.target_lines = min(250, total_subs)
+            self.chunk.overlap_lines = 20
+        elif total_subs < 1500:
             self.compact.enabled = False
-            self.batch.speaker_lines_per_call = 50
-            self.batch.translate_lines_per_call = 40
-            self.batch.polish_lines_per_call = 60
-        elif total_subs < 2000:
+            self.chunk.target_lines = 250
+            self.chunk.overlap_lines = 30
+        elif total_subs < 3000:
             self.compact.enabled = False
-            self.batch.speaker_lines_per_call = 60
-            self.batch.translate_lines_per_call = 50
-            self.batch.polish_lines_per_call = 80
+            self.chunk.target_lines = 300
+            self.chunk.overlap_lines = 40
         else:
-            # Phim 4h+
+            # Phim dài
             self.compact.enabled = False
-            self.batch.speaker_lines_per_call = 80
-            self.batch.translate_lines_per_call = 60
-            self.batch.polish_lines_per_call = 100
+            self.chunk.target_lines = 400
+            self.chunk.overlap_lines = 50
+            # Tăng concurrency để chạy nhanh hơn
+            self.concurrency.translate = 7
+            self.concurrency.speaker = 7
         return self
 
 

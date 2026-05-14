@@ -13,20 +13,21 @@ export interface Character {
   audio?: string
   shortcut_key?: string | null
   tts_speed?: number
-  // v2 fields
+  // v2 fields (giữ legacy data, không hiển thị)
   name_zh?: string | null
-  aliases_zh?: string | null            // JSON array string
+  aliases_zh?: string | null
   aliases_vi?: string | null
   role?: string                          // nam_chinh|nu_chinh|nam_phu|nu_phu|phan_dien|phu|khach
   gender?: 'nam' | 'nu' | '?'
   age_group?: string | null
-  social_status?: string | null
-  personality?: string
-  speaking_style?: string
-  self_address?: string | null           // JSON Pronouns
-  addresses?: string | null              // JSON {char_zh: how_to_call}
+  personality?: string                   // = char (mô tả 1 câu)
   relationships_json?: string | null
   notes?: string
+  // v3 deprecated (đã bỏ trong Bible mới)
+  social_status?: string | null
+  speaking_style?: string
+  self_address?: string | null
+  addresses?: string | null
 }
 
 export interface Chapter {
@@ -63,10 +64,11 @@ export interface Subtitle {
   id: number
   project_id: number
   scene_id?: number | null
+  chunk_id?: number | null              // v3
   index: number
   start_time: number
   end_time: number
-  text: string
+  text: string                           // text active (= text_v1 hoặc text_v2)
   original_text?: string | null
   character_id: number | null
   character?: Character
@@ -77,7 +79,7 @@ export interface Subtitle {
   tts_speed?: number | null
   // v2 fields
   speaker_zh?: string | null
-  speaker_confidence?: 'high' | 'mid' | 'low'
+  speaker_confidence?: 'h' | 'm' | 'l' | 'high' | 'mid' | 'low'
   speaker_reason?: string
   emotion?: string | null
   intensity?: number
@@ -87,11 +89,13 @@ export interface Subtitle {
   text_draft?: string | null
   is_hook?: boolean
   translation_version?: number
-  // v3: per-line voice mode override
+  // v3: 2 variants
+  text_v1?: string | null                // sát nghĩa
+  text_v2?: string | null                // thoát ý
+  variant_selected?: 1 | 2
+  // v3: per-line voice mode
   tts_voice_mode?: string | null
-  // v3 computed: mode hiện đang dùng (sẵn từ backend)
   voice_mode?: string
-  // v3: mode đã dùng khi tạo audio hiện tại
   audio_voice_mode?: string | null
 }
 
@@ -106,92 +110,61 @@ export interface Project {
   tts_done_count: number
   current_chapter_id?: number | null
   source_lang?: 'zh' | 'vi'
-  // v2 fields
   project_type?: 'short_drama' | 'drama_series' | 'movie'
-  genre_pack?: string | null
   translate_status?: 'idle' | 'running' | 'done' | 'error'
   translate_progress?: number
   translate_error?: string | null
   has_bible?: boolean
+  chunk_count?: number                   // v3
   scene_count?: number
-  // v3: TTS toggle
   use_emotion_voice?: boolean
   tts_voice_mode?: string | null
 }
 
-// ─── Translate v2 types ──────────────────────────────────────────────────────
-
-export type GenreMain =
-  | 'do_thi' | 'co_trang' | 'dan_quoc' | 'tien_hiep'
-  | 'huyen_huyen' | 'vo_hiep' | 'khoa_huyen' | 'khong_xac_dinh'
-
-export type GenreSub =
-  | 'ngon_tinh' | 'trong_sinh' | 'bao_thu' | 'cung_dau'
-  | 'tong_tai' | 'chien_than' | 'hac_dao' | 'than_y'
-  | 'trong_dau' | 'hai_huoc' | 'kinh_di' | 'trinh_tham'
-  | 'gia_dau' | 'hoc_duong' | 'khong_xac_dinh'
+// ─── Translate v3 types ──────────────────────────────────────────────────────
 
 export type EmotionTag =
   | 'neutral' | 'happy' | 'sad' | 'angry' | 'cold' | 'tense'
   | 'intimate' | 'fearful' | 'sarcastic' | 'shocked' | 'determined'
   | 'regretful' | 'humorous' | 'threatening'
 
-// Bible (lấy từ DB qua BibleOut)
-
-export interface Pronouns {
-  default: string
-  when_angry?: string | null
-  when_intimate?: string | null
-  when_formal?: string | null
-  when_inferior?: string | null
-  when_superior?: string | null
-}
+// Bible v3 (compact)
 
 export interface BibleCharacter {
   zh: string
   vi: string
-  aliases_zh?: string[]
-  aliases_vi?: string[]
-  role: string
-  gender: string
-  age_group?: string | null
-  social_status?: string | null
-  personality?: string
-  speaking_style?: string
-  self_address?: Pronouns
-  addresses?: Record<string, string>
-  relationships?: Record<string, string>
-  notes?: string
+  alias?: string[]
+  g?: 'nam' | 'nu' | '?'
+  role?: string
+  age?: string | null
+  char?: string                          // tính cách + kiểu nói 1 câu
+  rel?: Record<string, string>           // zh_name → quan hệ
+  catchphrase?: string | null
 }
 
 export interface BibleStoryArc {
   index: number
-  title: string
-  summary: string
-  start_line: number
-  end_line: number
-  emotional_tone: string
-  key_events: string[]
+  r: [number, number]                    // [start_line, end_line]
+  t: string                              // title
+  tone: string                           // tense|warm|sad|intimate|angry|neutral|mixed
 }
 
 export interface BibleCast { characters: BibleCharacter[] }
 
 export interface BibleWorld {
-  genre_main: GenreMain
-  genre_sub: GenreSub[]
-  era?: string | null
-  setting?: string | null
-  plot_summary?: string
-  main_conflict?: string
-  tone_overall?: string
-  story_arcs: BibleStoryArc[]
+  genre: string[]                        // ['đô thị', 'tổng tài', ...]
+  era: string                            // hiện đại | cổ đại | dân quốc | tương lai
+  tone: string
+  plot: string
+  arcs: BibleStoryArc[]
 }
 
 export interface GlossaryTerm {
   zh: string
   vi: string
-  category: string
-  notes?: string
+  cat?: string                           // chuc_vu|tu_xung|dia_danh|khai_niem|cliche|khac
+  n?: number                             // số lần xuất hiện
+  note?: string | null
 }
 
 export interface BibleGlossary { terms: GlossaryTerm[] }
@@ -203,14 +176,28 @@ export interface Bible {
   cast: BibleCast
   world: BibleWorld
   glossary: BibleGlossary
-  genre_pack_id?: string | null
   tokens_in: number
   tokens_out: number
   cost_usd: number
   created_at?: string
 }
 
-// Scenes
+// ─── Chunks + Scenes (v3 — 3 tầng) ───────────────────────────────────────────
+
+export interface Chunk {
+  id: number
+  project_id: number
+  arc_index: number
+  chunk_index: number
+  title: string
+  start_line: number
+  end_line: number
+  status: 'pending' | 'speaker' | 'translated' | 'done' | 'error'
+  line_count: number
+  scene_count: number
+  arc_title?: string | null
+  arc_tone?: string | null
+}
 
 export interface Scene {
   id: number
@@ -228,6 +215,7 @@ export interface Scene {
   summary: string
   purpose: string
   story_arc_id?: number | null
+  chunk_id?: number | null               // v3
   is_hook: boolean
   is_emotion_peak: boolean
   status: 'pending' | 'speaker' | 'translated' | 'polished' | 'error'
@@ -247,11 +235,10 @@ export interface StoryArc {
   scene_count: number
 }
 
-// Polish issues
+// ─── Polish issues (v3 — đơn giản hóa) ───────────────────────────────────────
 
 export type IssueType =
-  | 'speaker' | 'pronoun' | 'consistency' | 'glossary'
-  | 'intensity' | 'literal' | 'tts_unfriendly' | 'cps' | 'other'
+  | 'untranslated' | 'empty' | 'chinese_remains' | 'other'
 
 export interface PolishIssue {
   id: number
@@ -261,12 +248,12 @@ export interface PolishIssue {
   description: string
   current_text: string
   suggested_text?: string | null
-  confidence: 'high' | 'mid' | 'low'
+  confidence: 'h' | 'm' | 'l' | 'high' | 'mid' | 'low'
   evidence: string
   resolved: boolean
 }
 
-// Pipeline status & progress
+// ─── Pipeline status & progress ──────────────────────────────────────────────
 
 export interface TranslateStatus {
   project_id: number
@@ -274,9 +261,11 @@ export interface TranslateStatus {
   current_stage?: string | null
   progress: number
   has_bible: boolean
+  chunk_count: number                    // v3
   scene_count: number
   speaker_assigned_count: number
   translated_count: number
+  variants_count: number                 // v3: dòng có text_v2
   review_count: number
   avg_cps: number
   cost_usd: number
@@ -292,14 +281,9 @@ export interface ProgressEvent {
   detail?: Record<string, any>
 }
 
-export interface GenrePackInfo {
-  id: string
-  name_vi: string
-  name_zh: string
-  description: string
-}
+// ─── Translate config (request) ──────────────────────────────────────────────
 
-// Translate config (request)
+export type VariantMode = 'off' | 'important_only' | 'always'
 
 export interface TranslateConfig {
   api_key: string
@@ -308,10 +292,28 @@ export interface TranslateConfig {
   model_medium: string
   model_light: string
   project_type: 'short_drama' | 'drama_series' | 'movie'
-  genre_pack: string | null
   cps_max: number | null
   concurrency: number
   source_lang: 'zh'
+  // v3
+  variant_mode: VariantMode
+  chunk_overlap: number
+  cache_enabled: boolean
+}
+
+// ─── Retranslate (1 dòng) ────────────────────────────────────────────────────
+
+export interface RetranslateResult {
+  ok: boolean
+  subtitle_id: number
+  current_text_v1?: string | null
+  current_text_v2?: string | null
+  new_text_v1: string
+  new_text_v2?: string | null
+  emotion?: string
+  intensity?: number
+  tokens_in: number
+  tokens_out: number
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
@@ -340,6 +342,17 @@ export function getEffectiveSpeed(sub: Subtitle, character?: Character | null): 
   return 1.0
 }
 
+// Confidence display
+export function confidenceLabel(c: string | undefined): string {
+  if (!c) return ''
+  const m: Record<string, string> = {
+    h: 'cao', high: 'cao',
+    m: 'TB', mid: 'TB',
+    l: 'thấp', low: 'thấp',
+  }
+  return m[c.toLowerCase()] || c
+}
+
 // Format helpers
 
 export const EMOTION_LABELS: Record<string, string> = {
@@ -362,22 +375,38 @@ export const ROLE_LABELS: Record<string, string> = {
   phan_dien: 'Phản diện', phu: 'Phụ', khach: 'Khách',
 }
 
-export const GENRE_MAIN_LABELS: Record<string, string> = {
-  do_thi: 'Đô thị', co_trang: 'Cổ trang', dan_quoc: 'Dân quốc',
-  tien_hiep: 'Tiên hiệp', huyen_huyen: 'Huyền huyễn', vo_hiep: 'Võ hiệp',
-  khoa_huyen: 'Khoa huyễn', khong_xac_dinh: 'Chưa rõ',
-}
-
-export const GENRE_SUB_LABELS: Record<string, string> = {
-  ngon_tinh: 'Ngôn tình', trong_sinh: 'Trọng sinh', bao_thu: 'Báo thù',
-  cung_dau: 'Cung đấu', tong_tai: 'Tổng tài', chien_than: 'Chiến thần',
-  hac_dao: 'Hắc đạo', than_y: 'Thần y', gia_dau: 'Gia đấu',
-  hoc_duong: 'Học đường', hai_huoc: 'Hài hước', kinh_di: 'Kinh dị',
-  trinh_tham: 'Trinh thám', khong_xac_dinh: 'Chưa rõ',
-}
-
 export const ISSUE_TYPE_LABELS: Record<string, string> = {
-  speaker: 'Speaker sai', pronoun: 'Xưng hô', consistency: 'Không nhất quán',
-  glossary: 'Thuật ngữ', intensity: 'Cường độ', literal: 'Dịch literal',
-  tts_unfriendly: 'Khó phát âm', cps: 'CPS quá cao', other: 'Khác',
+  untranslated: 'Chưa dịch',
+  empty: 'Rỗng',
+  chinese_remains: 'Còn tiếng Trung',
+  other: 'Khác',
 }
+
+export const VARIANT_MODE_LABELS: Record<VariantMode, string> = {
+  off: 'Tắt (1 bản)',
+  important_only: 'Cảnh quan trọng (2 bản)',
+  always: 'Luôn 2 bản',
+}
+
+export const ARC_TONE_LABELS: Record<string, string> = {
+  tense: 'Căng thẳng',
+  warm: 'Ấm áp',
+  sad: 'Buồn',
+  intimate: 'Thân mật',
+  angry: 'Giận dữ',
+  neutral: 'Trung lập',
+  mixed: 'Hỗn hợp',
+}
+
+export const GLOSSARY_CAT_LABELS: Record<string, string> = {
+  tu_xung: 'Tự xưng',
+  chuc_vu: 'Chức vụ / Danh xưng',
+  dia_danh: 'Địa danh / Tổ chức',
+  khai_niem: 'Khái niệm',
+  cliche: 'Cliché / Cụm điển hình',
+  khac: 'Khác',
+}
+
+export const GLOSSARY_CAT_ORDER = [
+  'tu_xung', 'chuc_vu', 'dia_danh', 'khai_niem', 'cliche', 'khac',
+]

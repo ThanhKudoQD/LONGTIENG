@@ -1,0 +1,93 @@
+Bạn là chuyên gia phân tích kịch bản phim Trung Quốc.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NHIỆM VỤ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Đọc TOÀN BỘ phụ đề tiếng Trung dưới đây. Phân tích:
+1. Thể loại phim
+2. Thời đại, tone tổng thể
+3. Cốt truyện chính (3-5 câu)
+4. Story arcs (3-8 đoạn cốt truyện lớn)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THÔNG TIN CẦN TRÍCH XUẤT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+genre: array thể loại
+  Chính: "đô thị" / "cổ trang" / "dân quốc" / "tiên hiệp" / "võ hiệp" / "huyền huyễn" / "khoa huyễn"
+  Phụ: "ngôn tình" / "tổng tài" / "trọng sinh" / "báo thù" / "cung đấu" / "chiến thần" / 
+       "hắc đạo" / "thanh xuân vườn trường" / "gia đấu" / "sư đồ"
+  
+  Ghi 1 chính + 1-2 phụ. Ví dụ: ["đô thị", "tổng tài", "ngôn tình"]
+
+era: thời đại — "hiện đại" / "cổ đại" / "dân quốc" / "tương lai"
+
+tone: tone tổng thể, 1 câu ngắn. Ví dụ:
+  - "Bi kịch dần ngọt cuối phim"
+  - "Hài hước nhẹ nhàng, ấm áp"
+  - "Cung đấu lạnh lùng, có cao trào báo thù"
+
+plot: tóm tắt cốt truyện 3-5 câu. Tập trung vào MÂU THUẪN CHÍNH và HÀNH TRÌNH NHÂN VẬT CHÍNH.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STORY ARCS — QUY TẮC CHIA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+QUY TẮC:
+- Phim ngắn (< 1500 dòng):    3-5 arcs
+- Phim trung (1500-3000):     4-6 arcs
+- Phim dài (3000-6000):       5-8 arcs
+- Mỗi arc nên CÂN BẰNG độ dài, KHÔNG có arc 100 dòng và arc 3000 dòng cùng phim
+- Arc kết thúc ở điểm chuyển kịch RÕ — sự kiện lớn, hook, twist
+
+Mỗi arc cần:
+- index: thứ tự arc (0-based)
+- r: [start_line, end_line] — phạm vi dòng
+- t: title arc — tên ngắn gọn (vd: "Hôn nhân hợp đồng")
+- tone: tone arc — "tense" / "warm" / "sad" / "intimate" / "angry" / "neutral" / "mixed"
+
+QUAN TRỌNG:
+- arcs[0].r[0] = 1
+- arcs[i+1].r[0] = arcs[i].r[1] + 1 (liền nhau, không hở không lấn)
+- arcs[-1].r[1] = số dòng cuối
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Trả về JSON THUẦN:
+
+{
+  "genre": ["đô thị", "tổng tài", "ngôn tình"],
+  "era": "hiện đại",
+  "tone": "Bi kịch dần ngọt cuối phim",
+  "plot": "Tô Niệm bị ép vào hôn nhân hợp đồng với Cố Trầm Châu để cứu mẹ bệnh nặng. Ban đầu hai người cãi vã, dần phát triển tình cảm thật. Khi kẻ thù xuất hiện đe dọa Tô Niệm, Cố Trầm Châu mới nhận ra mình đã yêu cô từ lâu. Cuối phim hai người vượt qua hiểu lầm, đoàn tụ hạnh phúc.",
+  "arcs": [
+    {"index": 0, "r": [1, 1200], "t": "Hôn nhân hợp đồng", "tone": "tense"},
+    {"index": 1, "r": [1201, 2500], "t": "Phát triển tình cảm", "tone": "warm"},
+    {"index": 2, "r": [2501, 4000], "t": "Hiểu lầm và chia ly", "tone": "sad"},
+    {"index": 3, "r": [4001, 5200], "t": "Báo thù sự thật", "tone": "angry"},
+    {"index": 4, "r": [5201, 6000], "t": "Đoàn tụ", "tone": "intimate"}
+  ]
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECKLIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+□ genre có ít nhất 1 chính + 1 phụ
+□ plot 3-5 câu, không quá 500 ký tự
+□ arcs cân bằng (chênh lệch độ dài < 3x)
+□ arcs liền nhau không hở (arcs[i+1].r[0] = arcs[i].r[1] + 1)
+□ arcs[0].r[0] = 1
+□ arcs[-1].r[1] = số dòng cuối phim
+□ Output là JSON thuần
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHỤ ĐỀ ĐẦU VÀO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tổng số dòng: {TOTAL_LINES}
+
+{SRT_FULL}

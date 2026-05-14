@@ -95,6 +95,7 @@ def update_subtitle(subtitle_id: int, data: SubtitleUpdate, db: Session = Depend
         raise HTTPException(404, "Subtitle not found")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(s, k, v)
+    _sync_variant_active(s)
     db.commit(); db.refresh(s)
     return s
 
@@ -112,8 +113,33 @@ def update_subtitle_by_index(project_id: int, subtitle_index: int, data: Subtitl
         raise HTTPException(404, f"Subtitle index={subtitle_index} not found in project {project_id}")
     for k, v in data.model_dump(exclude_none=True).items():
         setattr(s, k, v)
+    _sync_variant_active(s)
     db.commit(); db.refresh(s)
     return s
+
+
+def _sync_variant_active(s: Subtitle) -> None:
+    """Sync text active từ variant_selected. Recompute CPS.
+
+    Logic:
+    - Nếu update đến text_v1/text_v2/variant_selected → đồng bộ Subtitle.text
+    - Nếu update text trực tiếp → cũng update vào variant đang active để giữ nhất quán
+    """
+    variant = s.variant_selected or 1
+    if variant == 2 and s.text_v2:
+        s.text = s.text_v2
+    elif s.text_v1 is not None:
+        s.text = s.text_v1
+    # Recompute CPS
+    duration = max(0.01, (s.end_time or 0.0) - (s.start_time or 0.0))
+    text = s.text or ""
+    if duration > 0 and text:
+        s.cps_value = len(text.strip()) / duration
+    else:
+        s.cps_value = None
+    # Reset TTS cache vì text có thể đã đổi
+    # (chỉ reset nếu text_v1/v2 hoặc variant_selected có trong fields update)
+    # → đơn giản: chỉ reset nếu cần. UI sẽ xử lý.
 
 
 @router.delete("/{subtitle_id}")

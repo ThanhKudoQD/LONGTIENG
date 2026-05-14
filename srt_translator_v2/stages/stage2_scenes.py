@@ -1,10 +1,13 @@
 """
-Stage 2 — Scene Detection.
+Stage 2 — Chunks + Scenes (v3).
 
-Đọc Bible + SRT, chia phim thành 150-250 phân cảnh kịch.
-1 call duy nhất với model có context dài.
+Logic mới:
+- 1 call/arc → AI chia chunks + scenes trong arc đó
+- 5 arcs phim 6000 dòng = 5 calls (song song)
+- Output compact: scenes là array thay vì object
 """
 from __future__ import annotations
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -13,18 +16,10 @@ import httpx
 
 from config import PipelineConfig
 from core.llm_client import LLMRequest, call_llm, parse_json_response, CostTracker
-from core.srt_parser import SrtEntry
-from models import Bible, Scene, SceneMap
+from core.srt_parser import SrtEntry, format_time
+from models import Bible, Chunk, Scene, ChunkMap, StoryArc, normalize_emotion
 
 logger = logging.getLogger(__name__)
-
-
-def format_srt_for_scene_detect(entries: list[SrtEntry]) -> str:
-    """Format SRT cho scene detection — cần timing để detect khoảng nhảy thời gian."""
-    return "\n".join(
-        f"{e.index} | {e.start_sec:.1f}s-{e.end_sec:.1f}s | {e.text}"
-        for e in entries
-    )
 
 
 def load_prompt(name: str, config: PipelineConfig) -> str:
@@ -32,157 +27,293 @@ def load_prompt(name: str, config: PipelineConfig) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def validate_scene_continuity(scenes: list[Scene], total_lines: int) -> list[Scene]:
-    """Đảm bảo các scene liên tục, không gap, không overlap."""
-    if not scenes:
-        return scenes
+# ─────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────
 
-    scenes = sorted(scenes, key=lambda s: s.start_line)
+def format_arc_srt(entries: list[SrtEntry], arc: StoryArc) -> str:
+    """Format SRT của 1 arc với timestamp."""
+    lines = []
+    for e in entries:
+        if arc.r[0] <= e.index <= arc.r[1]:
+            lines.append(f"{e.index} | {format_time(e.start_sec)} | {e.text}")
+    return "\n".join(lines)
 
-    # Re-index
-    fixed = []
-    for i, s in enumerate(scenes):
-        s.index = i
-        fixed.append(s)
 
-    # Check gap / overlap
-    for i in range(1, len(fixed)):
-        prev = fixed[i - 1]
-        curr = fixed[i]
-        if curr.start_line != prev.end_line + 1:
-            logger.warning(
-                f"[Scene continuity] Gap/overlap between scene {i-1} (end={prev.end_line}) "
-                f"and {i} (start={curr.start_line}). Fixing by extending prev."
+def build_bible_reference(bible: Bible) -> str:
+    """Tóm tắt Bible dạng compact để inject vào prompt."""
+    ref = {
+        "genre": bible.world.genre,
+        "era": bible.world.era,
+        "characters": [
+            {"zh": c.zh, "vi": c.vi, "g": c.g, "role": c.role}
+            for c in bible.cast.characters[:30]  # top 30 nhân vật
+        ],
+        "tone": bible.world.tone,
+    }
+    return json.dumps(ref, ensure_ascii=False, indent=2)
+
+
+# ─────────────────────────────────────────────────────────────────
+# PARSE SCENES ARRAY
+# ─────────────────────────────────────────────────────────────────
+
+def parse_scene_array(arr) -> Optional[Scene]:
+    """Parse 1 scene từ array [start, end, [chars], emotion, location, "HOOK"?].
+    
+    Tolerant: chấp nhận dict cũ luôn.
+    """
+    try:
+        if isinstance(arr, dict):
+            # Tolerate dict format
+            r = arr.get("r") or [arr.get("start_line", 1), arr.get("end_line", 1)]
+            return Scene(
+                r=(int(r[0]), int(r[1])),
+                ch=arr.get("ch") or arr.get("characters_present", []),
+                e=normalize_emotion(arr.get("e") or arr.get("emotion_primary", "neutral")),
+                loc=arr.get("loc") or arr.get("location", ""),
+                tag=arr.get("tag") or None,
             )
-            # Patch — extend prev to fill gap, or trim if overlap
-            if curr.start_line > prev.end_line + 1:
-                prev.end_line = curr.start_line - 1
-            else:
-                curr.start_line = prev.end_line + 1
 
-    # Đảm bảo scene đầu start = 1
-    if fixed[0].start_line > 1:
-        fixed[0].start_line = 1
+        if not isinstance(arr, (list, tuple)) or len(arr) < 5:
+            return None
 
-    # Đảm bảo scene cuối end = total_lines
-    if fixed[-1].end_line < total_lines:
-        fixed[-1].end_line = total_lines
+        start = int(arr[0])
+        end = int(arr[1])
+        chars = list(arr[2]) if isinstance(arr[2], (list, tuple)) else []
+        emotion = normalize_emotion(str(arr[3]))
+        location = str(arr[4]) if arr[4] else ""
+        tag = arr[5] if len(arr) > 5 and arr[5] in ("HOOK", "PEAK") else None
 
-    # Loại scene rỗng
-    valid = [s for s in fixed if s.start_line <= s.end_line]
+        return Scene(
+            r=(start, end),
+            ch=chars,
+            e=emotion,
+            loc=location,
+            tag=tag,
+        )
+    except Exception as e:
+        logger.warning(f"[Stage 2] Skip invalid scene: {e}")
+        return None
 
-    return valid
+
+def parse_chunk_dict(data: dict, arc_index: int) -> Optional[Chunk]:
+    """Parse 1 chunk từ dict."""
+    try:
+        r = data.get("r") or [data.get("start_line", 1), data.get("end_line", 1)]
+        if not isinstance(r, (list, tuple)) or len(r) != 2:
+            return None
+
+        scenes_raw = data.get("scenes", []) or []
+        scenes = []
+        for s in scenes_raw:
+            sc = parse_scene_array(s)
+            if sc:
+                scenes.append(sc)
+
+        return Chunk(
+            r=(int(r[0]), int(r[1])),
+            t=data.get("t", "") or data.get("title", ""),
+            arc_index=arc_index,
+            scenes=scenes,
+        )
+    except Exception as e:
+        logger.warning(f"[Stage 2] Skip invalid chunk: {e}")
+        return None
 
 
-async def run_stage2_scenes(
+# ─────────────────────────────────────────────────────────────────
+# PROCESS 1 ARC
+# ─────────────────────────────────────────────────────────────────
+
+async def process_one_arc(
+    arc: StoryArc,
     entries: list[SrtEntry],
     bible: Bible,
     config: PipelineConfig,
     tracker: CostTracker,
-) -> SceneMap:
-    """Chạy Stage 2 — scene detection."""
-    logger.info("=" * 60)
-    logger.info("STAGE 2 — SCENE DETECTION")
-    logger.info("=" * 60)
+    client: httpx.AsyncClient,
+    semaphore: asyncio.Semaphore,
+) -> list[Chunk]:
+    """Chia 1 arc thành chunks + scenes."""
+    async with semaphore:
+        logger.info(f"[Stage 2] Processing arc {arc.index}: \"{arc.t}\" "
+                    f"(dòng {arc.r[0]}-{arc.r[1]})")
 
-    prompt_template = load_prompt("scene_detect", config)
-    srt_text = format_srt_for_scene_detect(entries)
+        prompt_template = load_prompt("chunks_and_scenes", config)
+        arc_srt = format_arc_srt(entries, arc)
+        bible_ref = build_bible_reference(bible)
 
-    # Bible compact (không cần full glossary cho scene detect)
-    bible_compact = json.dumps({
-        "cast": [
-            {"zh": c.zh, "vi": c.vi, "role": c.role, "gender": c.gender}
-            for c in bible.cast.characters
-        ],
-        "world": {
-            "genre_main": bible.world.genre_main,
-            "genre_sub": bible.world.genre_sub,
-            "plot_summary": bible.world.plot_summary,
-            "tone_overall": bible.world.tone_overall,
-        },
-        "story_arcs": [
-            {
-                "index": a.index,
-                "title": a.title,
-                "summary": a.summary,
-                "start_line": a.start_line,
-                "end_line": a.end_line,
-            }
-            for a in bible.world.story_arcs
-        ],
-    }, ensure_ascii=False, indent=2)
+        prompt = (prompt_template
+                  .replace("{BIBLE_REFERENCE}", bible_ref)
+                  .replace("{ARC_INDEX}", str(arc.index))
+                  .replace("{ARC_TITLE}", arc.t)
+                  .replace("{ARC_TONE}", arc.tone)
+                  .replace("{ARC_START}", str(arc.r[0]))
+                  .replace("{ARC_END}", str(arc.r[1]))
+                  .replace("{ARC_SRT}", arc_srt)
+                  .replace("{CHUNK_TARGET}", str(config.chunk.target_lines))
+                  .replace("{MAX_CHUNKS}", str(config.chunk.max_chunks_per_arc)))
 
-    prompt = (prompt_template
-              .replace("{BIBLE_JSON}", bible_compact)
-              .replace("{SRT_FULL}", srt_text))
+        req = LLMRequest(
+            prompt=prompt,
+            model=config.models.medium,
+            api_key=config.api_key,
+            temperature=0.3,
+            max_output=8000,
+            json_mode=True,
+            max_retries=config.concurrency.retry_max,
+        )
 
-    # Chọn model — Flash cũng được, vì task này không cần creativity
-    model = config.models.medium  # dùng Flash để rẻ hơn
-    req = LLMRequest(
-        prompt=prompt,
-        model=model,
-        api_key=config.api_key,
-        temperature=0.2,
-        max_output=32000,  # output lớn — 200 scenes × ~150 char/scene
-        json_mode=True,
-        max_retries=config.concurrency.retry_max,
+        try:
+            resp = await call_llm(req, client=client,
+                                  stage_tag=f"2_chunks_arc{arc.index}")
+            tracker.add("2_chunks", resp)
+            data = parse_json_response(resp.text, default={"chunks": []})
+        except Exception as e:
+            logger.warning(f"[Stage 2] Arc {arc.index} failed: {e}. "
+                           f"Fallback to 1 chunk for whole arc.")
+            return [_fallback_chunk_for_arc(arc)]
+
+        chunks = []
+        for c in data.get("chunks", []) or []:
+            chunk = parse_chunk_dict(c, arc.index)
+            if chunk:
+                chunks.append(chunk)
+
+        if not chunks:
+            logger.warning(f"[Stage 2] Arc {arc.index}: no chunks parsed, fallback")
+            return [_fallback_chunk_for_arc(arc)]
+
+        # Normalize chunks within arc
+        chunks = _normalize_chunks(chunks, arc)
+
+        logger.info(f"[Stage 2] Arc {arc.index}: {len(chunks)} chunks, "
+                    f"{sum(len(c.scenes) for c in chunks)} scenes total")
+        return chunks
+
+
+def _fallback_chunk_for_arc(arc: StoryArc) -> Chunk:
+    """Fallback: 1 chunk cho cả arc nếu AI fail."""
+    return Chunk(
+        r=arc.r,
+        t=arc.t or f"Arc {arc.index}",
+        arc_index=arc.index,
+        scenes=[],
     )
+
+
+def _normalize_chunks(chunks: list[Chunk], arc: StoryArc) -> list[Chunk]:
+    """Sửa chunks liền nhau, không lấn/hở."""
+    if not chunks:
+        return [_fallback_chunk_for_arc(arc)]
+
+    chunks = sorted(chunks, key=lambda c: c.r[0])
+
+    fixed = []
+    for i, ch in enumerate(chunks):
+        start, end = ch.r
+        if i == 0:
+            start = arc.r[0]
+        elif fixed and start != fixed[-1].r[1] + 1:
+            start = fixed[-1].r[1] + 1
+
+        if i == len(chunks) - 1:
+            end = arc.r[1]
+
+        if end < start:
+            end = start
+
+        # Filter scenes trong chunk
+        valid_scenes = []
+        for sc in ch.scenes:
+            if sc.start_line >= start and sc.end_line <= end:
+                valid_scenes.append(sc)
+
+        # Normalize scenes within chunk
+        valid_scenes = _normalize_scenes(valid_scenes, start, end)
+
+        fixed.append(Chunk(
+            r=(start, end),
+            t=ch.t,
+            arc_index=arc.index,
+            scenes=valid_scenes,
+        ))
+
+    return fixed
+
+
+def _normalize_scenes(scenes: list[Scene], chunk_start: int, chunk_end: int) -> list[Scene]:
+    """Sửa scenes liền nhau trong chunk."""
+    if not scenes:
+        return []  # Chunk ngắn, không cần scenes
+
+    scenes = sorted(scenes, key=lambda s: s.r[0])
+
+    fixed = []
+    for i, sc in enumerate(scenes):
+        start, end = sc.r
+        if i == 0:
+            start = chunk_start
+        elif fixed and start != fixed[-1].r[1] + 1:
+            start = fixed[-1].r[1] + 1
+
+        if i == len(scenes) - 1:
+            end = chunk_end
+
+        if end < start:
+            end = start
+
+        fixed.append(Scene(
+            r=(start, end),
+            ch=sc.ch,
+            e=sc.e,
+            loc=sc.loc,
+            tag=sc.tag,
+        ))
+
+    return fixed
+
+
+# ─────────────────────────────────────────────────────────────────
+# MAIN STAGE 2
+# ─────────────────────────────────────────────────────────────────
+
+async def run_stage2_chunks(
+    entries: list[SrtEntry],
+    bible: Bible,
+    config: PipelineConfig,
+    tracker: CostTracker,
+) -> ChunkMap:
+    """Stage 2 — chia chunks + scenes cho toàn phim."""
+    logger.info("=" * 60)
+    logger.info("STAGE 2 — CHUNKS + SCENES")
+    logger.info("=" * 60)
+
+    if not bible.world.arcs:
+        # Không có arcs → tạo 1 arc giả cho cả phim
+        logger.warning("[Stage 2] No arcs in Bible, creating single arc")
+        arcs = [StoryArc(index=0, r=(1, len(entries)), t="Toàn phim", tone="neutral")]
+    else:
+        arcs = bible.world.arcs
+
+    semaphore = asyncio.Semaphore(config.concurrency.chunks)
 
     async with httpx.AsyncClient() as client:
-        resp = await call_llm(req, client=client)
-    tracker.add("2_scenes", resp)
+        tasks = [
+            process_one_arc(arc, entries, bible, config, tracker, client, semaphore)
+            for arc in arcs
+        ]
+        results = await asyncio.gather(*tasks)
 
-    data = parse_json_response(resp.text, default={"scenes": []})
+    all_chunks = []
+    for chunks_of_arc in results:
+        all_chunks.extend(chunks_of_arc)
 
-    scenes = []
-    line_to_time = {e.index: (e.start_sec, e.end_sec) for e in entries}
+    chunk_map = ChunkMap(chunks=all_chunks)
+    logger.info(f"[Stage 2] DONE. {len(all_chunks)} chunks total")
+    return chunk_map
 
-    for s_data in data.get("scenes", []) or []:
-        try:
-            start_line = int(s_data.get("start_line", 0))
-            end_line = int(s_data.get("end_line", 0))
-            if start_line < 1 or end_line < start_line:
-                continue
 
-            # Lookup timing
-            start_time = line_to_time.get(start_line, (0.0, 0.0))[0]
-            end_time = line_to_time.get(end_line, (0.0, 0.0))[1]
-
-            scenes.append(Scene(
-                index=int(s_data.get("index", len(scenes))),
-                start_line=start_line,
-                end_line=end_line,
-                start_time_sec=start_time,
-                end_time_sec=end_time,
-                location=s_data.get("location", "") or "",
-                time_of_day=s_data.get("time_of_day"),
-                characters_present=s_data.get("characters_present", []) or [],
-                emotion_primary=s_data.get("emotion_primary", "neutral"),
-                emotion_arc=s_data.get("emotion_arc", "") or "",
-                summary=s_data.get("summary", "") or "",
-                purpose=s_data.get("purpose", "") or "",
-                story_arc_index=s_data.get("story_arc_index"),
-                is_hook=bool(s_data.get("is_hook", False)),
-                is_emotion_peak=bool(s_data.get("is_emotion_peak", False)),
-            ))
-        except Exception as e:
-            logger.warning(f"[Stage 2] Skipped malformed scene: {e}")
-
-    # Validate continuity
-    scenes = validate_scene_continuity(scenes, total_lines=len(entries))
-
-    scene_map = SceneMap(
-        scenes=scenes,
-        total_lines=len(entries),
-        total_duration_sec=entries[-1].end_sec - entries[0].start_sec if entries else 0,
-    )
-
-    logger.info(f"[Stage 2] DONE. {len(scenes)} scenes detected.")
-    if scenes:
-        avg_lines = sum(s.end_line - s.start_line + 1 for s in scenes) / len(scenes)
-        peak_count = sum(1 for s in scenes if s.is_emotion_peak)
-        hook_count = sum(1 for s in scenes if s.is_hook)
-        logger.info(f"   Avg {avg_lines:.1f} lines/scene, "
-                    f"{peak_count} emotion peaks, {hook_count} hooks")
-
-    return scene_map
+# Backwards compat
+run_stage2_scenes = run_stage2_chunks

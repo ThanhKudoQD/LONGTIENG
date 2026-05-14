@@ -1,59 +1,58 @@
 /**
- * ConfigPanel — modal cấu hình pipeline trước khi chạy.
+ * ConfigPanel v3 — modal cấu hình pipeline trước khi chạy.
  *
- * - Provider: gemini/openai/deepseek
- * - API key (lưu localStorage)
- * - Models theo tier (heavy/medium/light)
- * - Genre pack: auto detect hoặc chọn tay
- * - Project type, CPS max, concurrency
- *
- * Có 2 mode khởi chạy:
- * - "Bắt đầu (toàn bộ pipeline)" → onStart
- * - "Chạy 1 stage" → onRunStage(stage)
+ * Thay đổi v3:
+ * - Bỏ Genre Pack (đã gộp vào Glossary Bible)
+ * - Thêm Variant Mode (off/important_only/always)
+ * - Thêm Chunk Overlap (sliding window)
+ * - Thêm Cache toggle
+ * - Bỏ stage "scenes" — thay bằng "chunks" (gộp chunks+scenes)
  */
 import React, { useEffect, useState } from 'react'
-import type { Project, TranslateStatus, GenrePackInfo, TranslateConfig } from '../../types'
+import type {
+  Project, TranslateStatus, TranslateConfig, VariantMode,
+} from '../../types'
+import { VARIANT_MODE_LABELS } from '../../types'
 
 interface Props {
   project: Project
   status: TranslateStatus | null
-  genrePacks: GenrePackInfo[]
   onClose: () => void
   onStart: (config: TranslateConfig) => void
   onRunStage: (config: TranslateConfig, stage: string) => void
 }
 
-const STORAGE_KEY = 'translate_config_v2'
+const STORAGE_KEY = 'translate_config_v3'
 
 // ─── Catalog model cho từng provider ─────────────────────────────────────────
 
 interface ModelOption {
-  id: string                           // tên thực dùng cho API
-  label: string                        // tên hiển thị
-  priceIn: number                      // USD/1M input tokens
-  priceOut: number                     // USD/1M output tokens
-  desc: string                         // mô tả ngắn
-  tier: 'top' | 'balanced' | 'fast'    // loại để gợi ý
+  id: string
+  label: string
+  priceIn: number
+  priceOut: number
+  desc: string
+  tier: 'top' | 'balanced' | 'fast'
 }
 
 const MODELS: Record<'gemini' | 'openai' | 'deepseek', ModelOption[]> = {
   gemini: [
-    { id: 'gemini-3.1-pro',         label: 'Gemini 3.1 Pro (mới nhất)',  priceIn: 2.00,  priceOut: 12.00, desc: 'Mạnh nhất, hiểu context dài', tier: 'top' },
-    { id: 'gemini-3.1-flash-lite-preview',         label: 'Gemini 3.1 Flash-Lite Preview',   priceIn: 0.50,  priceOut: 3.00,  desc: 'Nhanh + thông minh',          tier: 'balanced' },
-    { id: 'gemini-2.5-pro',         label: 'Gemini 2.5 Pro',             priceIn: 1.25,  priceOut: 10.00, desc: 'Cân bằng — khuyến nghị Heavy', tier: 'top' },
-    { id: 'gemini-2.5-flash',       label: 'Gemini 2.5 Flash',           priceIn: 0.30,  priceOut: 2.50,  desc: 'Nhanh, rẻ',                   tier: 'balanced' },
-    { id: 'gemini-2.5-flash-lite',  label: 'Gemini 2.5 Flash-Lite',      priceIn: 0.10,  priceOut: 0.40,  desc: 'Rẻ nhất của Gemini',          tier: 'fast' },
+    { id: 'gemini-3.1-pro',          label: 'Gemini 3.1 Pro (mới nhất)',     priceIn: 2.00, priceOut: 12.00, desc: 'Mạnh nhất, hiểu context dài', tier: 'top' },
+    { id: 'gemini-3.1-flash-lite',   label: 'Gemini 3.1 Flash-Lite',         priceIn: 0.50, priceOut: 3.00,  desc: 'Nhanh + thông minh',          tier: 'balanced' },
+    { id: 'gemini-2.5-pro',          label: 'Gemini 2.5 Pro',                priceIn: 1.25, priceOut: 10.00, desc: 'Cân bằng — khuyến nghị Heavy',tier: 'top' },
+    { id: 'gemini-2.5-flash',        label: 'Gemini 2.5 Flash',              priceIn: 0.30, priceOut: 2.50,  desc: 'Nhanh, rẻ',                   tier: 'balanced' },
+    { id: 'gemini-2.5-flash-lite',   label: 'Gemini 2.5 Flash-Lite',         priceIn: 0.10, priceOut: 0.40,  desc: 'Rẻ nhất của Gemini',          tier: 'fast' },
   ],
   openai: [
-    { id: 'gpt-5',          label: 'GPT-5',          priceIn: 1.25, priceOut: 10.00, desc: 'Top model OpenAI',           tier: 'top' },
-    { id: 'gpt-5-mini',     label: 'GPT-5 Mini',     priceIn: 0.25, priceOut: 2.00,  desc: 'Cân bằng',                    tier: 'balanced' },
-    { id: 'gpt-5-nano',     label: 'GPT-5 Nano',     priceIn: 0.05, priceOut: 0.40,  desc: 'Rẻ nhất',                     tier: 'fast' },
-    { id: 'gpt-4o',         label: 'GPT-4o',         priceIn: 2.50, priceOut: 10.00, desc: 'Gen cũ, vẫn tốt',             tier: 'top' },
-    { id: 'gpt-4o-mini',    label: 'GPT-4o Mini',    priceIn: 0.15, priceOut: 0.60,  desc: 'Gen cũ, rẻ',                  tier: 'balanced' },
+    { id: 'gpt-5',       label: 'GPT-5',       priceIn: 1.25, priceOut: 10.00, desc: 'Top model OpenAI', tier: 'top' },
+    { id: 'gpt-5-mini',  label: 'GPT-5 Mini',  priceIn: 0.25, priceOut: 2.00,  desc: 'Cân bằng',         tier: 'balanced' },
+    { id: 'gpt-5-nano',  label: 'GPT-5 Nano',  priceIn: 0.05, priceOut: 0.40,  desc: 'Rẻ nhất',          tier: 'fast' },
+    { id: 'gpt-4o',      label: 'GPT-4o',      priceIn: 2.50, priceOut: 10.00, desc: 'Gen cũ, vẫn tốt',  tier: 'top' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o Mini', priceIn: 0.15, priceOut: 0.60,  desc: 'Gen cũ, rẻ',       tier: 'balanced' },
   ],
   deepseek: [
-    { id: 'deepseek-chat', label: 'DeepSeek-V3 (chat)', priceIn: 0.27, priceOut: 1.10, desc: 'Hiểu tiếng Trung tốt, có context cache 90% off', tier: 'balanced' },
-    { id: 'deepseek-reasoner', label: 'DeepSeek-R1 (reasoner)', priceIn: 0.55, priceOut: 2.19, desc: 'Có reasoning, chậm hơn', tier: 'top' },
+    { id: 'deepseek-chat',     label: 'DeepSeek-V3 (chat)',     priceIn: 0.27, priceOut: 1.10, desc: 'Hiểu TQ tốt, context cache 90% off', tier: 'balanced' },
+    { id: 'deepseek-reasoner', label: 'DeepSeek-R1 (reasoner)', priceIn: 0.55, priceOut: 2.19, desc: 'Có reasoning, chậm hơn',             tier: 'top' },
   ],
 }
 
@@ -63,35 +62,39 @@ interface Preset {
   id: string
   label: string
   desc: string
-  models: { gemini: [string, string, string]; openai: [string, string, string]; deepseek: [string, string, string] }
+  models: {
+    gemini: [string, string, string]
+    openai: [string, string, string]
+    deepseek: [string, string, string]
+  }
 }
 
 const PRESETS: Preset[] = [
   {
     id: 'budget', label: '💸 Tiết kiệm',
-    desc: 'Tất cả dùng model rẻ nhất, giảm 80% chi phí, chấp nhận chất lượng giảm',
+    desc: 'Tất cả model rẻ. Giảm 80% chi phí, chất lượng hơi giảm',
     models: {
-      gemini:   ['gemini-2.5-flash',       'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
-      openai:   ['gpt-5-mini',             'gpt-5-nano',            'gpt-5-nano'],
-      deepseek: ['deepseek-chat',          'deepseek-chat',         'deepseek-chat'],
+      gemini:   ['gemini-2.5-flash',     'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
+      openai:   ['gpt-5-mini',           'gpt-5-nano',            'gpt-5-nano'],
+      deepseek: ['deepseek-chat',        'deepseek-chat',         'deepseek-chat'],
     },
   },
   {
     id: 'balanced', label: '⚖ Cân bằng (khuyến nghị)',
-    desc: 'Pro cho Bible+Dịch, Flash-Lite cho Scene/Speaker/Polish. Tiết kiệm 30%',
+    desc: 'Pro cho Bible+Dịch, Flash-Lite cho Scene/Speaker/Retry',
     models: {
-      gemini:   ['gemini-2.5-pro',         'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
-      openai:   ['gpt-5',                  'gpt-5-mini',            'gpt-5-nano'],
-      deepseek: ['deepseek-reasoner',      'deepseek-chat',         'deepseek-chat'],
+      gemini:   ['gemini-2.5-pro',       'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
+      openai:   ['gpt-5',                'gpt-5-mini',            'gpt-5-nano'],
+      deepseek: ['deepseek-reasoner',    'deepseek-chat',         'deepseek-chat'],
     },
   },
   {
     id: 'quality', label: '💎 Chất lượng cao',
     desc: 'Pro cho cả 3 tier — đắt nhất, chất lượng tốt nhất',
     models: {
-      gemini:   ['gemini-2.5-pro',         'gemini-2.5-pro',        'gemini-2.5-flash'],
-      openai:   ['gpt-5',                  'gpt-5',                 'gpt-5-mini'],
-      deepseek: ['deepseek-reasoner',      'deepseek-reasoner',     'deepseek-chat'],
+      gemini:   ['gemini-2.5-pro',       'gemini-2.5-pro',        'gemini-2.5-flash'],
+      openai:   ['gpt-5',                'gpt-5',                 'gpt-5-mini'],
+      deepseek: ['deepseek-reasoner',    'deepseek-reasoner',     'deepseek-chat'],
     },
   },
 ]
@@ -103,13 +106,20 @@ interface StoredConfig {
   model_medium: string
   model_light: string
   concurrency: number
+  variant_mode: VariantMode
+  chunk_overlap: number
+  cache_enabled: boolean
 }
 
 function loadStored(): StoredConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return JSON.parse(raw)
+    if (raw) return { ...defaultStored(), ...JSON.parse(raw) }
   } catch {}
+  return defaultStored()
+}
+
+function defaultStored(): StoredConfig {
   return {
     api_key: '',
     provider: 'gemini',
@@ -117,6 +127,9 @@ function loadStored(): StoredConfig {
     model_medium: 'gemini-2.5-flash',
     model_light: 'gemini-2.5-flash',
     concurrency: 5,
+    variant_mode: 'important_only',
+    chunk_overlap: 30,
+    cache_enabled: true,
   }
 }
 
@@ -127,7 +140,7 @@ function saveStored(cfg: StoredConfig) {
 }
 
 export default function ConfigPanel({
-  project, status, genrePacks, onClose, onStart, onRunStage,
+  project, status, onClose, onStart, onRunStage,
 }: Props) {
   const stored = loadStored()
 
@@ -142,25 +155,27 @@ export default function ConfigPanel({
   const [projectType, setProjectType] = useState<'short_drama' | 'drama_series' | 'movie'>(
     project.project_type || 'short_drama'
   )
-  const [genrePack, setGenrePack] = useState<string>(project.genre_pack || 'auto')
   const [cpsMax, setCpsMax] = useState<string>('')
 
-  // Auto-save settings vào localStorage mỗi khi user gõ (debounce 300ms).
-  // Tách riêng useEffect này khỏi buildConfig() để key được lưu KỂ CẢ khi
-  // user đóng modal mà chưa bấm Start.
+  // v3 fields
+  const [variantMode, setVariantMode] = useState<VariantMode>(stored.variant_mode)
+  const [chunkOverlap, setChunkOverlap] = useState<number>(stored.chunk_overlap)
+  const [cacheEnabled, setCacheEnabled] = useState<boolean>(stored.cache_enabled)
+
   useEffect(() => {
     const handle = setTimeout(() => {
       saveStored({
-        api_key: apiKey,
-        provider,
-        model_heavy: modelHeavy,
-        model_medium: modelMedium,
-        model_light: modelLight,
+        api_key: apiKey, provider,
+        model_heavy: modelHeavy, model_medium: modelMedium, model_light: modelLight,
         concurrency,
+        variant_mode: variantMode,
+        chunk_overlap: chunkOverlap,
+        cache_enabled: cacheEnabled,
       })
     }, 300)
     return () => clearTimeout(handle)
-  }, [apiKey, provider, modelHeavy, modelMedium, modelLight, concurrency])
+  }, [apiKey, provider, modelHeavy, modelMedium, modelLight, concurrency,
+      variantMode, chunkOverlap, cacheEnabled])
 
   // Auto-suggest models when provider changes
   useEffect(() => {
@@ -181,12 +196,6 @@ export default function ConfigPanel({
   }, [provider])
 
   function buildConfig(): TranslateConfig {
-    saveStored({
-      api_key: apiKey,
-      provider, model_heavy: modelHeavy, model_medium: modelMedium,
-      model_light: modelLight, concurrency,
-    })
-
     return {
       api_key: apiKey.trim(),
       provider,
@@ -194,10 +203,12 @@ export default function ConfigPanel({
       model_medium: modelMedium.trim(),
       model_light: modelLight.trim(),
       project_type: projectType,
-      genre_pack: genrePack === 'auto' ? null : genrePack,
       cps_max: cpsMax ? parseFloat(cpsMax) : null,
       concurrency,
       source_lang: 'zh',
+      variant_mode: variantMode,
+      chunk_overlap: chunkOverlap,
+      cache_enabled: cacheEnabled,
     }
   }
 
@@ -218,7 +229,9 @@ export default function ConfigPanel({
   }
 
   const hasBible = status?.has_bible
-  const hasScenes = (status?.scene_count ?? 0) > 0
+  const hasChunks = (status?.chunk_count ?? 0) > 0
+  const hasSpeaker = (status?.speaker_assigned_count ?? 0) > 0
+  const hasTranslated = (status?.translated_count ?? 0) > 0
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
@@ -229,7 +242,7 @@ export default function ConfigPanel({
         {/* Header */}
         <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800 flex items-center">
           <h2 className="text-base font-semibold text-zinc-800 dark:text-zinc-100">
-            Cấu hình Pipeline dịch
+            Cấu hình Pipeline dịch (v3)
           </h2>
           <div className="flex-1" />
           <button onClick={onClose} className="btn">✕</button>
@@ -293,13 +306,14 @@ export default function ConfigPanel({
           <section>
             <SectionLabel>2. Models — chọn cho từng giai đoạn</SectionLabel>
 
-            {/* Preset profiles */}
             <div className="mb-3">
               <div className="text-[11px] text-zinc-500 mb-1.5">Preset nhanh:</div>
               <div className="grid grid-cols-3 gap-2">
                 {PRESETS.map(p => {
                   const tuple = p.models[provider]
-                  const isActive = modelHeavy === tuple[0] && modelMedium === tuple[1] && modelLight === tuple[2]
+                  const isActive = modelHeavy === tuple[0] &&
+                                   modelMedium === tuple[1] &&
+                                   modelLight === tuple[2]
                   return (
                     <button
                       key={p.id}
@@ -323,30 +337,14 @@ export default function ConfigPanel({
               </div>
             </div>
 
-            {/* Hoặc chỉnh tay từng tier */}
-            <div className="text-[11px] text-zinc-500 mb-1.5">Hoặc chỉnh tay từng giai đoạn:</div>
+            <div className="text-[11px] text-zinc-500 mb-1.5">Hoặc chỉnh tay:</div>
             <div className="space-y-2">
-              <ModelSelector
-                tier="Heavy"
-                stages="Bible + Translate (dòng dịch chính)"
-                provider={provider}
-                value={modelHeavy}
-                onChange={setModelHeavy}
-              />
-              <ModelSelector
-                tier="Medium"
-                stages="Scene · Speaker · Consistency check · Glossary scan"
-                provider={provider}
-                value={modelMedium}
-                onChange={setModelMedium}
-              />
-              <ModelSelector
-                tier="Light"
-                stages="CPS condense (rút gọn câu vượt CPS)"
-                provider={provider}
-                value={modelLight}
-                onChange={setModelLight}
-              />
+              <ModelSelector tier="Heavy" stages="Bible (Cast) · Translate"
+                provider={provider} value={modelHeavy} onChange={setModelHeavy} />
+              <ModelSelector tier="Medium" stages="Bible (World/Glossary) · Chunks · Speaker"
+                provider={provider} value={modelMedium} onChange={setModelMedium} />
+              <ModelSelector tier="Light" stages="Retry dòng thiếu"
+                provider={provider} value={modelLight} onChange={setModelLight} />
             </div>
           </section>
 
@@ -355,60 +353,56 @@ export default function ConfigPanel({
             <SectionLabel>3. Loại project</SectionLabel>
             <div className="grid grid-cols-3 gap-2">
               <TypeButton active={projectType === 'short_drama'} onClick={() => setProjectType('short_drama')}
-                title="Short drama" desc="60 tập × 2 phút, CPS ≤15" />
+                title="Short drama" desc="60 tập × 2 phút, CPS ≤22" />
               <TypeButton active={projectType === 'drama_series'} onClick={() => setProjectType('drama_series')}
-                title="Drama series" desc="40-45 phút/tập, CPS ≤17" />
+                title="Drama series" desc="40-45 phút/tập, CPS ≤20" />
               <TypeButton active={projectType === 'movie'} onClick={() => setProjectType('movie')}
                 title="Movie" desc="Phim điện ảnh 1.5-2h" />
             </div>
           </section>
 
-          {/* Genre pack */}
+          {/* v3: Variant mode */}
           <section>
-            <SectionLabel>4. Thể loại</SectionLabel>
-            <select
-              value={genrePack}
-              onChange={e => setGenrePack(e.target.value)}
-              className="input w-full"
-            >
-              <option value="auto">🪄 Tự động (auto detect từ phim)</option>
-              {genrePacks.map(p => (
-                <option key={p.id} value={p.id}>
-                  {p.name_vi} ({p.name_zh})
-                </option>
-              ))}
-            </select>
-            {genrePack !== 'auto' && (
-              <div className="text-[11px] text-zinc-500 mt-1">
-                {genrePacks.find(p => p.id === genrePack)?.description}
-              </div>
-            )}
+            <SectionLabel>4. Variant — 2 bản dịch (v3 mới)</SectionLabel>
+            <div className="grid grid-cols-1 gap-2">
+              <VariantOption
+                active={variantMode === 'off'} onClick={() => setVariantMode('off')}
+                title="🔘 Tắt — chỉ 1 bản" desc="Tiết kiệm token nhất. Chỉ dùng text_v1 (sát nghĩa)." />
+              <VariantOption
+                active={variantMode === 'important_only'} onClick={() => setVariantMode('important_only')}
+                title="⭐ Cảnh quan trọng (khuyến nghị)"
+                desc="Cảnh HOOK/PEAK/intimate/angry có 2 bản (v1 sát nghĩa + v2 thoát ý). Tăng ~24% cost." />
+              <VariantOption
+                active={variantMode === 'always'} onClick={() => setVariantMode('always')}
+                title="✨ Luôn 2 bản"
+                desc="Mọi dòng đều có 2 bản. Tăng ~80% cost. Dành cho phim ngắn cần chất lượng tối đa." />
+            </div>
           </section>
 
-          {/* Advanced */}
-          <details>
+          {/* Advanced v3 */}
+          <details open>
             <summary className="cursor-pointer text-[11px] font-semibold text-zinc-400 uppercase tracking-widest hover:text-zinc-600">
-              Tùy chọn nâng cao
+              5. Tùy chọn nâng cao
             </summary>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <div>
                 <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 block mb-1">
-                  CPS tối đa (chars/giây)
+                  CPS tối đa
                 </label>
                 <input
                   type="number"
                   value={cpsMax}
                   onChange={e => setCpsMax(e.target.value)}
-                  placeholder="auto (15 cho short drama)"
+                  placeholder="auto (22 cho short drama)"
                   className="input w-full"
                   step="0.5"
                   min="10"
-                  max="25"
+                  max="30"
                 />
               </div>
               <div>
                 <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 block mb-1">
-                  Concurrency (số call song song)
+                  Concurrency
                 </label>
                 <input
                   type="number"
@@ -418,6 +412,33 @@ export default function ConfigPanel({
                   min="1"
                   max="20"
                 />
+              </div>
+              <div>
+                <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 block mb-1">
+                  Chunk overlap (sliding window dòng)
+                </label>
+                <input
+                  type="number"
+                  value={chunkOverlap}
+                  onChange={e => setChunkOverlap(Math.max(0, Math.min(100, parseInt(e.target.value) || 30)))}
+                  className="input w-full"
+                  min="0"
+                  max="100"
+                />
+                <div className="text-[10px] text-zinc-400 mt-0.5">Mặc định 30. Tăng → mạch cảnh tốt hơn nhưng tốn token.</div>
+              </div>
+              <div className="flex items-center pt-5">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={cacheEnabled}
+                    onChange={e => setCacheEnabled(e.target.checked)}
+                    className="w-4 h-4"
+                  />
+                  <span className="text-[12px] text-zinc-700 dark:text-zinc-300">
+                    Bật prompt caching (giảm 50-90% chi phí Bước 4)
+                  </span>
+                </label>
               </div>
             </div>
           </details>
@@ -436,10 +457,10 @@ export default function ConfigPanel({
           </div>
           <div className="grid grid-cols-5 gap-2">
             <StageButton onClick={() => handleRunStage('bible')} done={hasBible}>1. Bible</StageButton>
-            <StageButton onClick={() => handleRunStage('scenes')} done={hasScenes} disabled={!hasBible}>2. Scenes</StageButton>
-            <StageButton onClick={() => handleRunStage('speaker')} disabled={!hasScenes}>3. Speaker</StageButton>
-            <StageButton onClick={() => handleRunStage('translate')} disabled={!hasScenes}>4. Translate</StageButton>
-            <StageButton onClick={() => handleRunStage('polish')} disabled={!hasBible}>5. Polish</StageButton>
+            <StageButton onClick={() => handleRunStage('chunks')} done={hasChunks} disabled={!hasBible}>2. Chunks</StageButton>
+            <StageButton onClick={() => handleRunStage('speaker')} done={hasSpeaker} disabled={!hasChunks}>3. Speaker</StageButton>
+            <StageButton onClick={() => handleRunStage('translate')} done={hasTranslated} disabled={!hasChunks}>4. Translate</StageButton>
+            <StageButton onClick={() => handleRunStage('polish')} disabled={!hasBible}>5. Retry</StageButton>
           </div>
         </div>
       </div>
@@ -468,7 +489,6 @@ function ModelSelector({ tier, stages, provider, value, onChange }: {
   const known = options.find(m => m.id === value)
   const [customMode, setCustomMode] = React.useState(!known && !!value)
 
-  // Khi user đổi provider, tự switch về dropdown nếu model hiện tại match catalog
   React.useEffect(() => {
     if (options.find(m => m.id === value)) {
       setCustomMode(false)
@@ -513,7 +533,7 @@ function ModelSelector({ tier, stages, provider, value, onChange }: {
           >
             {options.map(m => (
               <option key={m.id} value={m.id}>
-                {m.label}  ·  ${m.priceIn}/$ {m.priceOut} per 1M
+                {m.label}  ·  ${m.priceIn}/${m.priceOut} per 1M
               </option>
             ))}
           </select>
@@ -524,20 +544,6 @@ function ModelSelector({ tier, stages, provider, value, onChange }: {
           )}
         </>
       )}
-    </div>
-  )
-}
-
-// Backward compat — không xóa để tránh break component khác nếu có import
-function ModelInput({ label, hint, value, onChange }: {
-  label: string; hint: string; value: string; onChange: (v: string) => void
-}) {
-  return (
-    <div>
-      <label className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400 block">
-        {label} <span className="text-zinc-400 font-normal">· {hint}</span>
-      </label>
-      <input value={value} onChange={e => onChange(e.target.value)} className="input w-full mt-1" />
     </div>
   )
 }
@@ -556,6 +562,24 @@ function TypeButton({ active, onClick, title, desc }: {
     >
       <div className="text-[13px] font-medium text-zinc-800 dark:text-zinc-100">{title}</div>
       <div className="text-[11px] text-zinc-500 mt-0.5">{desc}</div>
+    </button>
+  )
+}
+
+function VariantOption({ active, onClick, title, desc }: {
+  active: boolean; onClick: () => void; title: string; desc: string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-2 rounded-lg border text-left transition-all ${
+        active
+          ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30'
+          : 'border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800'
+      }`}
+    >
+      <div className="text-[13px] font-medium text-zinc-800 dark:text-zinc-100">{title}</div>
+      <div className="text-[11px] text-zinc-500 mt-0.5 leading-snug">{desc}</div>
     </button>
   )
 }

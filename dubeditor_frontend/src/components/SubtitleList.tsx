@@ -233,6 +233,25 @@ const Row = React.memo(function Row({
           )}
           {/* Voice mode badge (3 mode: BT / Buồn / Giận) — computed từ emotion+intensity */}
           <VoiceModePill mode={s.voice_mode || 'normal'} emotion={s.emotion} intensity={s.intensity} isOverride={!!s.tts_voice_mode} isActive={isActive} />
+
+          {/* v3: variant badge — chỉ hiện khi có text_v2 */}
+          {s.text_v2 && (
+            <span
+              style={{
+                fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3,
+                background: s.variant_selected === 2
+                  ? (isActive ? 'rgba(192,132,252,0.35)' : '#FAE8FF')
+                  : (isActive ? 'rgba(96,165,250,0.35)' : '#DBEAFE'),
+                color: s.variant_selected === 2
+                  ? (isActive ? '#FAE8FF' : '#7E22CE')
+                  : (isActive ? '#DBEAFE' : '#1D4ED8'),
+                letterSpacing: '0.04em',
+              }}
+              title={s.variant_selected === 2 ? 'Đang dùng bản v2 (thoát ý)' : 'Đang dùng bản v1 (sát nghĩa)'}
+            >
+              v{s.variant_selected || 1}
+            </span>
+          )}
           {/* Nút Dịch lại — chỉ hiện khi active + có original_text */}
           {s.original_text && isActive && (
             <button
@@ -378,7 +397,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const [inlineRT, setInlineRT] = useState<{
     sub: Subtitle
     loading: boolean
-    alts: Array<{ text: string; note?: string }>
+    alts: Array<{ text: string; note?: string; variant?: 1 | 2 }>
     selected: number | null
     error: string
   } | null>(null)
@@ -393,8 +412,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     }
     setInlineRT({ sub: s, loading: true, alts: [], selected: null, error: '' })
     try {
-      // v2 API: dùng translateApi.retranslate, KHÔNG truyền original/current
-      // (backend tự lookup từ DB và build context).
+      // v3 API: trả new_text_v1 + new_text_v2
       const { translateApi } = await import('../api')
       const res = await translateApi.retranslate(s.project_id, {
         subtitle_id: s.id,
@@ -402,9 +420,15 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
         api_key:     apiKey,
         provider:    config.provider,
         model:       config.model_medium,
-        variants:    2,
       })
-      const alts = (res.variants || []).map((text: string) => ({ text }))
+      // Map v1/v2 thành alts array để giữ UI cũ
+      const alts: Array<{ text: string; note?: string; variant?: 1 | 2 }> = []
+      if (res.new_text_v1) {
+        alts.push({ text: res.new_text_v1, note: 'v1 · sát nghĩa', variant: 1 })
+      }
+      if (res.new_text_v2 && res.new_text_v2 !== res.new_text_v1) {
+        alts.push({ text: res.new_text_v2, note: 'v2 · thoát ý', variant: 2 })
+      }
       setInlineRT(r => r ? { ...r, loading: false, alts, selected: alts.length > 0 ? 0 : null } : null)
     } catch (err: any) {
       setInlineRT(r => r ? { ...r, loading: false, error: err?.response?.data?.detail || err?.message || 'Lỗi' } : null)
@@ -747,9 +771,24 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
                 {inlineRT.alts.length > 0 && inlineRT.selected !== null && (
                   <button
                     onClick={async () => {
-                      const newText = inlineRT.alts[inlineRT.selected!].text
-                      await api.patch(`/subtitles/${inlineRT.sub.id}`, { text: newText })
-                      updateSubtitle(inlineRT.sub.id, { text: newText })
+                      const sel = inlineRT.alts[inlineRT.selected!]
+                      const v1 = inlineRT.alts.find(a => a.variant === 1)?.text || sel.text
+                      const v2 = inlineRT.alts.find(a => a.variant === 2)?.text || null
+                      const variantChosen = sel.variant || 1
+                      // Patch cả 2 bản + variant_selected để backend đồng bộ text active
+                      const patch: any = {
+                        text_v1: v1,
+                        text_v2: v2,
+                        variant_selected: variantChosen,
+                      }
+                      const updated = await api.patch(`/subtitles/${inlineRT.sub.id}`, patch).then(r => r.data)
+                      updateSubtitle(inlineRT.sub.id, {
+                        text: updated.text,
+                        text_v1: updated.text_v1,
+                        text_v2: updated.text_v2,
+                        variant_selected: updated.variant_selected,
+                        cps_value: updated.cps_value,
+                      })
                       setInlineRT(null)
                     }}
                     className="btn-primary text-[11px] px-3 py-1">

@@ -1,261 +1,291 @@
-# 🏗️ Architecture — SRT Translator v2
+# Architecture v3
 
-Tài liệu giải thích lý do thiết kế từng phần. Đọc khi muốn customize sâu.
+## Tổng quan
 
-## Triết lý cốt lõi
-
-### 1. "Hiểu trước, dịch sau"
-
-Hầu hết tool dịch SRT đều dịch tuần tự dòng-1, dòng-2, dòng-3... Vấn đề: dòng 5 nói gì phụ thuộc dòng 1-4. Tool không có context → dịch sai cảm xúc, sai xưng hô.
-
-Pipeline này khác: **đọc cả phim trước, lập Bible (nhân vật, bối cảnh, cốt truyện), rồi mới dịch**.
-
-### 2. "Dịch theo phân cảnh"
-
-Đơn vị dịch không phải 1 dòng, không phải 10 dòng, mà là **1 phân cảnh kịch**:
-- 1 địa điểm
-- 1 mốc thời gian
-- 1 nhóm nhân vật
-- 1 mục đích kịch
-
-AI thấy CẢ MẠCH HỘI THOẠI nên biết: dòng này đang giận hay đang dỗ, đang mỉa hay đang khen.
-
-### 3. "Mỗi stage một việc"
-
-Cũ: 1 prompt khổng lồ làm cả speaker + translate + QC → AI lú lẫn, kết quả tệ.
-
-Mới: 5 stage tách biệt:
-1. **Bible** — chỉ trích xuất thông tin phim
-2. **Scenes** — chỉ chia phân cảnh
-3. **Speaker** — chỉ gán speaker
-4. **Translate** — chỉ dịch (đã có speaker + scene)
-5. **Polish** — chỉ tinh chỉnh CPS + consistency
-
-Mỗi stage có prompt riêng, model riêng, có thể debug riêng.
-
-## Pipeline data flow
+Pipeline 5 stages tuần tự, mỗi stage có thể chạy độc lập (resume):
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  INPUT                                                    │
-│  - SRT tiếng Trung (~1500-1800 dòng cho short drama 2h)   │
-└──────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────┐
-│  STAGE 1: BIBLE                                           │
-│  ├─ 1A. Cast (Gemini Pro) — đọc cả SRT                    │
-│  ├─ 1B. World + Story Arcs (Gemini Pro)                   │
-│  ├─ 1C. Glossary (Gemini Pro)                             │
-│  └─ 1D. Genre Pack matcher (local logic)                  │
-│  OUTPUT: bible.json                                       │
-└──────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────┐
-│  STAGE 2: SCENES                                          │
-│  - Đọc Bible + SRT, chia thành 150-250 phân cảnh          │
-│  - Mỗi cảnh có: location, characters, emotion, arc        │
-│  - (Gemini Flash — task này không cần creativity)         │
-│  OUTPUT: scenes.json                                      │
-└──────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────┐
-│  STAGE 3: SPEAKER                                         │
-│  - Per-scene: gán speaker cho mỗi dòng                    │
-│  - Song song 5 calls cùng lúc                             │
-│  - Confidence: high/mid/low                               │
-│  - low confidence → flag review                           │
-│  OUTPUT: dict line_idx → {speaker, confidence}            │
-└──────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────┐
-│  STAGE 4: TRANSLATE  ← TRÁI TIM                           │
-│  - Per-scene: dịch cả mạch hội thoại                      │
-│  - Input có:                                              │
-│    · Bible (cached)                                       │
-│    · Scene context (location, emotion, purpose)           │
-│    · Address matrix (ai gọi ai gì)                        │
-│    · Glossary terms relevant                              │
-│    · 5 few-shot examples kinh điển                        │
-│  - Output có: text_vi, speaker_vi, emotion, intensity     │
-│  OUTPUT: dict line_idx → {text_vi, emotion, ...}          │
-└──────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────┐
-│  STAGE 5: POLISH                                          │
-│  ├─ 5A. CPS Condense — rút gọn dòng vượt CPS              │
-│  ├─ 5B. Consistency — quét per-character xuyên phim       │
-│  └─ 5C. Glossary Enforcement — quét tên sai               │
-│  OUTPUT: lines + polish_report                            │
-└──────────────────────────────────────────────────────────┘
-                          ↓
-┌──────────────────────────────────────────────────────────┐
-│  OUTPUT FILES                                             │
-│  - <name>.vi.srt        — SRT tiếng Việt cuối             │
-│  - <name>.bible.json    — Hồ sơ phim                      │
-│  - <name>.scenes.json   — Scene map                       │
-│  - <name>.review_queue.csv  — Dòng cần check tay          │
-│  - <name>.full.csv      — Bảng full debug                 │
-│  - <name>.polish_report.json — Báo cáo QC                 │
-│  - <name>.cost.txt      — Chi phí API                     │
-└──────────────────────────────────────────────────────────┘
+SRT → [Stage 1: Bible] → bible.json
+   └→ [Stage 2: Chunks+Scenes] → chunks.json (lồng arc/chunk/scene)
+      └→ [Stage 3: Speaker] → speaker_map per line
+         └→ [Stage 4: Translate] → text_v1 + text_v2 per line
+            └→ [Stage 5: Retry] → fix dòng thiếu/còn TQ
 ```
 
-## Bible — 3 phần độc lập
+## Models (Pydantic)
 
-### 1A. Cast — Hồ sơ nhân vật
+### Bible (compact)
 
-Cho mỗi nhân vật:
-- **zh + vi + aliases**: tên Trung, Hán Việt, biệt danh
-- **role**: nam_chinh/nu_chinh/nam_phu/nu_phu/phan_dien/phu/khach
-- **gender, age_group, social_status**
-- **personality + speaking_style**: tính cách + kiểu nói đặc trưng
-- **self_address (Pronouns)**: cách tự xưng theo TÌNH HUỐNG:
-  - `default`: mặc định
-  - `when_angry`: khi giận
-  - `when_intimate`: khi thân mật
-  - `when_formal`: khi trang trọng
-- **addresses**: cách gọi từng nhân vật khác (map zh_name → cách gọi)
-- **relationships**: quan hệ với từng nhân vật khác
-
-→ Stage 4 dùng `self_address` + `addresses` để build **Address Matrix** cho mỗi scene.
-
-### 1B. World — Bối cảnh + Story Arcs
-
-- **genre_main**: đô thị / cổ trang / dân quốc / tiên hiệp / võ hiệp / huyền huyễn / khoa huyễn
-- **genre_sub**: ngôn tình / trọng sinh / báo thù / cung đấu / tổng tài / chiến thần / hắc đạo / ...
-- **era, setting**: thời đại, không gian
-- **plot_summary, main_conflict, tone_overall**
-- **story_arcs**: 3-6 đoạn cốt truyện lớn
-
-→ Story arcs giúp Stage 2 group các scene liên quan, Stage 4 biết "đây là arc báo thù" để tone đúng.
-
-### 1C. Glossary — Thuật ngữ riêng phim
-
-KHÔNG phải từ điển Trung-Việt phổ thông. Chỉ các thuật ngữ **riêng của phim này**:
-- Tổ chức trong phim
-- Địa danh riêng
-- Chức vụ / tước hiệu cụ thể
-- Vật phẩm tên riêng
-- Biệt danh / nickname
-- Khái niệm thể loại (kim đan, nguyên anh, độ kiếp...)
-- Cliché câu thoại
-
-→ Mỗi entry có `vi` (cách dịch chuẩn) + `notes` (khi nào dùng khác).
-
-### 1D. Genre Pack — Thư viện thể loại
-
-Genre Pack = "preset" cho thể loại đã quen thuộc, **kế thừa** cho phim cùng thể loại.
-
-Mỗi pack chứa:
-- `tone_signature`: tone tổng thể
-- `typical_pronouns`: map tình huống → cặp xưng hô
-- `common_terms`: thuật ngữ phổ biến trong thể loại
-- `common_cliches`: cliché thoại
-- `translation_examples`: 5 few-shot examples
-- `style_notes`: ghi chú style
-
-5 pack có sẵn:
-- `modern_ceo_romance` (Tổng tài đô thị)
-- `reborn_revenge` (Trọng sinh báo thù)
-- `war_god_return` (Chiến thần trở về)
-- `mafia_lord` (Hắc đạo bá đạo)
-- `ancient_palace` (Cung đấu cổ trang)
-
-Stage 1D tự match Genre Pack theo `genre_main` + `genre_sub`, sau đó MERGE `common_terms` + `common_cliches` vào Bible.glossary.
-
-## Address Matrix — Cốt lõi của xưng hô đúng
-
-Đây là cách hệ thống tránh dịch nhầm "anh-em" thành "tôi-cậu" hoặc ngược lại.
-
-Với mỗi scene, Stage 4 BUILD động một ma trận:
-
-```
-Cố Trầm Châu (nam_chinh, nam) → Tô Niệm (nu_chinh, nu): "tôi-em" (default)
-Tô Niệm (nu_chinh, nu) → Cố Trầm Châu (nam_chinh, nam): "em-anh" (default)
-Cố Trầm Châu → Cố Tân: "anh-em" (default — anh em ruột)
-Cố Tân → Cố Trầm Châu: "tôi-anh" (default)
-
-⚠️ Cảnh giận/lạnh: có thể chuyển sang 'tôi-cô' hoặc 'tao-mày' nếu cao trào.
+```python
+Bible
+├── cast: Cast
+│   └── characters: list[Character]
+│       ├── zh: str          # 顾沉舟
+│       ├── vi: str          # Cố Trầm Châu (Hán Việt)
+│       ├── alias: list[str]
+│       ├── g: 'nam'|'nu'|'?'
+│       ├── role: 'nam_chinh'|'nu_chinh'|'nam_phu'|'nu_phu'|'phan_dien'|'phu'|'khach'
+│       ├── age: '20s'|'30s'|...
+│       ├── char: str        # 1 câu tính cách + kiểu nói
+│       ├── rel: dict[zh_name → quan hệ]
+│       └── catchphrase: optional str
+├── world: World
+│   ├── genre: list[str]     # ['đô thị', 'tổng tài', 'ngôn tình']
+│   ├── era: str             # 'hiện đại'|'cổ đại'|...
+│   ├── tone: str            # 1 câu tone tổng thể
+│   ├── plot: str            # 3-5 câu cốt truyện
+│   └── arcs: list[StoryArc]
+│       └── index, r=(start, end), t (title), tone
+└── glossary: Glossary
+    └── terms: list[GlossaryTerm]
+        └── zh, vi, n (số lần), note (optional)
 ```
 
-Ma trận này được EMBED vào prompt Stage 4, AI phải tuân theo.
+**Đã BỎ so với v2:**
+- `Character.self_address` (Pronouns)
+- `Character.addresses` (dict cách gọi)
+- `Character.social_status`
+- `Character.speaking_style` (gộp vào `char`)
+- `World.main_conflict`, `World.setting` (gộp vào `plot`)
 
-## CPS Management
+**Lý do:** xưng hô KHÔNG hardcode trong prompt mà để AI quyết định theo ngữ cảnh (rel + emotion + glossary xưng hô thể loại).
 
-CPS (Characters Per Second) = số ký tự / giây của 1 dòng SRT.
-- Quá cao → đọc không kịp
-- Netflix: max 17
-- Short drama (màn hình điện thoại): max **15** (chặt hơn)
+### Chunks + Scenes (cấu trúc 3 tầng)
 
-Pipeline xử lý 2 lớp:
-1. **Stage 4** đã được hướng dẫn: câu Việt phải có độ dài tương đương câu Trung (±20%) → đa số sẽ vừa
-2. **Stage 5A** rút gọn các dòng vẫn vượt 15 CPS, batch 10 dòng/call
-
-Sau Stage 5A, nếu vẫn vượt 18 CPS (emergency) → flag review tay.
-
-## TTS-Friendly Translation
-
-Vì pipeline phục vụ LỒNG TIẾNG, không chỉ làm sub, prompt yêu cầu:
-- **Câu tròn**: không cụt cộc "Hả?" → "Cái gì cơ?"
-- **Đủ chủ ngữ**: không "Đi đâu?" → "Cô đi đâu?"
-- **Độ dài match**: câu Việt độ dài tương đương câu Trung để TTS phát đúng nhịp
-- **Tránh từ khó phát âm**: hạn chế Hán Việt nặng trong tone đời thường
-
-## Confidence Tracking
-
-Mỗi dòng có:
-- `speaker_confidence`: high/mid/low (từ Stage 3)
-- `needs_review`: bool (tổng hợp từ nhiều nguồn)
-- `review_reason`: string giải thích
-
-`needs_review=True` khi:
-- Speaker confidence = low
-- CPS vẫn vượt sau khi rút gọn
-- Có issue high-confidence từ Stage 5
-- Untranslated (dòng bị bỏ sót)
-
-→ Tất cả vào file `<name>.review_queue.csv` để bạn check tay.
-
-## Cost Optimization
-
-Cost mỗi phim phụ thuộc model:
-- Gemini 2.5 Pro: ~$1.30/phim
-- Gemini 2.5 Flash: ~$0.30/phim
-- DeepSeek-V3: ~$0.50/phim (với cache 90% off)
-
-Pipeline đã set:
-- **Heavy stages** (Bible, Translate): Gemini 2.5 Pro — cần chất lượng
-- **Medium stages** (Scenes, Speaker, Consistency): Gemini 2.5 Flash — rẻ
-- **Light stages** (CPS Condense): Gemini 2.5 Flash
-
-Override qua CLI:
-```bash
-python run.py translate --model gemini-2.5-flash  # Tất cả Flash
-python run.py translate --provider deepseek --model deepseek-chat
+```python
+ChunkMap
+└── chunks: list[Chunk]
+    ├── r: (start_line, end_line)
+    ├── t: str               # title chunk
+    ├── arc_index: int       # thuộc arc nào
+    └── scenes: list[Scene]  # rỗng nếu chunk ≤ 100 dòng
+        ├── r: (start, end)
+        ├── ch: list[str]    # characters_present (zh)
+        ├── e: emotion
+        ├── loc: location
+        └── tag: 'HOOK'|'PEAK'|None
 ```
 
-## Customization Points
+### Translation
 
-| Việc muốn làm | Edit file |
-|--------------|-----------|
-| Đổi style dịch tổng thể | `prompts/v2/translate_scene.txt` |
-| Thêm quy tắc Hán Việt | `prompts/v2/bible_cast.txt` |
-| Thêm thể loại mới | Tạo `genre_packs/<id>.json` mới |
-| Thay đổi CPS limit | `config.py` → `PROJECT_TYPES` |
-| Thêm idiom dịch | `prompts/v2/translate_scene.txt` section C, D |
-| Đổi cách chia scene | `prompts/v2/scene_detect.txt` |
-| Speaker khắt khe hơn | `prompts/v2/speaker.txt` — thêm sanity check |
-| Polish khắt khe hơn | `prompts/v2/polish_consistency.txt` |
+```python
+SubtitleLine
+├── index, start_time_sec, end_time_sec
+├── text_zh: str
+├── text_v1: str | None     # sát nghĩa
+├── text_v2: str | None     # thoát ý (nullable)
+├── variant_selected: 1|2   # user chọn bản nào active
+├── speaker_zh, speaker_vi
+├── emotion, intensity
+├── cps_value
+└── is_hook, is_emotion_peak
+```
 
-## Limitations & Future Work
+## Stage 1 — Bible
 
-**Phase 1 (hiện tại):**
-- Text-based speaker (không dùng audio/video)
-- 1 lần dịch xong là final (không iterate)
+**3 sub-calls** (1A tuần tự, 1B+1C song song):
 
-**Phase 2 (tương lai):**
-- Audio fusion: dùng Pyannote diarization để verify text-based speaker
-- Visual: dùng face detection để hỗ trợ scene detection
-- Back-translation QC: dịch ngược Việt → Trung để check fidelity
-- Bible incremental: kế thừa Bible giữa các phim cùng series
-- Active learning: học từ user corrections trong review queue
+- **1A Cast** (heavy model, ~30s, ~$0.05) — trích xuất nhân vật từ toàn bộ SRT
+- **1B World** (medium, ~10s, ~$0.01) — genre/era/plot/arcs
+- **1C Glossary** (medium, ~10s, ~$0.01) — thuật ngữ riêng + xưng hô thể loại
+
+Total: ~$0.07 (Gemini Pro+Flash).
+
+## Stage 2 — Chunks + Scenes (1 call/arc)
+
+Mỗi arc → 1 call AI trả về cả chunks + scenes lồng nhau:
+
+```json
+{
+  "chunks": [
+    {
+      "r": [1, 250],
+      "t": "Lần đầu gặp gỡ",
+      "scenes": [
+        [1, 35, ["顾沉舟","苏念"], "tense", "office"],
+        [36, 80, ["苏念","李华"], "sad", "hospital"],
+        [81, 250, ["顾沉舟","苏念"], "intimate", "bedroom", "PEAK"]
+      ]
+    }
+  ]
+}
+```
+
+**Output compact**: scenes là array thay vì dict → tiết kiệm ~70% token output.
+
+5 arcs phim 6000 dòng = 5 calls song song. Total: ~$0.10 (Flash).
+
+## Stage 3 — Speaker (per chunk)
+
+1 call/chunk:
+- Input: nhân vật trong arc, scenes của chunk, thoại chunk
+- Output: `[[line_idx, speaker_zh, confidence h/m/l], ...]` compact
+
+Phim 6000 dòng ~25 chunks → 25 calls (concurrency 5). Total: ~$0.15.
+
+**Checkpoint:** sau mỗi chunk xong → callback `on_chunk_done` để DubEditor save DB. Fail giữa chừng vẫn giữ progress.
+
+## Stage 4 — Translate (heart of pipeline)
+
+### Per chunk processing
+
+```python
+async def process_one_chunk(chunk, ...):
+    # 1. Build context blocks
+    characters_in_chunk = format_characters_in_chunk(chunk, bible)
+    relationships = format_relationships(chunk, bible)
+    glossary_chunk = format_glossary_chunk(chunk, entries, bible)
+    scenes_in_chunk = format_scenes_in_chunk(chunk)
+    
+    # 2. Sliding window (30-50 dòng overlap)
+    context_before = format_context(chunk.start - overlap, chunk.start - 1)
+    context_after = format_context(chunk.end + 1, chunk.end + overlap)
+    
+    # 3. Cached prefix split tại "PHẦN BIẾN — CONTEXT CHUNK"
+    cached_prefix = prompt[:marker_idx]  # Bible + rules, giữ nguyên xuyên phim
+    variable = prompt[marker_idx:]       # context riêng chunk
+    
+    # 4. Call LLM với cached_prefix
+    resp = await call_llm(req, cached_prefix=cached_prefix)
+    
+    # 5. Parse + filter variant (theo config.variant.mode)
+    # 6. Checkpoint save DB
+```
+
+### 2 bản dịch (text_v1 + text_v2)
+
+Variant config:
+
+- `off`: chỉ text_v1
+- `important_only` (mặc định): tạo v2 cho dòng quan trọng:
+  - Dòng ≥ 5 ký tự TQ
+  - Scene tag HOOK/PEAK
+  - Emotion: intimate/angry/shocked/sad/fearful
+  - Intensity ≥ 7
+- `always`: mọi dòng
+
+### Sliding window — KHÔNG ép copy xưng hô
+
+Context trước/sau dùng để:
+- ✅ Hiểu mạch cảnh (tiếp tone scene đang dở)
+- ✅ Reference glossary đã dùng (term/tên nhất quán)
+- ❌ KHÔNG ép giữ xưng hô — xưng hô shift theo emotion từng dòng
+
+### Cached prefix
+
+Gemini explicit cache + OpenAI prompt cache: phần Bible + rules (~3-5K tokens) cache 1 giờ → 25 chunks chỉ trả $1/lần đầu, sau đó cache hit giảm 75-90%.
+
+Cost ước tính (phim 6000 dòng):
+- Không cache: ~$3-4 (Pro)
+- Có cache: ~$1.5-2 (Pro)
+
+## Stage 5 — Retry (đơn giản hóa)
+
+**Đã BỎ:**
+- ~~5A CPS condense (AI rút câu vượt CPS)~~
+- ~~5B Consistency check (AI quét xưng hô per character)~~
+- ~~5C Glossary enforcement (AI rephrase)~~
+
+**Chỉ giữ code-based:**
+
+```python
+for line in all_subtitles:
+    if has_chinese_chars(line.text_active):  # regex [\u4e00-\u9fff]
+        flag_retry(line)
+    elif not line.text_active.strip():
+        flag_retry(line)
+    elif line.text_active.startswith("[CHƯA DỊCH"):
+        flag_retry(line)
+```
+
+Retry batch 10 dòng/call dùng Flash. Cost: ~$0.05.
+
+**Lý do đơn giản hóa:** với pipeline mới (Bible compact + chunk overlap + 2 variants), drift xảy ra ít. Nếu cần consistency check thì user review tay.
+
+## Configuration
+
+```python
+PipelineConfig:
+├── cps: target=17, max=22, condense_threshold=22
+├── chunk: target_lines=300, overlap_lines=30, max_chunks_per_arc=8
+├── variant: mode='important_only', min_chars=5, important_intensity_min=7
+├── compact: auto_threshold_subs=500, combine_b2_b3=False
+├── cache: enabled=True, min_tokens_to_cache=1024
+├── concurrency: bible=3, chunks=5, speaker=5, translate=5, polish=5
+└── models: heavy=gemini-2.5-pro, medium=gemini-2.5-flash
+```
+
+`auto_tune_for_size(total_subs)` tự điều chỉnh:
+- < 500 subs: bật compact mode (gộp B2+B3), chunk 250 dòng, overlap 20
+- 500-1500: chunk 250, overlap 30
+- 1500-3000: chunk 300, overlap 40
+- > 3000: chunk 400, overlap 50, concurrency 7
+
+## Checkpoint mechanism
+
+```python
+@dataclass
+class PipelineCallbacks:
+    on_stage1_done: (Bible) → None
+    on_stage2_done: (ChunkMap) → None
+    on_stage3_chunk_done: (dict) → None
+    on_stage4_chunk_done: (dict) → None
+    on_stage5_done: (PolishReport) → None
+```
+
+DubEditor inject callbacks để save DB sau mỗi chunk. Fail giữa Stage 4 (25 chunks) chỉ mất chunk đang chạy, không mất 24 chunk đã xong.
+
+## Integration với DubEditor
+
+`dubeditor/translate_service.py` cầu nối:
+
+1. `db_subtitles_to_srt_entries()` — convert DB → SrtEntry
+2. `save_bible_to_db()` — Cast/World/Glossary + sync DB Characters
+3. `save_chunks_to_db()` — chunks + scenes table + cập nhật Subtitle.chunk_id/scene_id
+4. `save_translations_to_db()` — text_v1, text_v2, variant_selected=1 mặc định
+5. `TranslateRunner.run_full()` — orchestrate + checkpoints
+
+## API endpoints (DubEditor)
+
+```
+GET    /projects/{pid}/translate/status   # bao gồm chunk_count, variants_count
+POST   /projects/{pid}/translate/start    # full pipeline
+POST   /projects/{pid}/translate/run-stage # 1 stage
+POST   /projects/{pid}/translate/cancel
+POST   /projects/{pid}/translate/reset
+GET    /projects/{pid}/translate/progress  # SSE
+
+GET    /projects/{pid}/bible
+PUT    /projects/{pid}/bible
+GET    /projects/{pid}/bibles              # list versions
+
+GET    /projects/{pid}/chunks              # v3 NEW
+GET    /projects/{pid}/chunks/{id}         # v3 NEW
+GET    /projects/{pid}/scenes
+GET    /projects/{pid}/story-arcs
+
+POST   /projects/{pid}/subtitles/{id}/select-variant       # v3 NEW
+POST   /projects/{pid}/subtitles/bulk-select-variant       # v3 NEW
+
+POST   /projects/{pid}/translate/retranslate # trả new_text_v1 + new_text_v2
+
+GET    /projects/{pid}/polish-issues
+POST   /projects/{pid}/polish-issues/{id}/apply
+POST   /projects/{pid}/polish-issues/{id}/dismiss
+```
+
+## So với v2
+
+| | v2 | v3 |
+|---|---|---|
+| Số calls/phim 6000 dòng | ~200 | ~70 |
+| Cost (Gemini Pro) | $5-7 | $2 |
+| Cost (DeepSeek) | $1-1.5 | $0.5 |
+| Bible structure | Heavy (self_address/addresses) | Compact (char + rel) |
+| Cấu trúc | Arc + Scene (2 tầng) | Arc + Chunk + Scene (3 tầng) |
+| Variant | 1 bản | 2 bản (v1/v2) |
+| Sliding window | ❌ | ✅ 30-50 dòng |
+| Cached prefix | ❌ | ✅ |
+| Checkpoint | ❌ | ✅ per chunk |
+| Polish | 5 sub-stages AI | Code retry only |
+| Genre Pack | Hardcoded files | Gộp vào Glossary AI |

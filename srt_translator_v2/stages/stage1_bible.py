@@ -1,52 +1,47 @@
 """
-Stage 1 — Bible.
+Stage 1 — Bible v3.
 
-Đọc SRT toàn phim, sinh:
-- 1A. Cast: danh sách nhân vật
-- 1B. World + Story Arc: bối cảnh, cốt truyện
-- 1C. Glossary: thuật ngữ riêng
-- 1D. Genre Pack matcher: chọn pack phù hợp + merge
+3 sub-stages chạy song song / tuần tự:
+- 1A. Cast: trích xuất nhân vật (heavy model)
+- 1B. World: thể loại, plot, arcs (medium model)
+- 1C. Glossary: thuật ngữ + xưng hô theo thể loại (medium model)
 
-Chạy 1A trước (cần cho 1B + 1C), rồi 1B+1C song song.
+1A chạy trước (cần xong để 1C tham khảo).
+1B + 1C có thể chạy song song sau 1A.
 """
 from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from config import PipelineConfig
 from core.llm_client import LLMRequest, call_llm, parse_json_response, CostTracker
-from core.srt_parser import SrtEntry, format_time
+from core.srt_parser import SrtEntry
 from models import (
-    Bible, Cast, World, Glossary, GenrePack,
-    Character, Pronouns, StoryArc, GlossaryTerm,
+    Bible, Cast, World, Glossary,
+    Character, StoryArc, GlossaryTerm,
 )
 
 logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────
-# SRT FORMATTING cho prompt
+# FORMAT SRT cho prompt
 # ─────────────────────────────────────────────────────────────────
 
-def format_srt_for_prompt(entries: list[SrtEntry], with_timing: bool = True) -> str:
+def format_srt_for_prompt(entries: list[SrtEntry], with_timing: bool = False) -> str:
     """Convert SRT entries thành chuỗi compact để đưa vào prompt."""
     lines = []
     for e in entries:
         if with_timing:
-            lines.append(f"{e.index} | {e.start_sec:.1f}-{e.end_sec:.1f} | {e.text}")
+            lines.append(f"{e.index} | {e.start_sec:.1f} | {e.text}")
         else:
             lines.append(f"{e.index} | {e.text}")
     return "\n".join(lines)
 
-
-# ─────────────────────────────────────────────────────────────────
-# PROMPT LOADING
-# ─────────────────────────────────────────────────────────────────
 
 def load_prompt(name: str, config: PipelineConfig) -> str:
     """Load 1 prompt template."""
@@ -64,8 +59,9 @@ async def stage1a_cast(
     tracker: CostTracker,
     client: httpx.AsyncClient,
 ) -> Cast:
-    """Sinh danh sách nhân vật từ SRT."""
+    """Trích xuất danh sách nhân vật."""
     logger.info("[Stage 1A] Extracting cast...")
+
     prompt_template = load_prompt("bible_cast", config)
     srt_text = format_srt_for_prompt(entries, with_timing=False)
     prompt = prompt_template.replace("{SRT_FULL}", srt_text)
@@ -80,69 +76,55 @@ async def stage1a_cast(
         max_retries=config.concurrency.retry_max,
     )
 
-    resp = await call_llm(req, client=client)
+    resp = await call_llm(req, client=client, stage_tag="1a_cast")
     tracker.add("1a_cast", resp)
 
     data = parse_json_response(resp.text, default={"characters": []})
 
     characters = []
-    for ch_data in data.get("characters", []):
+    for ch_data in data.get("characters", []) or []:
         try:
-            # Map nested fields safely
-            self_address_data = ch_data.get("self_address", {})
-            if isinstance(self_address_data, str):
-                # Edge case: LLM returns string instead of object
-                self_address_data = {"default": self_address_data}
-
             ch = Character(
-                zh=ch_data.get("zh", ""),
-                vi=ch_data.get("vi", ""),
-                aliases_zh=ch_data.get("aliases_zh", []) or [],
-                aliases_vi=ch_data.get("aliases_vi", []) or [],
-                role=ch_data.get("role", "phu"),
-                gender=ch_data.get("gender", "?"),
-                age_group=ch_data.get("age_group"),
-                social_status=ch_data.get("social_status"),
-                personality=ch_data.get("personality", "") or "",
-                speaking_style=ch_data.get("speaking_style", "") or "",
-                self_address=Pronouns(**{k: v for k, v in self_address_data.items()
-                                          if k in Pronouns.model_fields}),
-                addresses=ch_data.get("addresses", {}) or {},
-                relationships=ch_data.get("relationships", {}) or {},
-                notes=ch_data.get("notes", "") or "",
+                zh=ch_data.get("zh", "") or "",
+                vi=ch_data.get("vi", "") or "",
+                alias=ch_data.get("alias", []) or [],
+                g=ch_data.get("g", "?") or "?",
+                role=ch_data.get("role", "phu") or "phu",
+                age=ch_data.get("age"),
+                char=ch_data.get("char", "") or "",
+                rel=ch_data.get("rel", {}) or {},
+                catchphrase=ch_data.get("catchphrase"),
             )
-            if ch.zh:  # bỏ entry rỗng
-                characters.append(ch)
+            characters.append(ch)
         except Exception as e:
-            logger.warning(f"[1A] Skipped malformed character: {e}; data={ch_data}")
+            logger.warning(f"[Stage 1A] Skip invalid character: {e}")
 
-    logger.info(f"[Stage 1A] Found {len(characters)} characters")
+    logger.info(f"[Stage 1A] Got {len(characters)} characters")
     return Cast(characters=characters)
 
 
 # ─────────────────────────────────────────────────────────────────
-# 1B. WORLD + STORY ARC
+# 1B. WORLD
 # ─────────────────────────────────────────────────────────────────
 
 async def stage1b_world(
     entries: list[SrtEntry],
-    cast: Cast,
     config: PipelineConfig,
     tracker: CostTracker,
     client: httpx.AsyncClient,
 ) -> World:
-    """Sinh world + story arc."""
-    logger.info("[Stage 1B] Building world & story arcs...")
+    """Trích xuất bối cảnh + story arcs."""
+    logger.info("[Stage 1B] Extracting world + arcs...")
+
     prompt_template = load_prompt("bible_world", config)
     srt_text = format_srt_for_prompt(entries, with_timing=False)
-    cast_json = cast.model_dump_json(indent=2, exclude_none=True)
     prompt = (prompt_template
-              .replace("{CAST_JSON}", cast_json)
-              .replace("{SRT_FULL}", srt_text))
+              .replace("{SRT_FULL}", srt_text)
+              .replace("{TOTAL_LINES}", str(len(entries))))
 
     req = LLMRequest(
         prompt=prompt,
-        model=config.models.heavy,
+        model=config.models.medium,
         api_key=config.api_key,
         temperature=0.3,
         max_output=8000,
@@ -150,40 +132,79 @@ async def stage1b_world(
         max_retries=config.concurrency.retry_max,
     )
 
-    resp = await call_llm(req, client=client)
+    resp = await call_llm(req, client=client, stage_tag="1b_world")
     tracker.add("1b_world", resp)
 
     data = parse_json_response(resp.text, default={})
 
     arcs = []
-    for arc_data in data.get("story_arcs", []) or []:
+    for i, arc_data in enumerate(data.get("arcs", []) or []):
         try:
+            r = arc_data.get("r", [1, len(entries)])
+            if not isinstance(r, (list, tuple)) or len(r) != 2:
+                r = [arc_data.get("start_line", 1), arc_data.get("end_line", len(entries))]
             arcs.append(StoryArc(
-                index=arc_data.get("index", len(arcs)),
-                title=arc_data.get("title", ""),
-                summary=arc_data.get("summary", ""),
-                start_line=arc_data.get("start_line", 1),
-                end_line=arc_data.get("end_line", len(entries)),
-                emotional_tone=arc_data.get("emotional_tone", ""),
-                key_events=arc_data.get("key_events", []) or [],
+                index=arc_data.get("index", i),
+                r=(int(r[0]), int(r[1])),
+                t=arc_data.get("t", "") or arc_data.get("title", ""),
+                tone=arc_data.get("tone", "neutral") or "neutral",
             ))
         except Exception as e:
-            logger.warning(f"[1B] Skipped malformed arc: {e}")
+            logger.warning(f"[Stage 1B] Skip invalid arc: {e}")
+
+    # Fallback: nếu không có arcs → tạo 1 arc duy nhất
+    if not arcs:
+        logger.warning("[Stage 1B] No arcs returned, creating fallback single arc")
+        arcs.append(StoryArc(
+            index=0,
+            r=(1, len(entries)),
+            t="Toàn phim",
+            tone="neutral",
+        ))
+
+    # Sanity check arcs liền nhau
+    arcs = _normalize_arcs(arcs, total_lines=len(entries))
 
     world = World(
-        genre_main=data.get("genre_main", "khong_xac_dinh"),
-        genre_sub=data.get("genre_sub", []) or [],
-        era=data.get("era"),
-        setting=data.get("setting"),
-        plot_summary=data.get("plot_summary", "") or "",
-        main_conflict=data.get("main_conflict", "") or "",
-        tone_overall=data.get("tone_overall", "") or "",
-        story_arcs=arcs,
+        genre=data.get("genre", []) or [],
+        era=data.get("era", "hiện đại") or "hiện đại",
+        tone=data.get("tone", "") or "",
+        plot=data.get("plot", "") or "",
+        arcs=arcs,
     )
-
-    logger.info(f"[Stage 1B] Genre: {world.genre_main} / {world.genre_sub}, "
-                f"{len(arcs)} story arcs")
+    logger.info(f"[Stage 1B] Genre: {world.genre}, {len(arcs)} arcs")
     return world
+
+
+def _normalize_arcs(arcs: list[StoryArc], total_lines: int) -> list[StoryArc]:
+    """Sửa arcs nếu chia sai (lấn / hở / sai range)."""
+    if not arcs:
+        return [StoryArc(index=0, r=(1, total_lines), t="Toàn phim", tone="neutral")]
+
+    # Sort theo start_line
+    arcs = sorted(arcs, key=lambda a: a.r[0])
+
+    fixed = []
+    for i, arc in enumerate(arcs):
+        start, end = arc.r
+        # Arc đầu phải bắt đầu từ 1
+        if i == 0:
+            start = 1
+        # Arc i+1 phải = fixed[-1].end + 1
+        elif fixed and start != fixed[-1].r[1] + 1:
+            start = fixed[-1].r[1] + 1
+
+        # Arc cuối phải end = total_lines
+        if i == len(arcs) - 1:
+            end = total_lines
+
+        # End phải >= start
+        if end < start:
+            end = start
+
+        fixed.append(StoryArc(index=i, r=(start, end), t=arc.t, tone=arc.tone))
+
+    return fixed
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -198,32 +219,27 @@ async def stage1c_glossary(
     tracker: CostTracker,
     client: httpx.AsyncClient,
 ) -> Glossary:
-    """Sinh glossary thuật ngữ riêng phim."""
-    logger.info("[Stage 1C] Building glossary...")
+    """Trích xuất glossary (gộp thuật ngữ riêng + xưng hô thể loại)."""
+    logger.info("[Stage 1C] Extracting glossary...")
+
     prompt_template = load_prompt("bible_glossary", config)
     srt_text = format_srt_for_prompt(entries, with_timing=False)
 
-    cast_compact = json.dumps([
-        {"zh": c.zh, "vi": c.vi, "role": c.role}
-        for c in cast.characters
-    ], ensure_ascii=False, indent=2)
-
-    world_compact = json.dumps({
-        "genre_main": world.genre_main,
-        "genre_sub": world.genre_sub,
+    # Bible reference tóm tắt cho prompt
+    bible_ref = {
+        "characters_zh": [c.zh for c in cast.characters if c.zh],
+        "genre": world.genre,
         "era": world.era,
-        "setting": world.setting,
-        "plot_summary": world.plot_summary,
-    }, ensure_ascii=False, indent=2)
+    }
+    bible_ref_str = json.dumps(bible_ref, ensure_ascii=False, indent=2)
 
     prompt = (prompt_template
-              .replace("{CAST_JSON}", cast_compact)
-              .replace("{WORLD_JSON}", world_compact)
-              .replace("{SRT_FULL}", srt_text))
+              .replace("{SRT_FULL}", srt_text)
+              .replace("{BIBLE_REFERENCE}", bible_ref_str))
 
     req = LLMRequest(
         prompt=prompt,
-        model=config.models.heavy,
+        model=config.models.medium,
         api_key=config.api_key,
         temperature=0.2,
         max_output=8000,
@@ -231,7 +247,7 @@ async def stage1c_glossary(
         max_retries=config.concurrency.retry_max,
     )
 
-    resp = await call_llm(req, client=client)
+    resp = await call_llm(req, client=client, stage_tag="1c_glossary")
     tracker.add("1c_glossary", resp)
 
     data = parse_json_response(resp.text, default={"terms": []})
@@ -240,82 +256,21 @@ async def stage1c_glossary(
     for t_data in data.get("terms", []) or []:
         try:
             terms.append(GlossaryTerm(
-                zh=t_data.get("zh", ""),
-                vi=t_data.get("vi", ""),
-                category=t_data.get("category", "other"),
-                notes=t_data.get("notes", "") or "",
+                zh=t_data.get("zh", "") or "",
+                vi=t_data.get("vi", "") or "",
+                cat=(t_data.get("cat") or t_data.get("category") or "khac") or "khac",
+                n=int(t_data.get("n", 0)),
+                note=t_data.get("note"),
             ))
         except Exception as e:
-            logger.warning(f"[1C] Skipped term: {e}")
+            logger.warning(f"[Stage 1C] Skip invalid term: {e}")
 
-    logger.info(f"[Stage 1C] Found {len(terms)} glossary terms")
+    logger.info(f"[Stage 1C] Got {len(terms)} glossary terms")
     return Glossary(terms=terms)
 
 
 # ─────────────────────────────────────────────────────────────────
-# 1D. GENRE PACK MATCHER
-# ─────────────────────────────────────────────────────────────────
-
-def load_genre_pack(pack_id: str, config: PipelineConfig) -> Optional[GenrePack]:
-    """Load 1 genre pack từ disk."""
-    path = config.genre_packs_dir / f"{pack_id}.json"
-    if not path.exists():
-        logger.warning(f"[Genre Pack] Not found: {pack_id}")
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-
-        terms = [GlossaryTerm(**t) for t in data.get("common_terms", [])]
-        cliches = [GlossaryTerm(**t) for t in data.get("common_cliches", [])]
-
-        return GenrePack(
-            id=data["id"],
-            name_vi=data["name_vi"],
-            name_zh=data["name_zh"],
-            description=data["description"],
-            tone_signature=data.get("tone_signature", ""),
-            typical_pronouns=data.get("typical_pronouns", {}),
-            common_terms=terms,
-            common_cliches=cliches,
-            translation_examples=data.get("translation_examples", []),
-            style_notes=data.get("style_notes", ""),
-        )
-    except Exception as e:
-        logger.error(f"[Genre Pack] Failed to load {pack_id}: {e}")
-        return None
-
-
-def list_available_packs(config: PipelineConfig) -> list[str]:
-    """Liệt kê các pack có sẵn."""
-    return [p.stem for p in config.genre_packs_dir.glob("*.json")]
-
-
-def auto_match_genre_pack(world: World, available_packs: list[str]) -> Optional[str]:
-    """Match genre pack đơn giản theo genre tags."""
-    sub = set(world.genre_sub or [])
-    main = world.genre_main
-
-    # Priority match
-    if "tong_tai" in sub and main == "do_thi":
-        return "modern_ceo_romance"
-    if "trong_sinh" in sub and "bao_thu" in sub:
-        return "reborn_revenge"
-    if "chien_than" in sub:
-        return "war_god_return"
-    if "hac_dao" in sub:
-        return "mafia_lord"
-    if "cung_dau" in sub or main == "co_trang":
-        return "ancient_palace"
-
-    # Fallback - đô thị mặc định
-    if main == "do_thi":
-        return "modern_ceo_romance"
-
-    return None
-
-
-# ─────────────────────────────────────────────────────────────────
-# MAIN STAGE 1 ORCHESTRATOR
+# MAIN STAGE 1
 # ─────────────────────────────────────────────────────────────────
 
 async def run_stage1_bible(
@@ -323,59 +278,35 @@ async def run_stage1_bible(
     config: PipelineConfig,
     tracker: CostTracker,
 ) -> Bible:
-    """Chạy Stage 1 đầy đủ.
+    """Stage 1 — Bible đầy đủ.
 
-    Tối ưu: 1B + 1C chạy SONG SONG sau khi 1A xong.
-    1C dùng world placeholder (chỉ cần Cast để filter terms) — chấp nhận
-    chất lượng glossary giảm nhẹ để đổi lấy ~40% tốc độ.
+    Order:
+    1A Cast trước (đồng bộ)
+    1B World + 1C Glossary song song (cần Cast cho 1C)
     """
     logger.info("=" * 60)
     logger.info("STAGE 1 — BIBLE")
     logger.info("=" * 60)
 
     async with httpx.AsyncClient() as client:
-        # 1A — Cast trước (cần cho 1B + 1C)
+        # 1A trước
         cast = await stage1a_cast(entries, config, tracker, client)
 
-        # 1B (World) + 1C (Glossary) chạy SONG SONG.
-        # 1C dùng World rỗng (placeholder) — không lý tưởng nhưng nhanh.
-        placeholder_world = World()
-        world_task = stage1b_world(entries, cast, config, tracker, client)
-        glossary_task = stage1c_glossary(entries, cast, placeholder_world,
-                                          config, tracker, client)
+        # 1B + 1C song song
+        world_task = stage1b_world(entries, config, tracker, client)
+        glossary_task = stage1c_glossary(entries, cast, World(), config, tracker, client)
+
         world, glossary = await asyncio.gather(world_task, glossary_task)
-
-    # 1D — Match Genre Pack
-    if config.genre_pack:
-        pack_id = config.genre_pack
-        logger.info(f"[Stage 1D] Using user-specified pack: {pack_id}")
-    else:
-        available = list_available_packs(config)
-        pack_id = auto_match_genre_pack(world, available)
-        if pack_id:
-            logger.info(f"[Stage 1D] Auto-matched genre pack: {pack_id}")
-        else:
-            logger.info("[Stage 1D] No genre pack matched")
-
-    # Merge Genre Pack terms vào Glossary
-    if pack_id:
-        pack = load_genre_pack(pack_id, config)
-        if pack:
-            existing_zh = {t.zh for t in glossary.terms}
-            merged_count = 0
-            for term in pack.common_terms + pack.common_cliches:
-                if term.zh not in existing_zh:
-                    glossary.terms.append(term)
-                    merged_count += 1
-            logger.info(f"[Stage 1D] Merged {merged_count} terms from Genre Pack")
 
     bible = Bible(
         cast=cast,
         world=world,
         glossary=glossary,
-        genre_pack_id=pack_id,
+        model_used=config.models.heavy,
     )
 
-    logger.info(f"[Stage 1] DONE. Cast: {len(cast.characters)}, "
-                f"Arcs: {len(world.story_arcs)}, Terms: {len(glossary.terms)}")
+    logger.info(f"[Stage 1] DONE. "
+                f"{len(cast.characters)} cast, "
+                f"{len(world.arcs)} arcs, "
+                f"{len(glossary.terms)} terms")
     return bible

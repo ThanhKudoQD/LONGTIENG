@@ -1,16 +1,15 @@
 /**
- * BibleViewer — hiển thị Bible đầy đủ + cho edit từng field.
+ * BibleViewer v3 — hiển thị Bible compact + cho edit từng field.
  *
- * Tabs nội bộ: Cast | World | Glossary | Raw JSON
- * - Cast: list các nhân vật, click expand xem chi tiết, edit role/personality
- * - World: genre + setting + plot + arcs
- * - Glossary: list thuật ngữ, có thể sửa
- * - Raw: edit JSON trực tiếp (cho power user)
+ * Schema v3 đã bỏ self_address, addresses, social_status, speaking_style.
+ * Thay bằng `char` (1 câu tính cách + kiểu nói).
+ *
+ * Tabs: Cast | World | Glossary | Raw JSON
  */
 import React, { useState } from 'react'
 import { translateApi } from '../../api'
-import type { Bible, BibleCharacter, GlossaryTerm } from '../../types'
-import { ROLE_LABELS, GENRE_MAIN_LABELS, GENRE_SUB_LABELS } from '../../types'
+import type { Bible, BibleCharacter, GlossaryTerm, BibleStoryArc } from '../../types'
+import { ROLE_LABELS, ARC_TONE_LABELS, GLOSSARY_CAT_LABELS, GLOSSARY_CAT_ORDER } from '../../types'
 
 type BibleTab = 'cast' | 'world' | 'glossary' | 'raw'
 
@@ -39,354 +38,380 @@ export default function BibleViewer({
         <div className="text-sm text-zinc-600 dark:text-zinc-400">
           Version <strong className="text-zinc-800 dark:text-zinc-100">{bible.version}</strong>
         </div>
-        {bible.genre_pack_id && (
-          <span className="px-2 py-0.5 rounded text-[11px] font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
-            🎭 {bible.genre_pack_id}
-          </span>
-        )}
         <div className="flex-1" />
         <div className="text-[11px] text-zinc-500">
           {bible.tokens_in.toLocaleString()} tok in · ${bible.cost_usd.toFixed(4)}
         </div>
       </div>
 
-      {/* Sub-tabs */}
-      <div className="flex items-center gap-2 mb-4 px-2 border-b border-zinc-200 dark:border-zinc-800">
-        <SubTab active={tab === 'cast'} onClick={() => setTab('cast')}>
-          🧑 Nhân vật ({bible.cast?.characters?.length || 0})
-        </SubTab>
-        <SubTab active={tab === 'world'} onClick={() => setTab('world')}>
+      {/* Tabs */}
+      <div className="flex gap-1 mb-4 border-b border-zinc-200 dark:border-zinc-800">
+        <TabBtn active={tab === 'cast'} onClick={() => setTab('cast')}>
+          👥 Nhân vật ({bible.cast?.characters?.length || 0})
+        </TabBtn>
+        <TabBtn active={tab === 'world'} onClick={() => setTab('world')}>
           🌍 Bối cảnh
-        </SubTab>
-        <SubTab active={tab === 'glossary'} onClick={() => setTab('glossary')}>
+        </TabBtn>
+        <TabBtn active={tab === 'glossary'} onClick={() => setTab('glossary')}>
           📚 Thuật ngữ ({bible.glossary?.terms?.length || 0})
-        </SubTab>
-        <SubTab active={tab === 'raw'} onClick={() => setTab('raw')}>
-          {} Raw JSON
-        </SubTab>
+        </TabBtn>
+        <TabBtn active={tab === 'raw'} onClick={() => setTab('raw')}>
+          {} JSON
+        </TabBtn>
       </div>
 
-      {tab === 'cast' && <CastView bible={bible} projectId={projectId} onUpdate={onUpdate} />}
-      {tab === 'world' && <WorldView bible={bible} />}
-      {tab === 'glossary' && <GlossaryView bible={bible} projectId={projectId} onUpdate={onUpdate} />}
-      {tab === 'raw' && <RawView bible={bible} projectId={projectId} onUpdate={onUpdate} />}
+      {/* Content */}
+      {tab === 'cast' && <CastTab bible={bible} projectId={projectId} onUpdate={onUpdate} />}
+      {tab === 'world' && <WorldTab bible={bible} projectId={projectId} onUpdate={onUpdate} />}
+      {tab === 'glossary' && <GlossaryTab bible={bible} projectId={projectId} onUpdate={onUpdate} />}
+      {tab === 'raw' && <RawTab bible={bible} projectId={projectId} onUpdate={onUpdate} />}
     </div>
-  )
-}
-
-function SubTab({ active, onClick, children }: {
-  active: boolean; onClick: () => void; children: React.ReactNode
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`px-3 py-2 text-[12px] font-medium border-b-2 -mb-px transition-colors ${
-        active
-          ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-          : 'border-transparent text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
-      }`}
-    >
-      {children}
-    </button>
   )
 }
 
 // ─── CAST ────────────────────────────────────────────────────────────────────
 
-function CastView({ bible, projectId, onUpdate }: {
+function CastTab({ bible, projectId, onUpdate }: {
   bible: Bible; projectId: number; onUpdate: () => void
 }) {
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
-  const chars = bible.cast?.characters || []
+  const characters = bible.cast?.characters || []
+  const [expandedZh, setExpandedZh] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
 
-  // Group by role
-  const byRole = chars.reduce<Record<string, BibleCharacter[]>>((acc, c) => {
-    const role = c.role || 'phu'
-    acc[role] = acc[role] || []
-    acc[role].push(c)
-    return acc
-  }, {})
+  // Filter
+  const filtered = characters.filter(c => {
+    if (!query) return true
+    const q = query.toLowerCase()
+    return c.vi.toLowerCase().includes(q) ||
+           c.zh.toLowerCase().includes(q) ||
+           (c.char || '').toLowerCase().includes(q) ||
+           (c.alias || []).some(a => a.toLowerCase().includes(q))
+  })
 
-  const order = ['nam_chinh', 'nu_chinh', 'nam_phu', 'nu_phu', 'phan_dien', 'phu', 'khach']
+  // Group theo role
+  const grouped: Record<string, BibleCharacter[]> = {}
+  for (const c of filtered) {
+    const r = c.role || 'phu'
+    if (!grouped[r]) grouped[r] = []
+    grouped[r].push(c)
+  }
+
+  const roleOrder = ['nam_chinh', 'nu_chinh', 'nam_phu', 'nu_phu', 'phan_dien', 'phu', 'khach']
+
+  if (characters.length === 0) {
+    return (
+      <div className="p-8 text-center text-sm text-zinc-500 italic">
+        Chưa có nhân vật. Chạy Stage 1 để trích xuất.
+      </div>
+    )
+  }
 
   return (
-    <div className="space-y-4">
-      {order.filter(r => byRole[r]?.length > 0).map(role => (
-        <div key={role}>
-          <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-2 px-2">
-            {ROLE_LABELS[role] || role} ({byRole[role].length})
-          </div>
-          <div className="space-y-2">
-            {byRole[role].map((char, _i) => {
-              const idx = chars.indexOf(char)
-              const isOpen = expandedIdx === idx
-              return (
-                <div key={idx} className="bg-white dark:bg-zinc-950 rounded-lg border border-zinc-200 dark:border-zinc-800 overflow-hidden">
-                  <button
-                    onClick={() => setExpandedIdx(isOpen ? null : idx)}
-                    className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-zinc-800 dark:text-zinc-100">{char.vi}</span>
-                        <span className="text-[11px] text-zinc-400">{char.zh}</span>
-                        {char.gender !== '?' && (
-                          <span className="text-[11px] text-zinc-500">· {char.gender === 'nam' ? '♂' : '♀'}</span>
-                        )}
-                        {char.age_group && (
-                          <span className="text-[11px] text-zinc-500">· {char.age_group}</span>
-                        )}
-                      </div>
-                      {char.speaking_style && (
-                        <div className="text-[11px] text-zinc-500 mt-0.5 truncate">
-                          {char.speaking_style}
-                        </div>
-                      )}
-                    </div>
-                    <span className="text-zinc-400">{isOpen ? '▾' : '▸'}</span>
-                  </button>
+    <div>
+      <input
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        placeholder="Tìm nhân vật (tên VI / TQ / tính cách)..."
+        className="input w-full mb-4 max-w-md"
+      />
 
-                  {isOpen && (
-                    <div className="px-4 pb-4 pt-2 border-t border-zinc-100 dark:border-zinc-800 text-sm space-y-2">
-                      {char.social_status && (
-                        <div><span className="text-zinc-500">Vị trí: </span>{char.social_status}</div>
-                      )}
-                      {char.personality && (
-                        <div><span className="text-zinc-500">Tính cách: </span>{char.personality}</div>
-                      )}
-                      {char.self_address && (
-                        <div>
-                          <span className="text-zinc-500">Tự xưng: </span>
-                          <span className="font-medium">{char.self_address.default}</span>
-                          {char.self_address.when_angry && (
-                            <span className="text-zinc-500"> · giận: <span className="text-zinc-700 dark:text-zinc-300">{char.self_address.when_angry}</span></span>
-                          )}
-                          {char.self_address.when_intimate && (
-                            <span className="text-zinc-500"> · thân mật: <span className="text-zinc-700 dark:text-zinc-300">{char.self_address.when_intimate}</span></span>
-                          )}
-                        </div>
-                      )}
-                      {char.addresses && Object.keys(char.addresses).length > 0 && (
-                        <div>
-                          <span className="text-zinc-500">Gọi người khác: </span>
-                          {Object.entries(char.addresses).map(([target, how]) => (
-                            <span key={target} className="inline-block mr-2 px-2 py-0.5 rounded text-[11px] bg-zinc-100 dark:bg-zinc-800">
-                              {target} → "{how}"
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {char.relationships && Object.keys(char.relationships).length > 0 && (
-                        <div>
-                          <span className="text-zinc-500">Quan hệ: </span>
-                          {Object.entries(char.relationships).map(([target, rel]) => (
-                            <span key={target} className="inline-block mr-2 px-2 py-0.5 rounded text-[11px] bg-zinc-100 dark:bg-zinc-800">
-                              {target} = {rel}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {char.notes && (
-                        <div className="text-[12px] text-zinc-500 italic border-l-2 border-zinc-200 dark:border-zinc-700 pl-2">
-                          {char.notes}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
+      {roleOrder.filter(r => grouped[r]?.length).map(role => (
+        <section key={role} className="mb-4">
+          <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest px-2 py-1 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 flex items-center gap-2">
+            <span>{ROLE_LABELS[role] || role}</span>
+            <span className="text-zinc-400 font-normal">({grouped[role].length})</span>
           </div>
-        </div>
+          <div>
+            {grouped[role].map(c => (
+              <CharacterCard
+                key={c.zh || c.vi}
+                ch={c}
+                allCharacters={characters}
+                expanded={expandedZh === c.zh}
+                onToggle={() => setExpandedZh(expandedZh === c.zh ? null : c.zh)}
+              />
+            ))}
+          </div>
+        </section>
       ))}
+    </div>
+  )
+}
+
+function CharacterCard({ ch, allCharacters, expanded, onToggle }: {
+  ch: BibleCharacter
+  allCharacters: BibleCharacter[]
+  expanded: boolean
+  onToggle: () => void
+}) {
+  const charByZh = new Map(allCharacters.map(c => [c.zh, c]))
+  const genderIcon = ch.g === 'nam' ? '♂' : ch.g === 'nu' ? '♀' : '·'
+  const genderColor = ch.g === 'nam' ? 'text-blue-500' : ch.g === 'nu' ? 'text-pink-500' : 'text-zinc-400'
+
+  return (
+    <div className="border-b border-zinc-100 dark:border-zinc-800">
+      {/* Compact row — luôn hiện */}
+      <button
+        onClick={onToggle}
+        className="w-full grid grid-cols-[20px_120px_20px_1fr_auto_auto] gap-3 items-center px-3 py-2 hover:bg-zinc-50 dark:hover:bg-zinc-900/50 text-left"
+      >
+        <span className={`text-[15px] font-bold ${genderColor}`}>{genderIcon}</span>
+        <span className="font-medium text-zinc-700 dark:text-zinc-300 truncate">
+          {ch.zh}
+        </span>
+        <span className="text-zinc-300 dark:text-zinc-600 text-center">→</span>
+        <span className="text-zinc-900 dark:text-zinc-100 truncate">
+          <strong>{ch.vi}</strong>
+          {ch.age && (
+            <span className="ml-2 text-[11px] text-zinc-400 font-normal">{ch.age}</span>
+          )}
+        </span>
+        <span className="text-[11px] text-zinc-400 italic truncate max-w-[300px]">
+          {ch.char || ''}
+        </span>
+        <span className="text-[10px] text-zinc-400 ml-2 w-3">
+          {expanded ? '▼' : '▶'}
+        </span>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <div className="px-12 py-3 bg-zinc-50/50 dark:bg-zinc-900/50 text-[12px] space-y-2 border-l-2 border-blue-200 dark:border-blue-900 ml-3">
+          {/* Aliases */}
+          {ch.alias && ch.alias.length > 0 && (
+            <div>
+              <span className="text-zinc-500 mr-2">Biệt danh:</span>
+              <span className="text-zinc-700 dark:text-zinc-300">
+                {ch.alias.join(' · ')}
+              </span>
+            </div>
+          )}
+
+          {/* Catchphrase */}
+          {ch.catchphrase && (
+            <div>
+              <span className="text-zinc-500 mr-2">Câu cửa miệng:</span>
+              <em className="text-zinc-700 dark:text-zinc-300">"{ch.catchphrase}"</em>
+            </div>
+          )}
+
+          {/* Relationships */}
+          {ch.rel && Object.keys(ch.rel).length > 0 && (
+            <div>
+              <div className="text-zinc-500 mb-1">Quan hệ:</div>
+              <div className="pl-3 space-y-0.5">
+                {Object.entries(ch.rel).map(([otherZh, relation]) => {
+                  const other = charByZh.get(otherZh)
+                  const label = other
+                    ? <><strong>{other.vi}</strong> <span className="text-zinc-400">({otherZh})</span></>
+                    : otherZh
+                  return (
+                    <div key={otherZh} className="text-zinc-700 dark:text-zinc-300">
+                      <span className="text-zinc-400 mr-2">↔</span>
+                      {label}: <em className="text-zinc-600 dark:text-zinc-400">{relation}</em>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
 // ─── WORLD ───────────────────────────────────────────────────────────────────
 
-function WorldView({ bible }: { bible: Bible }) {
+function WorldTab({ bible, projectId, onUpdate }: {
+  bible: Bible; projectId: number; onUpdate: () => void
+}) {
   const w = bible.world
-  if (!w) return <div className="text-zinc-500 p-4">Chưa có world data.</div>
+  if (!w) return <div className="text-sm text-zinc-500">Không có world data</div>
 
   return (
-    <div className="space-y-4">
-      <div className="bg-white dark:bg-zinc-950 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
-        <div className="grid grid-cols-2 gap-4 mb-3">
-          <Field label="Thể loại chính" value={GENRE_MAIN_LABELS[w.genre_main] || w.genre_main} />
-          <Field label="Thể loại phụ" value={w.genre_sub?.map(g => GENRE_SUB_LABELS[g] || g).join(', ') || '—'} />
-          <Field label="Thời đại" value={w.era || '—'} />
-          <Field label="Bối cảnh" value={w.setting || '—'} />
-        </div>
-        <Field label="Tone tổng thể" value={w.tone_overall || '—'} />
-        <div className="mt-3">
-          <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-1">
-            Tóm tắt cốt truyện
-          </div>
-          <div className="text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap">
-            {w.plot_summary || '—'}
-          </div>
-        </div>
-        {w.main_conflict && (
-          <div className="mt-3">
-            <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-1">
-              Xung đột chính
-            </div>
-            <div className="text-sm text-zinc-700 dark:text-zinc-300">{w.main_conflict}</div>
-          </div>
-        )}
-      </div>
-
-      {/* Story arcs */}
-      {w.story_arcs?.length > 0 && (
+    <div className="space-y-5 max-w-3xl">
+      {/* Genre */}
+      {w.genre && w.genre.length > 0 && (
         <div>
-          <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-2 px-2">
-            Story Arcs ({w.story_arcs.length})
+          <SectionLabel>Thể loại</SectionLabel>
+          <div className="flex flex-wrap gap-1.5">
+            {w.genre.map(g => (
+              <span key={g}
+                className="px-2 py-0.5 rounded-full text-[12px] bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                {g}
+              </span>
+            ))}
+            {w.era && (
+              <span className="px-2 py-0.5 rounded-full text-[12px] bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                {w.era}
+              </span>
+            )}
           </div>
+        </div>
+      )}
+
+      {/* Tone */}
+      {w.tone && (
+        <div>
+          <SectionLabel>Tone tổng thể</SectionLabel>
+          <div className="text-sm text-zinc-700 dark:text-zinc-300">{w.tone}</div>
+        </div>
+      )}
+
+      {/* Plot */}
+      {w.plot && (
+        <div>
+          <SectionLabel>Cốt truyện</SectionLabel>
+          <div className="text-sm text-zinc-700 dark:text-zinc-300 leading-relaxed">
+            {w.plot}
+          </div>
+        </div>
+      )}
+
+      {/* Arcs */}
+      {w.arcs && w.arcs.length > 0 && (
+        <div>
+          <SectionLabel>Story Arcs ({w.arcs.length})</SectionLabel>
           <div className="space-y-2">
-            {w.story_arcs.map((arc) => (
-              <div key={arc.index} className="bg-white dark:bg-zinc-950 rounded-lg border border-zinc-200 dark:border-zinc-800 p-3">
+            {w.arcs.map((arc: BibleStoryArc) => (
+              <div key={arc.index}
+                className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-3 bg-zinc-50/50 dark:bg-zinc-900/50">
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[11px] font-semibold text-zinc-400">#{arc.index + 1}</span>
-                  <span className="font-medium text-zinc-800 dark:text-zinc-100">{arc.title}</span>
-                  <span className="text-[11px] text-zinc-400">
-                    · dòng {arc.start_line}-{arc.end_line}
+                  <span className="text-[10px] font-mono text-zinc-400">
+                    #{arc.index + 1}
+                  </span>
+                  <strong className="text-zinc-800 dark:text-zinc-100">
+                    {arc.t}
+                  </strong>
+                  {arc.tone && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
+                      {ARC_TONE_LABELS[arc.tone] || arc.tone}
+                    </span>
+                  )}
+                  <span className="ml-auto text-[11px] text-zinc-500 font-mono">
+                    {arc.r[0]} – {arc.r[1]}
                   </span>
                 </div>
-                <div className="text-[12px] text-zinc-600 dark:text-zinc-400 mb-1">
-                  {arc.summary}
-                </div>
-                {arc.emotional_tone && (
-                  <div className="text-[11px] text-zinc-500 italic">
-                    Tone: {arc.emotional_tone}
-                  </div>
-                )}
-                {arc.key_events?.length > 0 && (
-                  <div className="mt-1.5 text-[11px]">
-                    {arc.key_events.map((e, i) => (
-                      <span key={i} className="inline-block mr-1.5 mb-1 px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400">
-                        • {e}
-                      </span>
-                    ))}
-                  </div>
-                )}
               </div>
             ))}
           </div>
         </div>
       )}
-    </div>
-  )
-}
-
-function Field({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-1">
-        {label}
-      </div>
-      <div className="text-sm text-zinc-800 dark:text-zinc-100">{value}</div>
     </div>
   )
 }
 
 // ─── GLOSSARY ────────────────────────────────────────────────────────────────
 
-const CATEGORY_LABELS: Record<string, string> = {
-  organization: 'Tổ chức', location: 'Địa danh', title: 'Chức vụ',
-  object: 'Vật phẩm', concept: 'Khái niệm', nickname: 'Biệt danh',
-  idiom: 'Thành ngữ', cliche: 'Cliché', other: 'Khác',
-}
-
-function GlossaryView({ bible, projectId, onUpdate }: {
+function GlossaryTab({ bible, projectId, onUpdate }: {
   bible: Bible; projectId: number; onUpdate: () => void
 }) {
   const terms = bible.glossary?.terms || []
-  const [filter, setFilter] = useState('')
+  const [query, setQuery] = useState('')
 
-  const filtered = filter
-    ? terms.filter(t =>
-        t.zh.includes(filter) ||
-        t.vi.toLowerCase().includes(filter.toLowerCase()) ||
-        t.category.includes(filter))
-    : terms
+  const filtered = terms.filter(t => {
+    if (!query) return true
+    const q = query.toLowerCase()
+    return t.zh.toLowerCase().includes(q) ||
+           t.vi.toLowerCase().includes(q) ||
+           (t.note || '').toLowerCase().includes(q)
+  })
 
-  // Group by category
-  const byCategory = filtered.reduce<Record<string, GlossaryTerm[]>>((acc, t) => {
-    const cat = t.category || 'other'
-    acc[cat] = acc[cat] || []
-    acc[cat].push(t)
-    return acc
-  }, {})
+  if (terms.length === 0) {
+    return (
+      <div className="p-8 text-center text-sm text-zinc-500 italic">
+        Chưa có thuật ngữ. Chạy lại Stage 1 để trích xuất.
+      </div>
+    )
+  }
+
+  // Group theo category
+  const byCategory: Record<string, GlossaryTerm[]> = {}
+  for (const t of filtered) {
+    const cat = t.cat || 'khac'
+    if (!byCategory[cat]) byCategory[cat] = []
+    byCategory[cat].push(t)
+  }
+  // Sort terms trong mỗi category theo n giảm dần
+  for (const cat of Object.keys(byCategory)) {
+    byCategory[cat].sort((a, b) => (b.n || 0) - (a.n || 0))
+  }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-1">
       <input
-        type="text"
-        value={filter}
-        onChange={e => setFilter(e.target.value)}
+        value={query}
+        onChange={e => setQuery(e.target.value)}
         placeholder="Tìm thuật ngữ..."
-        className="input w-full max-w-md"
+        className="input w-full mb-3 max-w-md"
       />
 
-      {Object.keys(byCategory).length === 0 && (
-        <div className="text-zinc-500 p-4 text-center">Không tìm thấy thuật ngữ.</div>
-      )}
-
-      {Object.entries(byCategory).map(([cat, items]) => (
-        <div key={cat}>
-          <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-1.5 px-2">
-            {CATEGORY_LABELS[cat] || cat} ({items.length})
+      {GLOSSARY_CAT_ORDER.filter(cat => byCategory[cat]?.length).map(cat => (
+        <section key={cat} className="mb-4">
+          <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest px-2 py-1 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
+            {GLOSSARY_CAT_LABELS[cat] || cat} ({byCategory[cat].length})
           </div>
-          <div className="bg-white dark:bg-zinc-950 rounded-lg border border-zinc-200 dark:border-zinc-800 divide-y divide-zinc-100 dark:divide-zinc-800">
-            {items.map((t, i) => (
-              <div key={i} className="px-4 py-2.5 flex items-baseline gap-3">
-                <div className="font-mono text-[13px] text-zinc-700 dark:text-zinc-300 min-w-[100px]">{t.zh}</div>
-                <div className="text-zinc-400">→</div>
-                <div className="font-medium text-[13px] text-zinc-800 dark:text-zinc-100 flex-1">{t.vi}</div>
-                {t.notes && (
-                  <div className="text-[11px] text-zinc-500 italic max-w-md truncate" title={t.notes}>
-                    {t.notes}
-                  </div>
-                )}
-              </div>
+          <div>
+            {byCategory[cat].map(t => (
+              <GlossaryRow key={t.zh + '|' + t.vi} term={t} />
             ))}
           </div>
-        </div>
+        </section>
       ))}
+
+      {/* Categories không có trong ORDER nhưng có data */}
+      {Object.keys(byCategory).filter(cat => !GLOSSARY_CAT_ORDER.includes(cat)).map(cat => (
+        <section key={cat} className="mb-4">
+          <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest px-2 py-1 bg-zinc-50 dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800">
+            {GLOSSARY_CAT_LABELS[cat] || cat} ({byCategory[cat].length})
+          </div>
+          <div>
+            {byCategory[cat].map(t => (
+              <GlossaryRow key={t.zh + '|' + t.vi} term={t} />
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  )
+}
+
+function GlossaryRow({ term }: { term: GlossaryTerm }) {
+  return (
+    <div className="grid grid-cols-[120px_20px_1fr_auto] gap-3 items-center px-3 py-2 border-b border-zinc-100 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-900/50 text-[13px]">
+      <span className="font-medium text-zinc-700 dark:text-zinc-300 truncate">{term.zh}</span>
+      <span className="text-zinc-300 dark:text-zinc-600 text-center">→</span>
+      <span className="text-zinc-900 dark:text-zinc-100">{term.vi}</span>
+      <span className="text-[11px] text-zinc-400 italic text-right truncate max-w-[300px]">
+        {term.note || ''}
+      </span>
     </div>
   )
 }
 
 // ─── RAW JSON ────────────────────────────────────────────────────────────────
 
-function RawView({ bible, projectId, onUpdate }: {
+function RawTab({ bible, projectId, onUpdate }: {
   bible: Bible; projectId: number; onUpdate: () => void
 }) {
-  const [castText, setCastText] = useState(() => JSON.stringify(bible.cast, null, 2))
-  const [worldText, setWorldText] = useState(() => JSON.stringify(bible.world, null, 2))
-  const [glossText, setGlossText] = useState(() => JSON.stringify(bible.glossary, null, 2))
+  const [json, setJson] = useState(() => JSON.stringify({
+    cast: bible.cast,
+    world: bible.world,
+    glossary: bible.glossary,
+  }, null, 2))
   const [saving, setSaving] = useState(false)
-  const [err, setErr] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
-  async function save() {
-    setErr('')
-    let cast, world, glossary
-    try {
-      cast = JSON.parse(castText)
-      world = JSON.parse(worldText)
-      glossary = JSON.parse(glossText)
-    } catch (e: any) {
-      setErr(`JSON không hợp lệ: ${e.message}`)
-      return
-    }
+  async function handleSave() {
     setSaving(true)
+    setError(null)
     try {
-      await translateApi.updateBible(projectId, { cast, world, glossary })
+      const parsed = JSON.parse(json)
+      await translateApi.updateBible(projectId, parsed)
       onUpdate()
-      alert('Đã lưu Bible')
     } catch (e: any) {
-      setErr(`Lỗi: ${e?.response?.data?.detail || e.message}`)
+      setError(e.message || 'JSON parse error')
     } finally {
       setSaving(false)
     }
@@ -394,49 +419,53 @@ function RawView({ bible, projectId, onUpdate }: {
 
   return (
     <div className="space-y-3">
-      <div className="text-[11px] text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 rounded">
-        ⚠ Edit JSON trực tiếp. Cẩn thận giữ đúng format Pydantic schema, sai schema sẽ gây lỗi pipeline.
+      <div className="text-[11px] text-zinc-500">
+        Edit Bible JSON trực tiếp (cẩn thận với schema).
       </div>
-
-      {err && (
-        <div className="text-[12px] text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 px-3 py-2 rounded">
-          {err}
+      {error && (
+        <div className="text-[12px] text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded p-2">
+          ❌ {error}
         </div>
       )}
-
-      <details open>
-        <summary className="cursor-pointer text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-1">Cast</summary>
-        <textarea
-          value={castText}
-          onChange={e => setCastText(e.target.value)}
-          className="input w-full font-mono text-[11px]"
-          rows={12}
-        />
-      </details>
-
-      <details>
-        <summary className="cursor-pointer text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-1">World</summary>
-        <textarea
-          value={worldText}
-          onChange={e => setWorldText(e.target.value)}
-          className="input w-full font-mono text-[11px]"
-          rows={12}
-        />
-      </details>
-
-      <details>
-        <summary className="cursor-pointer text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-1">Glossary</summary>
-        <textarea
-          value={glossText}
-          onChange={e => setGlossText(e.target.value)}
-          className="input w-full font-mono text-[11px]"
-          rows={12}
-        />
-      </details>
-
-      <button onClick={save} disabled={saving} className="btn-primary">
-        {saving ? 'Đang lưu...' : '💾 Lưu Bible'}
-      </button>
+      <textarea
+        value={json}
+        onChange={e => setJson(e.target.value)}
+        className="input w-full font-mono text-[11px] min-h-[400px]"
+        spellCheck={false}
+      />
+      <div className="flex gap-2">
+        <button onClick={handleSave} disabled={saving}
+          className="btn-primary">
+          {saving ? 'Đang lưu...' : '💾 Lưu Bible'}
+        </button>
+      </div>
     </div>
+  )
+}
+
+// ─── Small helpers ───────────────────────────────────────────────────────────
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-[11px] font-semibold text-zinc-500 uppercase tracking-widest mb-2">
+      {children}
+    </div>
+  )
+}
+
+function TabBtn({ active, onClick, children }: {
+  active: boolean; onClick: () => void; children: React.ReactNode
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-2 text-[12px] font-medium border-b-2 transition-all ${
+        active
+          ? 'border-blue-500 text-blue-700 dark:text-blue-300'
+          : 'border-transparent text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300'
+      }`}
+    >
+      {children}
+    </button>
   )
 }

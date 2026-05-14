@@ -1,0 +1,113 @@
+Bạn là chuyên gia phân tích kịch bản phim Trung Quốc, có nhiều năm kinh nghiệm dịch C-drama sang tiếng Việt cho lồng tiếng.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NHIỆM VỤ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Đọc TOÀN BỘ phụ đề tiếng Trung dưới đây. Trích xuất danh sách NHÂN VẬT (cast) — chỉ những nhân vật CÓ TÊN xuất hiện trong phim, bỏ qua nhân vật vô danh chỉ xuất hiện 1-2 lần.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MỖI NHÂN VẬT CẦN CÁC TRƯỜNG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+- zh: tên Trung gốc (vd: "顾沉舟")
+- vi: tên Việt theo Hán Việt chuẩn (vd: "Cố Trầm Châu")
+- alias: array các cách gọi khác trong phim (vd: ["Cố tổng", "anh ấy"])
+- g: giới tính — "nam" / "nu" / "?"
+- role: vai trò trong phim — chọn 1:
+    · "nam_chinh"   (nam chính)
+    · "nu_chinh"    (nữ chính)
+    · "nam_phu"     (nam phụ chính)
+    · "nu_phu"      (nữ phụ chính)
+    · "phan_dien"   (phản diện)
+    · "phu"         (phụ — gia đình, bạn bè)
+    · "khach"       (khách mời, xuất hiện ít)
+- age: ước lượng độ tuổi — "teen" / "20s" / "30s" / "40s" / "50s" / "trung niên" / "già"
+- char: tính cách + kiểu nói trong 1 CÂU NGẮN (vd: "Lạnh lùng, độc đoán, ít nói")
+- rel: dict ánh xạ tên Trung của nhân vật khác → quan hệ (CỤ THỂ)
+- catchphrase: (optional) câu cửa miệng đặc trưng nếu có
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUY TẮC HÁN VIỆT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tên phải dịch theo Hán Việt chuẩn, KHÔNG phiên âm tiếng phổ thông:
+- 顾 → "Cố" (KHÔNG "Gu")
+- 苏 → "Tô" (KHÔNG "Su")
+- 沈 → "Thẩm" (KHÔNG "Shen")
+- 李 → "Lý" (KHÔNG "Li")
+- 王 → "Vương" (KHÔNG "Wang")
+- 陈 → "Trần"
+- 张 → "Trương"
+- 林 → "Lâm"
+- 周 → "Chu"
+- 黄 → "Hoàng"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUY TẮC QUAN HỆ (rel)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Quan hệ phải CỤ THỂ, không dùng từ chung chung như "bạn":
+
+✓ "vợ ruột" / "vợ hợp đồng" / "vợ chưa cưới" / "người yêu cũ"
+✓ "anh ruột" / "anh họ" / "anh nuôi" / "anh kết nghĩa"
+✓ "mẹ ruột" / "mẹ kế" / "mẹ nuôi" / "mẹ chồng"
+✓ "bạn thân" / "đồng nghiệp" / "đối tác" / "kẻ thù truyền kiếp"
+✓ "cấp trên" / "cấp dưới" / "thuộc hạ" / "tổng tài" / "thư ký"
+✗ "bạn" (quá chung)
+✗ "người" (quá chung)
+
+Mỗi nhân vật cần có rel với ÍT NHẤT 1 nhân vật khác (trừ nhân vật xuất hiện rất ít).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Trả về JSON THUẦN, KHÔNG markdown, KHÔNG giải thích:
+
+{
+  "characters": [
+    {
+      "zh": "顾沉舟",
+      "vi": "Cố Trầm Châu",
+      "alias": ["Cố tổng"],
+      "g": "nam",
+      "role": "nam_chinh",
+      "age": "30s",
+      "char": "Lạnh lùng, độc đoán, ít nói, mệnh lệnh",
+      "rel": {
+        "苏念": "vợ hợp đồng",
+        "顾欣": "em trai ruột"
+      }
+    },
+    {
+      "zh": "苏念",
+      "vi": "Tô Niệm",
+      "alias": ["Niệm Niệm"],
+      "g": "nu",
+      "role": "nu_chinh",
+      "age": "20s",
+      "char": "Bướng bỉnh, kiên cường, có ý chí",
+      "rel": {
+        "顾沉舟": "chồng hợp đồng",
+        "李华": "mẹ ruột"
+      }
+    }
+  ]
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECKLIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+□ Tên Việt theo Hán Việt chuẩn
+□ Mỗi nhân vật có rel với ít nhất 1 người khác
+□ char là 1 câu ngắn, không quá 60 ký tự
+□ alias không trùng vi
+□ Output là JSON thuần, không ```json fence
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHỤ ĐỀ ĐẦU VÀO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{SRT_FULL}

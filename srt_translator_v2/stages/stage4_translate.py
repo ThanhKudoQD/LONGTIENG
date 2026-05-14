@@ -1,26 +1,24 @@
 """
-Stage 4 — Translate per scene.
+Stage 4 — Translate (v3).
 
-Đây là TRÁI TIM của pipeline.
-Dịch từng phân cảnh một, có:
-- Bible toàn phim làm context
-- Genre Pack styling
-- Scene context cụ thể
-- Address matrix dựng động
-- Output JSON có speaker_vi, emotion, intensity
+Trái tim pipeline. Dịch theo chunk với:
+- 2 bản dịch (text_v1 sát nghĩa, text_v2 thoát ý)
+- Sliding window overlap (30-50 dòng trước/sau)
+- Checkpoint per chunk (callback save DB)
+- Heavy model (Pro hoặc DeepSeek)
 """
 from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Optional
+from typing import Optional, Callable
 
 import httpx
 
 from config import PipelineConfig
 from core.llm_client import LLMRequest, call_llm, parse_json_response, CostTracker
 from core.srt_parser import SrtEntry
-from models import Bible, GenrePack, Scene, SceneMap
+from models import Bible, Chunk, ChunkMap, Scene, normalize_emotion
 
 logger = logging.getLogger(__name__)
 
@@ -31,358 +29,145 @@ def load_prompt(name: str, config: PipelineConfig) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# ADDRESS MATRIX
+# CONTEXT FORMATTING
 # ─────────────────────────────────────────────────────────────────
 
-def build_address_matrix(
-    scene: Scene,
-    bible: Bible,
-    genre_pack: Optional[GenrePack],
-) -> str:
-    """Dựng ma trận xưng hô cho các nhân vật trong cảnh.
-
-    Logic:
-    1. Ưu tiên `speaker.addresses[listener_zh]` từ Bible (do Stage 1A xác định).
-    2. Nếu thiếu, suy luận theo gender + role + relationship.
-    3. KHÔNG bao giờ tự ý đưa cặp huyết thống nếu Bible không có relationship rõ.
-
-    Trả về string dạng:
-      Cố Trầm Châu (nam_chinh, nam) → Tô Niệm (nu_chinh, nu): "anh - em" [Bible]
-      Tô Niệm → Cố Trầm Châu: "em - anh" [suy luận] [QH: vợ chưa cưới]
-    """
-    present = [zh for zh in scene.characters_present
-               if not zh.startswith(("phu_", "khach_", "?"))]
+def format_characters_in_chunk(chunk: Chunk, bible: Bible) -> str:
+    """Format chi tiết nhân vật trong chunk."""
+    chars_in_chunk = set()
+    for sc in chunk.scenes:
+        chars_in_chunk.update(sc.ch)
+    # Nếu chunk không có scenes → fallback tất cả cast top
+    if not chars_in_chunk:
+        for c in bible.cast.characters[:15]:
+            chars_in_chunk.add(c.zh)
 
     lines = []
-    for speaker_zh in present:
-        speaker = bible.cast.get_by_zh(speaker_zh)
-        if not speaker:
+    for ch in bible.cast.characters:
+        if ch.zh not in chars_in_chunk:
             continue
-
-        for listener_zh in present:
-            if listener_zh == speaker_zh:
-                continue
-            listener = bible.cast.get_by_zh(listener_zh)
-            if not listener:
-                continue
-
-            # Cách speaker tự xưng (default từ Bible)
-            self_pn = speaker.self_address.default or "tôi"
-
-            # Cách speaker gọi listener: ưu tiên Bible.addresses, sau đó suy luận
-            other_pn = speaker.addresses.get(listener_zh, "")
-            source = "[Bible]"
-
-            if not other_pn:
-                source = "[suy luận]"
-                relation = (speaker.relationships or {}).get(listener_zh, "").lower()
-
-                # Heuristic theo relationship trước
-                if any(k in relation for k in ("mẹ", "má ruột")):
-                    other_pn, self_pn = "mẹ", "con"
-                elif any(k in relation for k in ("bố", "cha", "ba ruột")):
-                    other_pn, self_pn = "bố", "con"
-                elif any(k in relation for k in ("con trai", "con gái", "con ruột")):
-                    other_pn = "con"
-                elif "anh trai" in relation or "anh ruột" in relation:
-                    other_pn = "anh"
-                    self_pn = "em"
-                elif "em trai" in relation or "em gái" in relation:
-                    other_pn = "em"
-                    self_pn = "anh" if speaker.gender == "nam" else "chị"
-                elif "chị" in relation:
-                    other_pn, self_pn = "chị", "em"
-                elif any(k in relation for k in ("vợ", "chồng", "người yêu", "vợ chưa cưới", "yêu nhau", "hôn nhân")):
-                    if speaker.gender == "nam":
-                        self_pn, other_pn = "anh", "em"
-                    else:
-                        self_pn, other_pn = "em", "anh"
-                elif "bạn thân" in relation or "bạn bè" in relation or relation == "bạn":
-                    # NỮ-NỮ bạn thân: "tớ-cậu", NAM-NAM: "tôi-cậu"
-                    if speaker.gender == "nu" and listener.gender == "nu":
-                        self_pn, other_pn = "tớ", "cậu"
-                    elif speaker.gender == "nam" and listener.gender == "nam":
-                        self_pn, other_pn = "tôi", "cậu"
-                    else:
-                        other_pn = "cậu"
-                # Fallback theo gender (KHÔNG dùng huyết thống)
-                elif listener.gender == "nu":
-                    other_pn = "em" if speaker.gender == "nam" else "cô"
-                elif listener.gender == "nam":
-                    other_pn = "anh" if speaker.gender == "nu" else "cậu"
-                else:
-                    other_pn = "cậu"
-
-            relation_text = (speaker.relationships or {}).get(listener_zh, "")
-            relation_suffix = f" [QH: {relation_text}]" if relation_text else ""
-
-            lines.append(
-                f"  {speaker.vi} ({speaker.role}, {speaker.gender}) → "
-                f"{listener.vi} ({listener.role}, {listener.gender}): "
-                f"\"{self_pn} - {other_pn}\" {source}{relation_suffix}"
-            )
-
-    if not lines:
-        return "  (Không có cặp nhân vật rõ ràng trong cảnh)"
-
-    # Thêm thông tin cảm xúc cảnh để hint chuyển xưng hô
-    emotion_hint = ""
-    if scene.emotion_primary in ("angry", "cold"):
-        emotion_hint = "\n  ⚠️ Cảnh giận/lạnh: có thể chuyển sang 'tôi-cô' hoặc 'tao-mày' nếu cao trào."
-    elif scene.emotion_primary == "intimate":
-        emotion_hint = "\n  ❤️ Cảnh thân mật: dùng 'anh-em' nếu là cặp yêu, 'mẹ-con' nếu gia đình."
-    elif scene.emotion_primary == "sarcastic":
-        emotion_hint = "\n  🎭 Cảnh mỉa mai: giữ xưng hô lịch sự, ý thì cay."
-
-    return "\n".join(lines) + emotion_hint
+        age_str = f", {ch.age}" if ch.age else ""
+        catch_str = f" Câu cửa miệng: \"{ch.catchphrase}\"." if ch.catchphrase else ""
+        lines.append(
+            f"- {ch.vi} ({ch.zh}): {ch.g}, {ch.role}{age_str}\n"
+            f"    {ch.char}.{catch_str}"
+        )
+    return "\n".join(lines) if lines else "(Không xác định)"
 
 
-# ─────────────────────────────────────────────────────────────────
-# CHARACTERS IN SCENE (formatted)
-# ─────────────────────────────────────────────────────────────────
+def format_relationships(chunk: Chunk, bible: Bible) -> str:
+    """Build relationships giữa các nhân vật trong chunk."""
+    chars_in_chunk = set()
+    for sc in chunk.scenes:
+        chars_in_chunk.update(sc.ch)
 
-def format_characters_in_scene(scene: Scene, bible: Bible) -> str:
-    """Mô tả nhân vật trong cảnh + style."""
+    if not chars_in_chunk:
+        return "(Không có quan hệ rõ trong chunk)"
+
     lines = []
-    for zh in scene.characters_present:
-        ch = bible.cast.get_by_zh(zh)
-        if ch:
-            lines.append(
-                f"  · {ch.vi} ({ch.zh}) — {ch.role}, {ch.gender}\n"
-                f"    Kiểu nói: {ch.speaking_style or '(chưa rõ)'}\n"
-                f"    Tự xưng: {ch.self_address.default}"
-            )
-        else:
-            lines.append(f"  · {zh} (không rõ trong Cast)")
-    return "\n".join(lines) if lines else "  (Không xác định)"
+    seen_pairs = set()
+    for ch in bible.cast.characters:
+        if ch.zh not in chars_in_chunk:
+            continue
+        for other_zh, rel in ch.rel.items():
+            if other_zh not in chars_in_chunk:
+                continue
+            pair = tuple(sorted([ch.zh, other_zh]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            other_ch = bible.cast.get_by_zh(other_zh)
+            other_vi = other_ch.vi if other_ch else other_zh
+            lines.append(f"- {ch.vi} ↔ {other_vi}: {rel}")
+    return "\n".join(lines) if lines else "(Không có quan hệ rõ)"
 
 
-# ─────────────────────────────────────────────────────────────────
-# GLOSSARY BLOCK (chỉ phần liên quan)
-# ─────────────────────────────────────────────────────────────────
-
-def format_glossary_block(bible: Bible, scene: Scene,
-                          entries_by_idx: dict[int, SrtEntry]) -> str:
-    """Chỉ liệt kê glossary terms XUẤT HIỆN trong scene này."""
-    scene_text = ""
-    for i in range(scene.start_line, scene.end_line + 1):
+def format_glossary_chunk(chunk: Chunk, entries_by_idx: dict[int, SrtEntry],
+                          bible: Bible) -> str:
+    """Lọc glossary terms có trong chunk text."""
+    chunk_text = ""
+    for i in range(chunk.r[0], chunk.r[1] + 1):
         e = entries_by_idx.get(i)
         if e:
-            scene_text += e.text + " "
+            chunk_text += e.text + " "
 
-    relevant = []
-    for term in bible.glossary.terms:
-        if term.zh in scene_text:
-            relevant.append(f"  · {term.zh} → \"{term.vi}\""
-                            + (f"  ({term.notes})" if term.notes else ""))
-
+    relevant = bible.glossary.find_in_text(chunk_text)
     if not relevant:
-        return "  (Không có thuật ngữ đặc biệt trong cảnh này)"
-    return "\n".join(relevant)
+        return "(Không có thuật ngữ đặc biệt)"
 
-
-# ─────────────────────────────────────────────────────────────────
-# DIALOGUE FORMATTING
-# ─────────────────────────────────────────────────────────────────
-
-def format_dialogue_input(
-    scene: Scene,
-    entries_by_idx: dict[int, SrtEntry],
-    speaker_map: dict[int, dict],
-    bible: Bible,
-) -> str:
-    """Format thoại cho prompt — bao gồm speaker_zh + duration."""
     lines = []
-    for i in range(scene.start_line, scene.end_line + 1):
-        e = entries_by_idx.get(i)
-        if not e:
-            continue
-
-        speaker_info = speaker_map.get(i, {})
-        speaker_zh = speaker_info.get("speaker_zh", "?")
-
-        duration = e.end_sec - e.start_sec
-        lines.append(f"{e.index} | {speaker_zh} | {e.text} | {duration:.1f}s")
-
+    for term in relevant:
+        note = f"  ({term.note})" if term.note else ""
+        lines.append(f"- {term.zh} → \"{term.vi}\"{note}")
     return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────────
-# HOOK INSTRUCTION
-# ─────────────────────────────────────────────────────────────────
+def format_scenes_in_chunk(chunk: Chunk) -> str:
+    """Format scenes của chunk cho prompt."""
+    if not chunk.scenes:
+        return f"(Chunk này không chia scenes, là 1 mạch liền: dòng {chunk.r[0]}-{chunk.r[1]})"
 
-def hook_instruction(scene: Scene) -> str:
-    if scene.is_hook:
-        return ("⚠️ Cảnh này có HOOK LINE (cliffhanger): dòng cuối thường là câu sốc, "
-                "đe dọa, twist. Dịch MẠNH, có thể thêm 'thôi/đó/này' để nhấn mạnh. "
-                "Giữ kịch tính.")
-    if scene.is_emotion_peak:
-        return ("🎯 Cảnh ĐỈNH CẢM XÚC: dịch chính xác cường độ, không làm dịu. "
-                "Câu nào cay thì giữ cay, câu nào đau thì giữ đau.")
-    return "(Cảnh thường, dịch tự nhiên)"
-
-
-# ─────────────────────────────────────────────────────────────────
-# PROCESS ONE SCENE
-# ─────────────────────────────────────────────────────────────────
-
-async def process_one_scene(
-    scene: Scene,
-    bible: Bible,
-    genre_pack: Optional[GenrePack],
-    entries_by_idx: dict[int, SrtEntry],
-    speaker_map: dict[int, dict],
-    prompt_template: str,
-    config: PipelineConfig,
-    tracker: CostTracker,
-    client: httpx.AsyncClient,
-    semaphore: asyncio.Semaphore,
-) -> dict[int, dict]:
-    """Dịch 1 phân cảnh, return map line_index -> {text_vi, speaker_vi, emotion, intensity}."""
-    async with semaphore:
-        # Build context blocks
-        characters_in_scene = format_characters_in_scene(scene, bible)
-        address_matrix = build_address_matrix(scene, bible, genre_pack)
-        glossary_block = format_glossary_block(bible, scene, entries_by_idx)
-        dialogue_input = format_dialogue_input(scene, entries_by_idx, speaker_map, bible)
-        hook_inst = hook_instruction(scene)
-
-        # Story arc title
-        arc_title = ""
-        if scene.story_arc_index is not None and scene.story_arc_index < len(bible.world.story_arcs):
-            arc_title = bible.world.story_arcs[scene.story_arc_index].title
-
-        prompt = (prompt_template
-                  .replace("{GENRE_MAIN}", bible.world.genre_main)
-                  .replace("{GENRE_SUB}", ", ".join(bible.world.genre_sub))
-                  .replace("{SETTING}", bible.world.setting or "")
-                  .replace("{TONE_OVERALL}", bible.world.tone_overall or "")
-                  .replace("{PLOT_SUMMARY}", bible.world.plot_summary or "")
-                  .replace("{SCENE_INDEX}", str(scene.index))
-                  .replace("{SCENE_LOCATION}", scene.location or "")
-                  .replace("{SCENE_SUMMARY}", scene.summary or "")
-                  .replace("{SCENE_PURPOSE}", scene.purpose or "")
-                  .replace("{SCENE_EMOTION}", scene.emotion_primary)
-                  .replace("{SCENE_EMOTION_ARC}", scene.emotion_arc or "")
-                  .replace("{STORY_ARC_TITLE}", arc_title)
-                  .replace("{IS_HOOK}", "có" if scene.is_hook else "không")
-                  .replace("{IS_EMOTION_PEAK}", "có" if scene.is_emotion_peak else "không")
-                  .replace("{CHARACTERS_IN_SCENE}", characters_in_scene)
-                  .replace("{ADDRESS_MATRIX}", address_matrix)
-                  .replace("{GLOSSARY_BLOCK}", glossary_block)
-                  .replace("{IS_HOOK_INSTRUCTION}", hook_inst)
-                  .replace("{DIALOGUE_INPUT}", dialogue_input))
-
-        req = LLMRequest(
-            prompt=prompt,
-            model=config.models.heavy,
-            api_key=config.api_key,
-            temperature=0.4,  # cao hơn — cần creativity cho dịch
-            max_output=16000,
-            json_mode=True,
-            max_retries=config.concurrency.retry_max,
+    lines = []
+    for i, sc in enumerate(chunk.scenes):
+        chars_str = ", ".join(sc.ch)
+        loc_str = f" @ {sc.loc}" if sc.loc else ""
+        tag_str = f" [{sc.tag}]" if sc.tag else ""
+        lines.append(
+            f"Scene {i+1} (dòng {sc.r[0]}-{sc.r[1]}): "
+            f"[{chars_str}]{loc_str}, emotion={sc.e}{tag_str}"
         )
-
-        try:
-            resp = await call_llm(req, client=client)
-            tracker.add("4_translate", resp)
-            data = parse_json_response(resp.text, default={"translations": []})
-        except Exception as e:
-            logger.warning(f"[Stage 4] Scene {scene.index} failed: {e}")
-            return {}
-
-        result = {}
-        for t_data in data.get("translations", []) or []:
-            try:
-                line_idx = int(t_data.get("line_index", -1))
-                if line_idx < 1:
-                    continue
-                result[line_idx] = {
-                    "text_vi": t_data.get("text_vi", "") or "",
-                    "speaker_vi": t_data.get("speaker_vi", "") or "",
-                    "emotion": t_data.get("emotion", "neutral"),
-                    "intensity": int(t_data.get("intensity", 5)),
-                }
-            except Exception:
-                continue
-
-        return result
+    return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────────
-# MAIN STAGE 4
-# ─────────────────────────────────────────────────────────────────
-
-def build_translate_batches(scenes: list, lines_per_call: int) -> list[list]:
-    """Gộp scenes liền nhau CÙNG story_arc thành batch ~N dòng.
-
-    Quy tắc:
-      - Chỉ gộp scenes liền nhau (theo index)
-      - Chỉ gộp scenes CÙNG story_arc (để pronoun + emotion context nhất quán)
-      - Tổng dòng ≤ lines_per_call → flush batch
-      - Scene có is_hook=True hoặc is_emotion_peak=True → tách riêng (giữ chất lượng)
-    """
-    batches: list[list] = []
-    current: list = []
-    current_lines = 0
-    current_arc: Optional[int] = None
-
-    for sc in scenes:
-        sc_len = sc.end_line - sc.start_line + 1
-        # Scene đặc biệt → tách riêng
-        is_special = sc.is_hook or sc.is_emotion_peak
-        # Đổi arc → flush
-        arc_changed = (current_arc is not None and sc.story_arc_index != current_arc)
-        # Vượt threshold → flush
-        will_overflow = current and (current_lines + sc_len > lines_per_call)
-
-        if is_special:
-            # Flush current trước, scene đặc biệt 1 mình
-            if current:
-                batches.append(current)
-                current = []
-                current_lines = 0
-            batches.append([sc])
-            current_arc = None
-            continue
-
-        if current and (arc_changed or will_overflow):
-            batches.append(current)
-            current = [sc]
-            current_lines = sc_len
-            current_arc = sc.story_arc_index
-        else:
-            current.append(sc)
-            current_lines += sc_len
-            if current_arc is None:
-                current_arc = sc.story_arc_index
-
-    if current:
-        batches.append(current)
-    return batches
-
-
-def format_batch_dialogue_input(
-    scenes: list,
+def format_dialogue_input(
+    chunk: Chunk,
     entries_by_idx: dict[int, SrtEntry],
     speaker_map: dict[int, dict],
     bible: Bible,
 ) -> str:
-    """Format dialogue cho 1 batch nhiều scenes, có scene boundary markers."""
-    parts = []
-    for sc in scenes:
-        parts.append(f"=== SCENE {sc.index} — {sc.location or '?'} | "
-                     f"emotion: {sc.emotion_primary} ===")
-        sc_dialogue = format_dialogue_input(sc, entries_by_idx, speaker_map, bible)
-        parts.append(sc_dialogue)
-        parts.append("")
-    return "\n".join(parts).rstrip()
+    """Format thoại CẦN DỊCH với speaker + duration."""
+    lines = []
+    for i in range(chunk.r[0], chunk.r[1] + 1):
+        e = entries_by_idx.get(i)
+        if not e:
+            continue
+        speaker_info = speaker_map.get(i, {})
+        speaker_zh = speaker_info.get("speaker_zh") or "?"
+        duration = e.end_sec - e.start_sec
+        lines.append(f"{e.index} | {speaker_zh} | {e.text} | {duration:.1f}s")
+    return "\n".join(lines)
 
 
-async def process_batch(
-    batch: list,
+def format_context_window(
+    entries_by_idx: dict[int, SrtEntry],
+    speaker_map: dict[int, dict],
+    start_line: int,
+    end_line: int,
+    label: str = "context",
+) -> str:
+    """Format context trước/sau (sliding window). Chỉ text TQ + speaker, không dịch."""
+    if start_line > end_line:
+        return "(Không có)"
+
+    lines = []
+    for i in range(start_line, end_line + 1):
+        e = entries_by_idx.get(i)
+        if not e:
+            continue
+        speaker_info = speaker_map.get(i, {})
+        speaker_zh = speaker_info.get("speaker_zh") or "?"
+        lines.append(f"{e.index} | {speaker_zh} | {e.text}")
+    return "\n".join(lines) if lines else "(Không có)"
+
+
+# ─────────────────────────────────────────────────────────────────
+# PROCESS 1 CHUNK
+# ─────────────────────────────────────────────────────────────────
+
+async def process_one_chunk(
+    chunk: Chunk,
     bible: Bible,
-    genre_pack: Optional[GenrePack],
+    entries: list[SrtEntry],
     entries_by_idx: dict[int, SrtEntry],
     speaker_map: dict[int, dict],
     prompt_template: str,
@@ -391,104 +176,68 @@ async def process_batch(
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
 ) -> dict[int, dict]:
-    """Dịch 1 batch (nhiều scenes cùng arc), trả về map line_index -> translation.
-
-    Vẫn dùng prompt template cũ — chỉ aggregate context fields đúng:
-      - Address matrix: hợp nhất chars present trong tất cả scenes của batch
-      - Glossary: hợp nhất terms xuất hiện trong batch
-      - Dialogue: nhiều scenes với marker boundary
-    """
-    if len(batch) == 1:
-        # 1 scene → dùng path cũ (tối ưu hơn, prompt clean hơn)
-        return await process_one_scene(
-            batch[0], bible, genre_pack, entries_by_idx, speaker_map,
-            prompt_template, config, tracker, client, semaphore,
-        )
-
+    """Dịch 1 chunk, return map line_idx → translation info."""
     async with semaphore:
-        # Aggregate context across scenes in batch
-        first = batch[0]
-        last = batch[-1]
-        scene_range = f"{first.index}-{last.index}"
+        # Build context blocks
+        characters_in_chunk = format_characters_in_chunk(chunk, bible)
+        relationships = format_relationships(chunk, bible)
+        glossary_chunk = format_glossary_chunk(chunk, entries_by_idx, bible)
+        scenes_in_chunk = format_scenes_in_chunk(chunk)
+        dialogue_input = format_dialogue_input(chunk, entries_by_idx, speaker_map, bible)
 
-        # Merge characters_in_scene (deduplicated)
-        seen_chars = set()
-        char_lines = []
-        for sc in batch:
-            sc_chars = format_characters_in_scene(sc, bible)
-            for line in sc_chars.splitlines():
-                if line and line not in seen_chars:
-                    seen_chars.add(line)
-                    char_lines.append(line)
-        characters_in_scene = "\n".join(char_lines)
-
-        # Address matrix dùng chars của tất cả scenes (merge characters_present)
-        merged_chars_set = sorted({c for sc in batch for c in sc.characters_present})
-        # Tạo synthetic scene để build address matrix
-        from models import Scene as _Scene
-        synthetic = _Scene(
-            index=first.index,
-            start_line=first.start_line,
-            end_line=last.end_line,
-            start_time_sec=first.start_time_sec,
-            end_time_sec=last.end_time_sec,
-            location=first.location,
-            characters_present=merged_chars_set,
-            summary=f"Batch {scene_range}",
-            emotion_primary=first.emotion_primary,
-            emotion_arc=last.emotion_arc or first.emotion_arc,
-            purpose=first.purpose,
-            story_arc_index=first.story_arc_index,
+        # Sliding window context
+        overlap = config.chunk.overlap_lines
+        context_before = format_context_window(
+            entries_by_idx, speaker_map,
+            max(1, chunk.r[0] - overlap),
+            chunk.r[0] - 1,
+            "before",
         )
-        address_matrix = build_address_matrix(synthetic, bible, genre_pack)
-
-        # Glossary: merge for all scenes
-        seen_terms = set()
-        gloss_lines = []
-        for sc in batch:
-            g = format_glossary_block(bible, sc, entries_by_idx)
-            for line in g.splitlines():
-                if line and line not in seen_terms:
-                    seen_terms.add(line)
-                    gloss_lines.append(line)
-        glossary_block = "\n".join(gloss_lines)
-
-        dialogue_input = format_batch_dialogue_input(batch, entries_by_idx, speaker_map, bible)
-        hook_inst = hook_instruction(first)  # batch không nên chứa hook scenes (đã tách)
-
-        arc_title = ""
-        if first.story_arc_index is not None and first.story_arc_index < len(bible.world.story_arcs):
-            arc_title = bible.world.story_arcs[first.story_arc_index].title
-
-        # Emotion arc: kết hợp đầu-cuối
-        emotion_arc_combined = (
-            f"{first.emotion_arc or first.emotion_primary} → {last.emotion_arc or last.emotion_primary}"
+        context_after = format_context_window(
+            entries_by_idx, speaker_map,
+            chunk.r[1] + 1,
+            min(len(entries), chunk.r[1] + overlap),
+            "after",
         )
 
+        # Get arc info
+        arc = bible.world.arcs[chunk.arc_index] if chunk.arc_index < len(bible.world.arcs) else None
+        arc_title = arc.t if arc else ""
+        arc_tone = arc.tone if arc else "neutral"
+
+        # Build prompt
         prompt = (prompt_template
-                  .replace("{GENRE_MAIN}", bible.world.genre_main)
-                  .replace("{GENRE_SUB}", ", ".join(bible.world.genre_sub))
-                  .replace("{SETTING}", bible.world.setting or "")
-                  .replace("{TONE_OVERALL}", bible.world.tone_overall or "")
-                  .replace("{PLOT_SUMMARY}", bible.world.plot_summary or "")
-                  .replace("{SCENE_INDEX}", scene_range)
-                  .replace("{SCENE_LOCATION}", first.location or "")
-                  .replace("{SCENE_SUMMARY}",
-                           f"Batch {len(batch)} cảnh liên tiếp cùng arc. " + (first.summary or ""))
-                  .replace("{SCENE_PURPOSE}", first.purpose or "")
-                  .replace("{SCENE_EMOTION}", first.emotion_primary)
-                  .replace("{SCENE_EMOTION_ARC}", emotion_arc_combined)
-                  .replace("{STORY_ARC_TITLE}", arc_title)
-                  .replace("{IS_HOOK}", "không")  # batch không chứa hook (đã filter)
-                  .replace("{IS_EMOTION_PEAK}", "không")
-                  .replace("{CHARACTERS_IN_SCENE}", characters_in_scene)
-                  .replace("{ADDRESS_MATRIX}", address_matrix)
-                  .replace("{GLOSSARY_BLOCK}", glossary_block)
-                  .replace("{IS_HOOK_INSTRUCTION}", hook_inst)
-                  .replace("{DIALOGUE_INPUT}", dialogue_input))
+                  .replace("{CHUNK_TITLE}", chunk.t)
+                  .replace("{ARC_TITLE}", arc_title)
+                  .replace("{ARC_TONE}", arc_tone)
+                  .replace("{CHARACTERS_IN_CHUNK}", characters_in_chunk)
+                  .replace("{RELATIONSHIPS}", relationships)
+                  .replace("{GLOSSARY_CHUNK}", glossary_chunk)
+                  .replace("{SCENES_IN_CHUNK}", scenes_in_chunk)
+                  .replace("{CONTEXT_BEFORE}", context_before)
+                  .replace("{CONTEXT_AFTER}", context_after)
+                  .replace("{DIALOGUE_INPUT}", dialogue_input)
+                  .replace("{MIN_CHARS}", str(config.variant.min_chars))
+                  .replace("{INTENSITY_MIN}", str(config.variant.important_intensity_min)))
+
+        # Cached prefix: phần Bible + rules đầu prompt
+        cached_prefix = None
+        if config.cache.enabled:
+            # Lấy phần header (từ đầu đến trước "PHẦN BIẾN")
+            split_marker = "PHẦN BIẾN — CONTEXT CHUNK"
+            if split_marker in prompt:
+                idx = prompt.index(split_marker)
+                cached_prefix = prompt[:idx]
+                prompt_variable = prompt[idx:]
+                # Chỉ cache nếu đủ dài
+                if len(cached_prefix) >= config.cache.min_tokens_to_cache * 3:  # ~3 chars/tok
+                    prompt = prompt_variable
+                else:
+                    cached_prefix = None
 
         req = LLMRequest(
             prompt=prompt,
+            cached_prefix=cached_prefix,
             model=config.models.heavy,
             api_key=config.api_key,
             temperature=0.4,
@@ -498,89 +247,155 @@ async def process_batch(
         )
 
         try:
-            resp = await call_llm(req, client=client)
+            resp = await call_llm(req, client=client,
+                                  stage_tag=f"4_translate_c{chunk.r[0]}")
             tracker.add("4_translate", resp)
             data = parse_json_response(resp.text, default={"translations": []})
         except Exception as e:
-            logger.warning(f"[Stage 4] Batch {scene_range} failed: {e}")
+            logger.warning(f"[Stage 4] Chunk {chunk.r[0]}-{chunk.r[1]} failed: {e}")
             return {}
 
         result = {}
-        for t_data in data.get("translations", []) or []:
+        for t in data.get("translations", []) or []:
             try:
-                line_idx = int(t_data.get("line_index", -1))
+                line_idx = int(t.get("line_index", -1))
                 if line_idx < 1:
                     continue
                 result[line_idx] = {
-                    "text_vi": t_data.get("text_vi", "") or "",
-                    "speaker_vi": t_data.get("speaker_vi", "") or "",
-                    "emotion": t_data.get("emotion", "neutral"),
-                    "intensity": int(t_data.get("intensity", 5)),
+                    "speaker_vi": (t.get("speaker_vi") or "").strip(),
+                    "text_v1": (t.get("text_v1") or "").strip() or None,
+                    "text_v2": (t.get("text_v2") or "").strip() or None,
+                    "emotion": normalize_emotion(t.get("emotion")),
+                    "intensity": _clamp_intensity(t.get("intensity")),
                 }
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[Stage 4] Skip invalid translation: {e}")
                 continue
 
         return result
 
 
+def _clamp_intensity(val) -> int:
+    """Clamp intensity về 1-10."""
+    try:
+        i = int(float(val))
+        return max(1, min(10, i))
+    except (TypeError, ValueError):
+        return 5
+
+
+# ─────────────────────────────────────────────────────────────────
+# VARIANT FILTERING (sau khi nhận từ AI)
+# ─────────────────────────────────────────────────────────────────
+
+def should_keep_variant(
+    text_v1: Optional[str],
+    text_v2: Optional[str],
+    emotion: str,
+    intensity: int,
+    is_hook: bool,
+    is_peak: bool,
+    config: PipelineConfig,
+) -> bool:
+    """Quyết định có giữ text_v2 không (theo config variant.mode)."""
+    if not text_v2 or text_v2 == text_v1:
+        return False
+
+    mode = config.variant.mode
+    if mode == "off":
+        return False
+    if mode == "always":
+        return True
+
+    # important_only
+    if not text_v1 or len(text_v1) < config.variant.min_chars:
+        return False
+
+    # Important by emotion
+    if emotion in config.variant.important_emotions:
+        return True
+
+    # Important by intensity
+    if intensity >= config.variant.important_intensity_min:
+        return True
+
+    # Important by scene tag
+    if is_hook or is_peak:
+        return True
+
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────
+# MAIN STAGE 4
+# ─────────────────────────────────────────────────────────────────
+
 async def run_stage4_translate(
     entries: list[SrtEntry],
     bible: Bible,
-    scene_map: SceneMap,
+    chunk_map: ChunkMap,
     speaker_map: dict[int, dict],
     config: PipelineConfig,
     tracker: CostTracker,
-    genre_pack: Optional[GenrePack] = None,
+    on_chunk_done: Optional[Callable] = None,
 ) -> dict[int, dict]:
-    """Dịch toàn phim, return map line_index -> {text_vi, speaker_vi, emotion, intensity}.
-
-    v3: gộp scenes cùng story_arc thành batches để giảm calls.
-    Scenes hook hoặc emotion_peak vẫn xử lý riêng để giữ chất lượng.
-    """
+    """Stage 4 — dịch toàn phim theo chunks. Per-chunk checkpoint."""
     logger.info("=" * 60)
     logger.info("STAGE 4 — TRANSLATE")
     logger.info("=" * 60)
 
-    prompt_template = load_prompt("translate_scene", config)
+    if not chunk_map.chunks:
+        logger.warning("[Stage 4] No chunks, skipping")
+        return {}
+
+    prompt_template = load_prompt("translate_chunk", config)
     entries_by_idx = {e.index: e for e in entries}
 
-    # v3: batch scenes cùng arc
-    batches = build_translate_batches(
-        scene_map.scenes, config.batch.translate_lines_per_call,
-    )
-    total_lines = sum(s.end_line - s.start_line + 1 for s in scene_map.scenes)
-    avg_per_batch = total_lines / max(len(batches), 1)
-    single_count = sum(1 for b in batches if len(b) == 1)
-    logger.info(f"[Stage 4] {len(scene_map.scenes)} scenes → {len(batches)} batches "
-                f"(~{avg_per_batch:.0f} lines/batch, {single_count} single-scene)")
-
     semaphore = asyncio.Semaphore(config.concurrency.translate)
+    all_results: dict[int, dict] = {}
+
+    logger.info(f"[Stage 4] {len(chunk_map.chunks)} chunks, "
+                f"concurrency={config.concurrency.translate}, "
+                f"variant_mode={config.variant.mode}, "
+                f"cache={'on' if config.cache.enabled else 'off'}")
 
     async with httpx.AsyncClient() as client:
         tasks = [
-            process_batch(batch, bible, genre_pack, entries_by_idx, speaker_map,
-                          prompt_template, config, tracker, client, semaphore)
-            for batch in batches
+            process_one_chunk(
+                chunk, bible, entries, entries_by_idx, speaker_map,
+                prompt_template, config, tracker, client, semaphore,
+            )
+            for chunk in chunk_map.chunks
         ]
 
-        all_results = {}
         completed = 0
         total = len(tasks)
 
         for coro in asyncio.as_completed(tasks):
-            batch_result = await coro
-            all_results.update(batch_result)
+            chunk_result = await coro
+            all_results.update(chunk_result)
             completed += 1
-            if completed % 5 == 0 or completed == total:
-                logger.info(f"   [Stage 4] {completed}/{total} batches translated")
+            if completed % 3 == 0 or completed == total:
+                logger.info(f"[Stage 4] {completed}/{total} chunks translated")
 
-    # Coverage check
+            # Checkpoint callback
+            if on_chunk_done:
+                try:
+                    res = on_chunk_done(chunk_result)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception as e:
+                    logger.warning(f"[Stage 4] checkpoint failed: {e}")
+
+    # Coverage stats
     covered = len(all_results)
+    variant_count = sum(1 for r in all_results.values() if r.get("text_v2"))
     expected = len(entries)
     missing = expected - covered
-    if missing > 0:
-        logger.warning(f"[Stage 4] {missing}/{expected} lines NOT translated. "
-                       f"Will fill with placeholder.")
 
-    logger.info(f"[Stage 4] DONE. {covered}/{expected} lines translated.")
+    logger.info(f"[Stage 4] DONE. {covered}/{expected} lines translated, "
+                f"{variant_count} variants")
+    if missing > 0:
+        logger.warning(f"[Stage 4] {missing} lines NOT translated (will retry in Stage 5)")
+
     return all_results

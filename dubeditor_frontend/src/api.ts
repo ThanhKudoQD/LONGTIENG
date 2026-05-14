@@ -1,11 +1,10 @@
 import axios from 'axios'
 import type {
-  Bible, Scene, StoryArc, PolishIssue,
-  TranslateStatus, GenrePackInfo, TranslateConfig,
+  Bible, Scene, StoryArc, Chunk, PolishIssue,
+  TranslateStatus, TranslateConfig, RetranslateResult,
 } from './types'
 
 // API instance — timeout 5 phút cho LLM calls.
-// Backend httpx 600s, FE 300s để fail-fast sớm hơn.
 const api = axios.create({
   baseURL: '/dub/api',
   timeout: 300000,
@@ -13,9 +12,8 @@ const api = axios.create({
 
 export default api
 
-// ─── Translate v2 API helpers ────────────────────────────────────────────────
+// ─── Translate v3 API helpers ────────────────────────────────────────────────
 
-// Status / control
 export const translateApi = {
   getStatus: (pid: number) =>
     api.get<TranslateStatus>(`/projects/${pid}/translate/status`).then(r => r.data),
@@ -36,11 +34,18 @@ export const translateApi = {
   getBible: (pid: number) =>
     api.get<Bible | null>(`/projects/${pid}/bible`).then(r => r.data),
 
-  updateBible: (pid: number, payload: Partial<Pick<Bible, 'cast' | 'world' | 'glossary' | 'genre_pack_id'>>) =>
+  updateBible: (pid: number, payload: Partial<Pick<Bible, 'cast' | 'world' | 'glossary'>>) =>
     api.put<Bible>(`/projects/${pid}/bible`, payload).then(r => r.data),
 
   listBibleVersions: (pid: number) =>
     api.get<Bible[]>(`/projects/${pid}/bibles`).then(r => r.data),
+
+  // Chunks v3
+  listChunks: (pid: number) =>
+    api.get<Chunk[]>(`/projects/${pid}/chunks`).then(r => r.data),
+
+  getChunkDetail: (pid: number, chunkId: number) =>
+    api.get<any>(`/projects/${pid}/chunks/${chunkId}`).then(r => r.data),
 
   // Scenes
   listScenes: (pid: number) =>
@@ -68,27 +73,26 @@ export const translateApi = {
   dismissIssue: (pid: number, issueId: number) =>
     api.post(`/projects/${pid}/polish-issues/${issueId}/dismiss`).then(r => r.data),
 
-  // Retranslate 1 line
+  // Retranslate 1 line — trả 2 bản v1/v2
   retranslate: (pid: number, payload: {
     subtitle_id: number
     hint: string
     api_key: string
     provider?: 'gemini' | 'openai' | 'deepseek'
     model?: string
-    variants?: number
   }) =>
-    api.post<{
-      ok: boolean
-      subtitle_id: number
-      current_text: string
-      variants: string[]
-      tokens_in: number
-      tokens_out: number
-    }>(`/projects/${pid}/translate/retranslate`, payload).then(r => r.data),
+    api.post<RetranslateResult>(`/projects/${pid}/translate/retranslate`, payload).then(r => r.data),
 
-  // Genre packs (global, không phụ thuộc project)
-  listGenrePacks: () =>
-    api.get<GenrePackInfo[]>(`/translate/genre-packs`).then(r => r.data),
+  // v3: chọn variant cho 1 dòng
+  selectVariant: (pid: number, subtitleId: number, variant: 1 | 2) =>
+    api.post(`/projects/${pid}/subtitles/${subtitleId}/select-variant`, { variant })
+       .then(r => r.data),
+
+  // v3: bulk chọn variant
+  bulkSelectVariant: (pid: number, variant: 1 | 2, subtitleIds?: number[]) =>
+    api.post(`/projects/${pid}/subtitles/bulk-select-variant`,
+             { variant, subtitle_ids: subtitleIds || null })
+       .then(r => r.data),
 }
 
 // ─── SSE progress stream ─────────────────────────────────────────────────────

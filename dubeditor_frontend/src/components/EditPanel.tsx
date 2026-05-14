@@ -1,16 +1,17 @@
 import React, { useEffect, useState, useRef } from 'react'
 import useStore from '../store'
-import api from '../api'
+import api, { translateApi } from '../api'
 import { secToSrt, srtToSec } from '../types'
 
 export default function EditPanel() {
-  // PERF: selectors riêng — KHÔNG destructure
+  // PERF: selectors riêng
   const subtitles = useStore(s => s.subtitles)
   const characters = useStore(s => s.characters)
   const activeSubId = useStore(s => s.activeSubId)
   const updateSubtitle = useStore(s => s.updateSubtitle)
   const deleteSubtitle = useStore(s => s.deleteSubtitle)
   const setActiveSubId = useStore(s => s.setActiveSubId)
+  const project = useStore(s => s.project)
 
   const activeSub = subtitles.find(s => s.id === activeSubId) ?? null
   const lastSubRef = useRef<typeof activeSub>(null)
@@ -18,23 +19,28 @@ export default function EditPanel() {
   const sub = lastSubRef.current
 
   const [text, setText] = useState('')
+  const [textV1, setTextV1] = useState('')
+  const [textV2, setTextV2] = useState('')
+  const [variantSelected, setVariantSelected] = useState<1 | 2>(1)
   const [start, setStart] = useState('')
   const [end, setEnd] = useState('')
   const [charId, setCharId] = useState('')
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
+  // Reset state khi activeSub đổi
   useEffect(() => {
     if (!activeSub) return
-    setText(activeSub.text)
+    setText(activeSub.text || '')
+    setTextV1(activeSub.text_v1 || activeSub.text || '')
+    setTextV2(activeSub.text_v2 || '')
+    setVariantSelected((activeSub.variant_selected as 1 | 2) || 1)
     setStart(secToSrt(activeSub.start_time))
     setEnd(secToSrt(activeSub.end_time))
     setCharId(activeSub.character_id ? String(activeSub.character_id) : '')
     setConfirmDelete(false)
   }, [activeSub?.id])
 
-  // Sync charId khi character_id thay đổi từ bên ngoài (keyboard shortcut, drag, chip gán)
-  // mà không đổi id sub (activeSub?.id không đổi nên effect trên không re-run)
   useEffect(() => {
     if (!activeSub) return
     setCharId(activeSub.character_id ? String(activeSub.character_id) : '')
@@ -63,34 +69,73 @@ export default function EditPanel() {
     if (remaining.length > 0) setActiveSubId(remaining[Math.min(idx, remaining.length - 1)].id)
   }
 
+  const hasVariant = !!(sub && sub.text_v2 && sub.text_v2.trim())
+
   const save = async () => {
     if (!sub) return
     setSaving(true)
     try {
-      // Chỉ patch những field thực sự thay đổi.
-      // KHÔNG reset audio_offset, KHÔNG reset character_id ngoài ý muốn.
       const patch: any = {}
-      if (text !== sub.text) patch.text = text
+      // Xác định text active đang edit là v1 hay v2
+      const editingV2 = variantSelected === 2 && hasVariant
+      if (editingV2) {
+        // Edit v2
+        if (textV2 !== (sub.text_v2 || '')) patch.text_v2 = textV2
+      } else {
+        // Edit v1
+        if (textV1 !== (sub.text_v1 || sub.text || '')) patch.text_v1 = textV1
+      }
+      // Nếu variant đổi
+      if (variantSelected !== (sub.variant_selected || 1)) {
+        patch.variant_selected = variantSelected
+      }
+
       const newStart = srtToSec(start)
       const newEnd = srtToSec(end)
       if (Math.abs(newStart - sub.start_time) > 0.001) patch.start_time = newStart
       if (Math.abs(newEnd - sub.end_time) > 0.001) patch.end_time = newEnd
-      // character_id: chỉ update nếu user đổi qua dropdown
       const newCharId = charId ? parseInt(charId) : null
       if (newCharId !== sub.character_id) patch.character_id = newCharId
 
-      if (Object.keys(patch).length === 0) {
-        // Không có gì đổi
-        return
-      }
+      if (Object.keys(patch).length === 0) return
 
-      await api.patch(`/subtitles/${sub.id}`, patch)
-      const updates: any = { ...patch }
+      const updated = await api.patch(`/subtitles/${sub.id}`, patch).then(r => r.data)
+      // Cập nhật store với data mới nhất từ server (vì backend đã sync text active + cps)
+      const updates: any = {
+        text: updated.text,
+        text_v1: updated.text_v1,
+        text_v2: updated.text_v2,
+        variant_selected: updated.variant_selected,
+        cps_value: updated.cps_value,
+      }
       if ('character_id' in patch) {
         updates.character = characters.find(c => c.id === patch.character_id) || null
+        updates.character_id = patch.character_id
       }
+      if ('start_time' in patch) updates.start_time = patch.start_time
+      if ('end_time' in patch) updates.end_time = patch.end_time
       updateSubtitle(sub.id, updates)
-    } finally { setSaving(false) }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Switch variant nhanh (gọi API + cập nhật state)
+  const switchVariant = async (newVariant: 1 | 2) => {
+    if (!sub || !project) return
+    setVariantSelected(newVariant)
+    try {
+      const res = await translateApi.selectVariant(project.id, sub.id, newVariant)
+      updateSubtitle(sub.id, {
+        text: res.text,
+        variant_selected: newVariant,
+        cps_value: res.cps_value,
+        tts_done: false,
+        audio_path: null,
+      })
+    } catch (e) {
+      console.warn('switch variant failed', e)
+    }
   }
 
   return (
@@ -101,7 +146,7 @@ export default function EditPanel() {
         <div className="absolute inset-0 z-20 bg-white/95 dark:bg-zinc-900/95 flex flex-col items-center justify-center gap-3 rounded">
           <p className="text-[13px] text-zinc-700 dark:text-zinc-300 text-center px-4">
             Xóa dòng <span className="font-semibold">#{sub.index}</span>?<br/>
-            <span className="text-zinc-400 text-[12px]">"{sub.text.slice(0, 40)}{sub.text.length > 40 ? '...' : ''}"</span>
+            <span className="text-zinc-400 text-[12px]">"{(sub.text || '').slice(0, 40)}{(sub.text || '').length > 40 ? '...' : ''}"</span>
           </p>
           <div className="flex gap-2">
             <button onClick={handleDelete} className="px-4 py-1.5 rounded-lg bg-red-500 hover:bg-red-600 text-white text-[13px] font-medium transition-colors">Xóa (Enter)</button>
@@ -116,54 +161,112 @@ export default function EditPanel() {
         </div>
       ) : (
         <>
-          {/* textarea + nút Lưu */}
-          <div className="flex gap-2 items-stretch">
-            <textarea
-              value={text}
-              onChange={e => setText(e.target.value)}
-              rows={3}
-              className="input text-[14px] flex-1 resize-none leading-relaxed font-medium"
+          {/* Variant picker — chỉ hiện khi có text_v2 */}
+          {hasVariant && (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-zinc-500 uppercase tracking-widest">Bản dịch:</span>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => switchVariant(1)}
+                  className={`px-2.5 py-1 rounded-md text-[12px] font-medium transition-all ${
+                    variantSelected === 1
+                      ? 'bg-blue-600 text-white shadow'
+                      : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                  }`}
+                  title="Sát nghĩa — chính xác, phù hợp subtitle"
+                >
+                  v1: Sát nghĩa
+                </button>
+                <button
+                  onClick={() => switchVariant(2)}
+                  className={`px-2.5 py-1 rounded-md text-[12px] font-medium transition-all ${
+                    variantSelected === 2
+                      ? 'bg-purple-600 text-white shadow'
+                      : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+                  }`}
+                  title="Thoát ý — tự nhiên, phù hợp lồng tiếng"
+                >
+                  v2: Thoát ý
+                </button>
+              </div>
+              {sub.original_text && (
+                <span className="ml-auto text-[10px] font-mono text-zinc-400 truncate max-w-md">
+                  {sub.original_text}
+                </span>
+              )}
+            </div>
+          )}
 
-              style={{ minHeight: 72 }}
-            />
+          {/* Hiển thị 2 bản (khi có variant) */}
+          {hasVariant ? (
+            <div className="grid grid-cols-2 gap-2">
+              <div className={`relative rounded-lg border-2 ${
+                variantSelected === 1
+                  ? 'border-blue-500 bg-blue-50/30 dark:bg-blue-900/10'
+                  : 'border-zinc-200 dark:border-zinc-700'
+              }`}>
+                <div className="absolute -top-2 left-2 px-1.5 text-[10px] bg-white dark:bg-zinc-900 text-blue-600 dark:text-blue-400 font-semibold">
+                  v1 · sát nghĩa
+                </div>
+                <textarea
+                  value={textV1}
+                  onChange={e => setTextV1(e.target.value)}
+                  rows={3}
+                  className="w-full p-2 pt-3 bg-transparent text-[13px] resize-none focus:outline-none"
+                  style={{ minHeight: 72 }}
+                />
+              </div>
+              <div className={`relative rounded-lg border-2 ${
+                variantSelected === 2
+                  ? 'border-purple-500 bg-purple-50/30 dark:bg-purple-900/10'
+                  : 'border-zinc-200 dark:border-zinc-700'
+              }`}>
+                <div className="absolute -top-2 left-2 px-1.5 text-[10px] bg-white dark:bg-zinc-900 text-purple-600 dark:text-purple-400 font-semibold">
+                  v2 · thoát ý
+                </div>
+                <textarea
+                  value={textV2}
+                  onChange={e => setTextV2(e.target.value)}
+                  rows={3}
+                  className="w-full p-2 pt-3 bg-transparent text-[13px] resize-none focus:outline-none"
+                  style={{ minHeight: 72 }}
+                />
+              </div>
+            </div>
+          ) : (
+            /* Chỉ 1 bản */
+            <div className="flex gap-2 items-stretch">
+              <textarea
+                value={textV1}
+                onChange={e => setTextV1(e.target.value)}
+                rows={3}
+                className="input text-[14px] flex-1 resize-none leading-relaxed font-medium"
+                style={{ minHeight: 72 }}
+              />
+            </div>
+          )}
 
+          {/* Save button + info bar */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 flex items-center gap-2 text-[11px] text-zinc-500">
+              {sub.cps_value != null && (
+                <span className={sub.cps_value > 22 ? 'text-red-500 font-semibold' : ''}>
+                  CPS: {sub.cps_value.toFixed(1)}
+                </span>
+              )}
+              {sub.emotion && (
+                <span>· {sub.emotion}</span>
+              )}
+              {sub.speaker_zh && (
+                <span>· {sub.speaker_zh}</span>
+              )}
+            </div>
             <button
               onClick={save}
               disabled={saving}
-              title="Lưu"
-              className="flex-shrink-0 flex flex-col items-center justify-center gap-1 rounded-xl transition-all duration-150 disabled:opacity-60 active:scale-95"
-              style={{
-                width: 52,
-                background: saving ? '#93C5FD' : '#1D4ED8',
-                boxShadow: '0 2px 8px rgba(29,78,216,0.35)',
-                border: 'none',
-              }}
-              onMouseEnter={e => {
-                if (saving) return
-                const el = e.currentTarget
-                el.style.background = '#2563EB'
-                el.style.boxShadow = '0 4px 14px rgba(29,78,216,0.5)'
-                el.style.transform = 'scale(1.04)'
-              }}
-              onMouseLeave={e => {
-                const el = e.currentTarget
-                el.style.background = saving ? '#93C5FD' : '#1D4ED8'
-                el.style.boxShadow = '0 2px 8px rgba(29,78,216,0.35)'
-                el.style.transform = 'scale(1)'
-              }}
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[13px] font-medium disabled:opacity-60 transition-all"
             >
-              {saving ? (
-                <div className="w-5 h-5 rounded-full border-2 border-white border-t-transparent animate-spin" />
-              ) : (
-                <>
-                  <svg width="18" height="18" viewBox="0 0 15 15" fill="none" className="text-white">
-                    <path d="M2.5 2.5h8L12 4V12.5H2.5V2.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
-                    <rect x="4.5" y="8" width="6" height="4" rx="0.5" fill="currentColor" opacity="0.5"/>
-                    <rect x="4.5" y="3" width="5" height="3" rx="0.5" fill="currentColor" opacity="0.5"/>
-                  </svg>
-                  <span className="text-[11px] text-white font-bold tracking-wide">Lưu</span>
-                </>
-              )}
+              {saving ? '⏳ Đang lưu...' : '💾 Lưu'}
             </button>
           </div>
         </>

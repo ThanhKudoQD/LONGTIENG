@@ -95,6 +95,10 @@ class SubtitleUpdate(BaseModel):
     needs_review:         Optional[bool]  = None
     # v3: per-line voice mode override (null = auto theo emotion)
     tts_voice_mode:       Optional[str]   = None
+    # v3: 2 variants — user có thể edit từng bản và chọn bản dùng
+    text_v1:              Optional[str]   = None
+    text_v2:              Optional[str]   = None
+    variant_selected:     Optional[int]   = None  # 1 hoặc 2
 
 class SubtitleOut(SubtitleBase):
     id:            int
@@ -124,6 +128,11 @@ class SubtitleOut(SubtitleBase):
     # v3 computed: mode được resolve từ (emotion, intensity, tts_voice_mode)
     # — hiển thị làm badge trên FE. Backend tính sẵn để FE consistent.
     voice_mode:         str           = "normal"
+    # v3: 2 variants
+    text_v1:            Optional[str] = None
+    text_v2:            Optional[str] = None
+    variant_selected:   int           = 1
+    chunk_id:           Optional[int] = None
 
     @model_validator(mode="after")
     def _compute_voice_mode(self):
@@ -245,13 +254,18 @@ class TranslateConfig(BaseModel):
     api_key:       str
     provider:      Literal["gemini", "openai", "deepseek"] = "gemini"
     model_heavy:   str = "gemini-2.5-pro"      # Bible, Translate
-    model_medium:  str = "gemini-2.5-flash"    # Scene, Speaker, Polish
-    model_light:   str = "gemini-2.5-flash"    # CPS condense
+    model_medium:  str = "gemini-2.5-flash"    # Scene, Speaker
+    model_light:   str = "gemini-2.5-flash"    # Retry
     project_type:  str = "short_drama"
-    genre_pack:    Optional[str] = None        # None = auto detect
     cps_max:       Optional[float] = None      # None = dùng preset của project_type
     concurrency:   int = 5
     source_lang:   str = "zh"
+    # v3: variant 2 bản dịch
+    variant_mode:  Literal["off", "important_only", "always"] = "important_only"
+    # v3: chunk overlap (sliding window)
+    chunk_overlap: int = 30
+    # v3: cached prefix
+    cache_enabled: bool = True
 
 
 class TranslateStartRequest(TranslateConfig):
@@ -261,17 +275,24 @@ class TranslateStartRequest(TranslateConfig):
 
 class TranslateStageRequest(TranslateConfig):
     """Chạy chỉ 1 stage cụ thể (debug)."""
-    stage: Literal["bible", "scenes", "speaker", "translate", "polish"]
+    stage: Literal["bible", "scenes", "chunks", "speaker", "translate", "polish"]
 
 
 class RetranslateRequest(BaseModel):
-    """Dịch lại 1 dòng cụ thể."""
+    """Dịch lại 1 dòng cụ thể, trả 2 bản v1+v2."""
     subtitle_id:   int
     hint:          str = ""
     api_key:       str
     provider:      Literal["gemini", "openai", "deepseek"] = "gemini"
     model:         str = "gemini-2.5-flash"
-    variants:      int = 1
+    # v3: luôn trả 2 bản (frontend hiển thị cả 2 cho user chọn)
+    return_variants: bool = True
+
+
+class SelectVariantRequest(BaseModel):
+    """User chọn bản nào dùng (1 hoặc 2)."""
+    subtitle_id:    int
+    variant:        Literal[1, 2]
 
 
 class BibleOut(BaseModel):
@@ -282,7 +303,7 @@ class BibleOut(BaseModel):
     cast:             dict
     world:            dict
     glossary:         dict
-    genre_pack_id:    Optional[str] = None
+    genre_pack_id:    Optional[str] = None  # deprecated v3
     tokens_in:        int = 0
     tokens_out:       int = 0
     cost_usd:         float = 0.0
@@ -305,11 +326,28 @@ class SceneOut(BaseModel):
     summary:            str = ""
     purpose:            str = ""
     story_arc_id:       Optional[int] = None
+    chunk_id:           Optional[int] = None  # v3
     is_hook:            bool = False
     is_emotion_peak:    bool = False
     status:             str = "pending"
     error_message:      Optional[str] = None
     line_count:         int = 0
+
+
+class ChunkOut(BaseModel):
+    """Chunk v3 — chương trong arc."""
+    id:             int
+    project_id:     int
+    arc_index:      int
+    chunk_index:    int
+    title:          str = ""
+    start_line:     int
+    end_line:       int
+    status:         str = "pending"
+    line_count:     int = 0
+    scene_count:    int = 0
+    arc_title:      Optional[str] = None
+    arc_tone:       Optional[str] = None
 
 
 class StoryArcOut(BaseModel):
@@ -345,19 +383,14 @@ class TranslateStatusOut(BaseModel):
     current_stage:    Optional[str] = None
     progress:         float = 0.0
     has_bible:        bool = False
+    chunk_count:      int = 0       # v3
     scene_count:      int = 0
     speaker_assigned_count: int = 0
     translated_count: int = 0
+    variants_count:   int = 0       # v3: dòng có text_v2
     review_count:     int = 0
     avg_cps:          float = 0.0
     cost_usd:         float = 0.0
     tokens_in:        int = 0
     tokens_out:       int = 0
     error_message:    Optional[str] = None
-
-
-class GenrePackInfo(BaseModel):
-    id:          str
-    name_vi:     str
-    name_zh:     str
-    description: str

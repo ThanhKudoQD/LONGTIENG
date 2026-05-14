@@ -1,9 +1,10 @@
 """
-Stage 3 — Speaker Assignment.
+Stage 3 — Speaker (v3).
 
-v3 strategy: gom nhiều scenes liền nhau thành 1 batch ~N dòng (config.batch.speaker_lines_per_call)
-để giảm số calls + chia sẻ Bible context. Mỗi batch vẫn giữ scene boundary trong prompt
-để LLM biết khi nào đổi cảnh.
+Logic mới: gán speaker theo CHUNK (đã có từ Bước 2).
+- 1 call/chunk
+- Phim 6000 dòng ~20-25 chunks = 20-25 calls
+- Concurrency 5 song song
 """
 from __future__ import annotations
 import asyncio
@@ -16,7 +17,7 @@ import httpx
 from config import PipelineConfig
 from core.llm_client import LLMRequest, call_llm, parse_json_response, CostTracker
 from core.srt_parser import SrtEntry
-from models import Bible, Scene, SceneMap, SubtitleLine
+from models import Bible, Chunk, ChunkMap, Scene
 
 logger = logging.getLogger(__name__)
 
@@ -27,207 +28,209 @@ def load_prompt(name: str, config: PipelineConfig) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Batching: gom scenes thành batches ~N dòng
+# HELPERS
 # ─────────────────────────────────────────────────────────────────
 
-def build_scene_batches(scenes: list[Scene], lines_per_call: int) -> list[list[Scene]]:
-    """Gom các scenes LIỀN NHAU thành 1 batch sao cho tổng dòng ≈ lines_per_call.
-
-    Không tách scene ra giữa chừng (giữ boundary tự nhiên).
-    Scene đơn lẻ vượt lines_per_call vẫn tự thành 1 batch.
-    """
-    batches: list[list[Scene]] = []
-    current: list[Scene] = []
-    current_lines = 0
-
-    for sc in scenes:
-        sc_len = sc.end_line - sc.start_line + 1
-        # Nếu thêm scene này vượt threshold VÀ current đã có scene → flush
-        if current and (current_lines + sc_len > lines_per_call):
-            batches.append(current)
-            current = [sc]
-            current_lines = sc_len
-        else:
-            current.append(sc)
-            current_lines += sc_len
-
-    if current:
-        batches.append(current)
-    return batches
+def get_chunk_characters(chunk: Chunk, bible: Bible) -> set[str]:
+    """Lấy tất cả nhân vật xuất hiện trong chunk (từ scenes)."""
+    chars = set()
+    if chunk.scenes:
+        for sc in chunk.scenes:
+            for c in sc.ch:
+                chars.add(c)
+    # Nếu chunk không có scenes → lấy toàn bộ cast (fallback)
+    if not chars:
+        for c in bible.cast.characters:
+            chars.add(c.zh)
+    return chars
 
 
-def format_batch_dialogue(scenes: list[Scene], entries_by_idx: dict[int, SrtEntry]) -> str:
-    """Format thoại của 1 batch gồm nhiều scenes, có marker scene boundary."""
-    parts = []
-    for sc in scenes:
-        parts.append(f"=== SCENE {sc.index} — {sc.location or '?'} | "
-                     f"emotion: {sc.emotion_primary} ===")
-        if sc.summary:
-            parts.append(f"   (tóm tắt: {sc.summary})")
-        if sc.characters_present:
-            parts.append(f"   (nhân vật mặt: {', '.join(sc.characters_present)})")
-        for i in range(sc.start_line, sc.end_line + 1):
-            e = entries_by_idx.get(i)
-            if e:
-                parts.append(f"{e.index} | {e.text}")
-        parts.append("")  # blank line giữa scenes
-    return "\n".join(parts).rstrip()
+def format_arc_characters(bible: Bible, chars_in_chunk: set[str]) -> str:
+    """Format danh sách nhân vật trong arc + chunk."""
+    lines = []
+    for ch in bible.cast.characters:
+        if ch.zh in chars_in_chunk:
+            lines.append(f"- {ch.zh} ({ch.vi}): {ch.g}, {ch.role}, {ch.char}")
+    if not lines:
+        # Fallback: top characters
+        for ch in bible.cast.characters[:10]:
+            lines.append(f"- {ch.zh} ({ch.vi}): {ch.g}, {ch.role}, {ch.char}")
+    return "\n".join(lines)
 
 
-async def process_one_batch(
-    batch: list[Scene],
+def format_scenes_info(chunk: Chunk) -> str:
+    """Format scenes trong chunk."""
+    if not chunk.scenes:
+        return f"(Chunk {chunk.r[0]}-{chunk.r[1]} không chia scenes, là 1 mạch liền)"
+
+    lines = []
+    for i, sc in enumerate(chunk.scenes):
+        chars_str = ", ".join(sc.ch)
+        loc_str = f"@ {sc.loc}" if sc.loc else ""
+        tag_str = f" [{sc.tag}]" if sc.tag else ""
+        lines.append(f"Scene {i+1} ({sc.r[0]}-{sc.r[1]}): [{chars_str}] {loc_str}, {sc.e}{tag_str}")
+    return "\n".join(lines)
+
+
+def format_chunk_srt(entries: list[SrtEntry], chunk: Chunk) -> str:
+    """Format SRT của chunk."""
+    lines = []
+    for e in entries:
+        if chunk.r[0] <= e.index <= chunk.r[1]:
+            lines.append(f"{e.index} | {e.text}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────
+# PROCESS 1 CHUNK
+# ─────────────────────────────────────────────────────────────────
+
+async def process_one_chunk(
+    chunk: Chunk,
+    entries: list[SrtEntry],
     bible: Bible,
-    entries_by_idx: dict[int, SrtEntry],
-    prompt_template: str,
     config: PipelineConfig,
     tracker: CostTracker,
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
 ) -> dict[int, dict]:
-    """Process 1 batch (nhiều scenes liền), trả về map line_index -> speaker info."""
+    """Gán speaker cho 1 chunk. Return map line_idx → {speaker_zh, confidence, scene_index, chunk_index, arc_index}."""
     async with semaphore:
-        cast_compact = json.dumps([
-            {
-                "zh": c.zh,
-                "vi": c.vi,
-                "role": c.role,
-                "gender": c.gender,
-                "speaking_style": c.speaking_style,
-                "self_address_default": c.self_address.default,
-            }
-            for c in bible.cast.characters
-        ], ensure_ascii=False, indent=2)
+        chars_in_chunk = get_chunk_characters(chunk, bible)
+        arc_chars = format_arc_characters(bible, chars_in_chunk)
+        scenes_info = format_scenes_info(chunk)
+        chunk_srt = format_chunk_srt(entries, chunk)
 
-        glossary_compact = json.dumps([
-            {"zh": t.zh, "vi": t.vi}
-            for t in bible.glossary.terms if t.category in ("title", "nickname")
-        ], ensure_ascii=False, indent=2)
-
-        dialogue = format_batch_dialogue(batch, entries_by_idx)
-
-        # Aggregate context cho batch
-        first_scene = batch[0]
-        last_scene = batch[-1]
-        scene_range = f"{first_scene.index}-{last_scene.index}" if len(batch) > 1 else str(first_scene.index)
-        all_chars_present = sorted({c for sc in batch for c in sc.characters_present})
-
+        prompt_template = load_prompt("speaker", config)
         prompt = (prompt_template
-                  .replace("{CAST_JSON}", cast_compact)
-                  .replace("{GLOSSARY_JSON}", glossary_compact)
-                  .replace("{SCENE_INDEX}", scene_range)
-                  .replace("{SCENE_LOCATION}", "nhiều cảnh" if len(batch) > 1 else (first_scene.location or ""))
-                  .replace("{SCENE_EMOTION}", f"{first_scene.emotion_primary} → {last_scene.emotion_primary}")
-                  .replace("{SCENE_SUMMARY}", f"Batch {scene_range}: " + (first_scene.summary or ""))
-                  .replace("{CHARACTERS_PRESENT}", ", ".join(all_chars_present))
-                  .replace("{SCENE_DIALOGUE}", dialogue))
+                  .replace("{ARC_CHARACTERS}", arc_chars)
+                  .replace("{SCENES_INFO}", scenes_info)
+                  .replace("{CHUNK_SRT}", chunk_srt))
 
         req = LLMRequest(
             prompt=prompt,
             model=config.models.medium,
             api_key=config.api_key,
             temperature=0.2,
-            max_output=16000,   # tăng từ 8000 để đủ chỗ cho batch nhiều dòng
+            max_output=12000,
             json_mode=True,
             max_retries=config.concurrency.retry_max,
         )
 
         try:
-            resp = await call_llm(req, client=client)
+            resp = await call_llm(req, client=client,
+                                  stage_tag=f"3_speaker_c{chunk.r[0]}")
             tracker.add("3_speaker", resp)
-            data = parse_json_response(resp.text, default={"lines": []})
-            lines_count = len(data.get("lines", []) or [])
-            if lines_count == 0:
-                logger.warning(
-                    f"[Stage 3] Batch {scene_range}: LLM returned 0 lines. "
-                    f"Resp preview: {(resp.text or '')[:200]!r}"
-                )
+            data = parse_json_response(resp.text, default={"speakers": []})
         except Exception as e:
-            logger.warning(f"[Stage 3] Batch {scene_range} failed: {e}")
+            logger.warning(f"[Stage 3] Chunk {chunk.r[0]}-{chunk.r[1]} failed: {e}")
             return {}
 
+        # Build scene index map (line → scene_index trong chunk)
+        scene_idx_by_line = {}
+        for s_idx, sc in enumerate(chunk.scenes):
+            for line in range(sc.r[0], sc.r[1] + 1):
+                scene_idx_by_line[line] = s_idx
+
         result = {}
-        for line_data in data.get("lines", []) or []:
+        for entry in data.get("speakers", []) or []:
             try:
-                line_idx = int(line_data.get("line_index", -1))
+                if isinstance(entry, dict):
+                    line_idx = int(entry.get("line_index") or entry.get("idx", -1))
+                    speaker_zh = str(entry.get("speaker_zh") or entry.get("speaker", ""))
+                    confidence = str(entry.get("confidence", "l"))
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 3:
+                    line_idx = int(entry[0])
+                    speaker_zh = str(entry[1])
+                    confidence = str(entry[2])
+                else:
+                    continue
+
                 if line_idx < 1:
                     continue
+
+                # Normalize confidence
+                confidence = confidence.lower()
+                if confidence not in ("h", "m", "l"):
+                    # Tolerate "high", "mid", "low"
+                    if confidence.startswith("h"):
+                        confidence = "h"
+                    elif confidence.startswith("m"):
+                        confidence = "m"
+                    else:
+                        confidence = "l"
+
                 result[line_idx] = {
-                    "speaker_zh": line_data.get("speaker_zh", "?") or "?",
-                    "confidence": line_data.get("confidence", "low"),
-                    "reason": line_data.get("reason", "") or "",
+                    "speaker_zh": speaker_zh if speaker_zh != "?" else None,
+                    "confidence": confidence,
+                    "scene_index": scene_idx_by_line.get(line_idx),
+                    "chunk_range": chunk.r,
+                    "arc_index": chunk.arc_index,
                 }
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[Stage 3] Skip invalid speaker entry: {e}")
                 continue
 
         return result
 
 
+# ─────────────────────────────────────────────────────────────────
+# MAIN STAGE 3
+# ─────────────────────────────────────────────────────────────────
+
 async def run_stage3_speaker(
     entries: list[SrtEntry],
     bible: Bible,
-    scene_map: SceneMap,
+    chunk_map: ChunkMap,
     config: PipelineConfig,
     tracker: CostTracker,
+    on_chunk_done: Optional[callable] = None,
 ) -> dict[int, dict]:
-    """Chạy Stage 3 — speaker cho toàn phim.
-
-    Returns: map line_index -> {speaker_zh, confidence, reason, scene_index}
+    """Stage 3 — gán speaker cho toàn phim, theo chunk.
+    
+    Có callback on_chunk_done(chunk, result) để checkpoint.
     """
     logger.info("=" * 60)
     logger.info("STAGE 3 — SPEAKER ASSIGNMENT")
     logger.info("=" * 60)
 
-    prompt_template = load_prompt("speaker", config)
-    entries_by_idx = {e.index: e for e in entries}
-
-    # v3: batch nhiều scenes liền thành 1 call
-    batches = build_scene_batches(scene_map.scenes, config.batch.speaker_lines_per_call)
-    total_lines = sum(sc.end_line - sc.start_line + 1 for sc in scene_map.scenes)
-    logger.info(f"[Stage 3] {len(scene_map.scenes)} scenes → {len(batches)} batches "
-                f"(~{total_lines / max(len(batches), 1):.0f} lines/batch)")
+    if not chunk_map.chunks:
+        logger.warning("[Stage 3] No chunks, skipping")
+        return {}
 
     semaphore = asyncio.Semaphore(config.concurrency.speaker)
+    all_results: dict[int, dict] = {}
 
     async with httpx.AsyncClient() as client:
         tasks = [
-            process_one_batch(batch, bible, entries_by_idx, prompt_template,
-                              config, tracker, client, semaphore)
-            for batch in batches
+            process_one_chunk(chunk, entries, bible, config, tracker, client, semaphore)
+            for chunk in chunk_map.chunks
         ]
 
-        all_results = {}
         completed = 0
         total = len(tasks)
 
-        for coro in asyncio.as_completed(tasks):
-            batch_result = await coro
-            all_results.update(batch_result)
+        # Run với as_completed để checkpoint per chunk
+        for i, coro in enumerate(asyncio.as_completed(tasks)):
+            chunk_result = await coro
+            all_results.update(chunk_result)
             completed += 1
             if completed % 5 == 0 or completed == total:
-                logger.info(f"   [Stage 3] {completed}/{total} batches done")
+                logger.info(f"[Stage 3] {completed}/{total} chunks done")
 
-    # Map line → scene_index
-    line_to_scene = {}
-    for s in scene_map.scenes:
-        for i in range(s.start_line, s.end_line + 1):
-            line_to_scene[i] = s.index
-
-    # Augment with scene info + name lookup
-    for line_idx, info in all_results.items():
-        info["scene_index"] = line_to_scene.get(line_idx)
-        # Lookup speaker_vi
-        speaker_zh = info.get("speaker_zh", "?")
-        speaker_vi = ""
-        if speaker_zh and speaker_zh != "?":
-            ch = bible.cast.get_by_zh(speaker_zh)
-            speaker_vi = ch.vi if ch else speaker_zh  # fallback to zh if not found
-        info["speaker_vi"] = speaker_vi
+            # Checkpoint callback
+            if on_chunk_done:
+                try:
+                    res = on_chunk_done(chunk_result)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception as e:
+                    logger.warning(f"[Stage 3] checkpoint callback failed: {e}")
 
     # Stats
-    high = sum(1 for r in all_results.values() if r.get("confidence") == "high")
-    mid = sum(1 for r in all_results.values() if r.get("confidence") == "mid")
-    low = sum(1 for r in all_results.values() if r.get("confidence") == "low")
-    logger.info(f"[Stage 3] DONE. {len(all_results)} lines tagged. "
-                f"High={high}, Mid={mid}, Low={low}")
-
+    high = sum(1 for r in all_results.values() if r["confidence"] == "h")
+    mid = sum(1 for r in all_results.values() if r["confidence"] == "m")
+    low = sum(1 for r in all_results.values() if r["confidence"] == "l")
+    logger.info(f"[Stage 3] DONE. {len(all_results)} lines assigned. "
+                f"high={high}, mid={mid}, low={low}")
     return all_results

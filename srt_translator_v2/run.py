@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-CLI entry point — SRT Translator v2.
+CLI entry point — SRT Translator v3.
 
 Sử dụng:
-    # Full pipeline (mặc định, khuyên dùng):
+    # Full pipeline (mặc định):
     python run.py translate --input movie.srt --output-dir ./out --api-key KEY
 
-    # Từng stage riêng (debug):
-    python run.py bible    --input movie.srt --output bible.json --api-key KEY
-    python run.py scenes   --input movie.srt --bible bible.json --output scenes.json
-    python run.py speaker  --input movie.srt --bible bible.json --scenes scenes.json --output speakers.json
-    python run.py polish   --srt draft.srt --bible bible.json --output final.srt
+    # Custom provider:
+    python run.py translate --input movie.srt --provider deepseek --api-key KEY
+
+    # Toggle variant:
+    python run.py translate --input movie.srt --variant always
+    python run.py translate --input movie.srt --variant off
+
+    # Project type:
+    python run.py translate --input movie.srt --project short_drama
+    python run.py translate --input movie.srt --project drama_series
+    python run.py translate --input movie.srt --project movie
 """
 from __future__ import annotations
 import argparse
@@ -22,13 +28,11 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
-
 # Ensure imports work when run as script
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import PipelineConfig, default_config
-from core.pipeline import run_full_pipeline, save_pipeline_outputs
+from core.pipeline import run_full_pipeline, export_srt
 from core.srt_parser import parse_srt_file, srt_stats
 
 
@@ -50,293 +54,215 @@ def setup_logging(verbose: bool = False):
 # ─────────────────────────────────────────────────────────────────
 
 def build_config_from_args(args) -> PipelineConfig:
-    """Build PipelineConfig từ CLI args + env."""
-    cfg = default_config()
+    """Build PipelineConfig từ CLI args."""
+    config = default_config()
 
-    # API key: ưu tiên CLI > env theo provider > GOOGLE_API_KEY/GEMINI_API_KEY chung
-    if args.api_key:
-        cfg.api_key = args.api_key
-    else:
-        provider = (args.provider or "gemini").lower()
-        if provider == "gemini":
-            cfg.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-        elif provider == "openai":
-            cfg.api_key = os.getenv("OPENAI_API_KEY") or ""
-        elif provider == "deepseek":
-            cfg.api_key = os.getenv("DEEPSEEK_API_KEY") or ""
+    # Project type
+    if args.project:
+        config.project_type = args.project
+        config.apply_project_type()
 
+    # Provider
     if args.provider:
-        cfg.provider = args.provider
+        config.provider = args.provider
+        # Map default models per provider
+        if args.provider == "gemini":
+            config.models.heavy = "gemini-2.5-pro"
+            config.models.medium = "gemini-2.5-flash"
+            config.models.light = "gemini-2.5-flash"
+        elif args.provider == "openai":
+            config.models.heavy = "gpt-5"
+            config.models.medium = "gpt-5-mini"
+            config.models.light = "gpt-5-nano"
+        elif args.provider == "deepseek":
+            config.models.heavy = "deepseek-chat"
+            config.models.medium = "deepseek-chat"
+            config.models.light = "deepseek-chat"
 
-    # Override model nếu user truyền
-    if args.model:
-        cfg.models.heavy = args.model
-        cfg.models.medium = args.model
+    # Override models
+    if args.model_heavy:
+        config.models.heavy = args.model_heavy
+    if args.model_medium:
+        config.models.medium = args.model_medium
+    if args.model_light:
+        config.models.light = args.model_light
 
-    if args.project_type:
-        cfg.project_type = args.project_type
-        cfg.apply_project_type()
+    # API key
+    config.api_key = args.api_key or os.getenv("GEMINI_API_KEY") or \
+                     os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY") or ""
 
-    if args.genre_pack:
-        cfg.genre_pack = args.genre_pack if args.genre_pack != "auto" else None
+    # Variant mode
+    if args.variant:
+        config.variant.mode = args.variant
 
-    if args.cps_max:
-        cfg.cps.max = args.cps_max
+    # Cache
+    if args.no_cache:
+        config.cache.enabled = False
 
+    # Concurrency
     if args.concurrency:
-        cfg.concurrency.speaker = args.concurrency
-        cfg.concurrency.translate = args.concurrency
+        config.concurrency.translate = args.concurrency
+        config.concurrency.speaker = args.concurrency
+        config.concurrency.polish = args.concurrency
 
-    if not cfg.api_key:
-        print("❌ ERROR: No API key. Set --api-key or GEMINI_API_KEY env.",
-              file=sys.stderr)
-        sys.exit(1)
-
-    return cfg
+    return config
 
 
 # ─────────────────────────────────────────────────────────────────
-# COMMAND: translate (full)
+# COMMANDS
 # ─────────────────────────────────────────────────────────────────
 
 async def cmd_translate(args):
     """Full pipeline."""
-    cfg = build_config_from_args(args)
+    config = build_config_from_args(args)
+    if not config.api_key:
+        print("❌ Missing API key. Use --api-key or env var.")
+        return 1
 
-    out_dir = Path(args.output_dir or "./output")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"❌ File not found: {input_path}")
+        return 1
 
-    base_name = Path(args.input).stem
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"🎬 Input: {args.input}")
-    print(f"📁 Output: {out_dir}/")
-    print(f"🤖 Provider: {cfg.provider}, Model: {cfg.models.heavy} (heavy) / {cfg.models.medium} (medium)")
-    print(f"🎭 Genre pack: {cfg.genre_pack or 'auto-detect'}")
-    print(f"⏱️ CPS max: {cfg.cps.max}")
+    print(f"🎬 Translating: {input_path.name}")
+    print(f"   Provider: {config.provider}")
+    print(f"   Models: heavy={config.models.heavy}, medium={config.models.medium}")
+    print(f"   Variant: {config.variant.mode}")
+    print(f"   Output: {output_dir}")
     print()
 
-    result = await run_full_pipeline(args.input, cfg)
+    result = await run_full_pipeline(str(input_path), config)
 
-    paths = save_pipeline_outputs(result, str(out_dir), base_name)
+    # Save Bible JSON
+    bible_path = output_dir / "bible.json"
+    bible_path.write_text(
+        result.bible.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    print(f"💾 Bible → {bible_path}")
+
+    # Save chunks JSON
+    chunks_path = output_dir / "chunks.json"
+    chunks_path.write_text(
+        result.chunk_map.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+    print(f"💾 Chunks → {chunks_path}")
+
+    # Save full translation JSON
+    translation_path = output_dir / "translation.json"
+    translation_data = {
+        "total_lines": result.translation.total_lines,
+        "translated_count": result.translation.translated_count,
+        "variants_count": result.translation.variants_count,
+        "avg_cps": result.translation.avg_cps,
+        "lines": [
+            {
+                "index": l.index,
+                "start": l.start_time_sec,
+                "end": l.end_time_sec,
+                "text_zh": l.text_zh,
+                "speaker_zh": l.speaker_zh,
+                "speaker_vi": l.speaker_vi,
+                "text_v1": l.text_v1,
+                "text_v2": l.text_v2,
+                "variant_selected": l.variant_selected,
+                "emotion": l.emotion,
+                "intensity": l.intensity,
+                "cps": l.cps_value,
+                "needs_review": l.needs_review,
+                "review_reason": l.review_reason,
+            }
+            for l in result.translation.lines
+        ],
+    }
+    translation_path.write_text(
+        json.dumps(translation_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"💾 Translation → {translation_path}")
+
+    # Export SRT (v1 + v2)
+    srt_v1 = output_dir / f"{input_path.stem}_vi_v1.srt"
+    export_srt(result, str(srt_v1), use_variant=1)
+    print(f"📄 SRT v1 (sát nghĩa) → {srt_v1}")
+
+    if result.translation.variants_count > 0:
+        srt_v2 = output_dir / f"{input_path.stem}_vi_v2.srt"
+        export_srt(result, str(srt_v2), use_variant=2)
+        print(f"📄 SRT v2 (thoát ý) → {srt_v2}")
+
+    # Save polish report
+    if result.polish_report.issues:
+        report_path = output_dir / "polish_report.json"
+        report_path.write_text(
+            result.polish_report.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        print(f"⚠️  Polish report ({len(result.polish_report.issues)} issues) → {report_path}")
 
     print()
-    print("✅ DONE")
-    print(f"📄 SRT (VI): {paths['srt_vi']}")
-    print(f"📋 Review queue: {paths['review_queue']} ({result.translation.lines_needing_review} lines)")
-    print(f"💰 Total cost: ${result.cost.total_cost_usd:.4f}")
+    print(f"✅ Done. Total cost: ${result.cost.total_cost_usd:.4f}")
+    return 0
 
 
-# ─────────────────────────────────────────────────────────────────
-# COMMAND: bible only
-# ─────────────────────────────────────────────────────────────────
-
-async def cmd_bible(args):
-    """Chỉ chạy Stage 1 — Bible."""
-    from core.llm_client import CostTracker
-    from stages import run_stage1_bible
-
-    cfg = build_config_from_args(args)
-
-    entries = parse_srt_file(args.input)
-    print(f"📂 Loaded {len(entries)} lines")
-
-    tracker = CostTracker()
-    bible = await run_stage1_bible(entries, cfg, tracker)
-
-    output = Path(args.output or "bible.json")
-    output.write_text(
-        bible.model_dump_json(indent=2, exclude_none=True),
-        encoding="utf-8",
-    )
-    print(f"💾 Bible saved → {output}")
-    print(tracker.summary())
-
-
-# ─────────────────────────────────────────────────────────────────
-# COMMAND: scenes only
-# ─────────────────────────────────────────────────────────────────
-
-async def cmd_scenes(args):
-    """Chỉ chạy Stage 2 — Scenes."""
-    from core.llm_client import CostTracker
-    from models import Bible
-    from stages import run_stage2_scenes
-
-    cfg = build_config_from_args(args)
-
-    entries = parse_srt_file(args.input)
-    bible_data = json.loads(Path(args.bible).read_text(encoding="utf-8"))
-    bible = Bible(**bible_data)
-
-    print(f"📂 Loaded {len(entries)} lines + Bible")
-
-    tracker = CostTracker()
-    scene_map = await run_stage2_scenes(entries, bible, cfg, tracker)
-
-    output = Path(args.output or "scenes.json")
-    output.write_text(
-        scene_map.model_dump_json(indent=2, exclude_none=True),
-        encoding="utf-8",
-    )
-    print(f"💾 Scenes saved → {output} ({len(scene_map.scenes)} scenes)")
-    print(tracker.summary())
-
-
-# ─────────────────────────────────────────────────────────────────
-# COMMAND: speaker only
-# ─────────────────────────────────────────────────────────────────
-
-async def cmd_speaker(args):
-    """Chỉ chạy Stage 3 — Speaker."""
-    from core.llm_client import CostTracker
-    from models import Bible, SceneMap
-    from stages import run_stage3_speaker
-
-    cfg = build_config_from_args(args)
-
-    entries = parse_srt_file(args.input)
-    bible = Bible(**json.loads(Path(args.bible).read_text(encoding="utf-8")))
-    scene_map = SceneMap(**json.loads(Path(args.scenes).read_text(encoding="utf-8")))
-
-    tracker = CostTracker()
-    speaker_map = await run_stage3_speaker(entries, bible, scene_map, cfg, tracker)
-
-    output = Path(args.output or "speakers.json")
-    output.write_text(json.dumps(speaker_map, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-    print(f"💾 Speakers saved → {output}")
-    print(tracker.summary())
-
-
-# ─────────────────────────────────────────────────────────────────
-# COMMAND: stats
-# ─────────────────────────────────────────────────────────────────
-
-def cmd_stats(args):
-    """Hiển thị stats của 1 SRT — không cần API."""
+def cmd_info(args):
+    """In thông tin file SRT."""
     entries = parse_srt_file(args.input)
     stats = srt_stats(entries)
-    print(f"📊 SRT Stats: {args.input}")
+    print(f"📊 {args.input}")
     for k, v in stats.items():
         print(f"   {k}: {v}")
+    return 0
 
 
 # ─────────────────────────────────────────────────────────────────
-# COMMAND: list-packs
-# ─────────────────────────────────────────────────────────────────
-
-def cmd_list_packs(args):
-    """Liệt kê genre packs có sẵn."""
-    from stages.stage1_bible import list_available_packs, load_genre_pack
-    cfg = default_config()
-    packs = list_available_packs(cfg)
-    print(f"📦 Available genre packs ({len(packs)}):")
-    for p_id in packs:
-        pack = load_genre_pack(p_id, cfg)
-        if pack:
-            print(f"   · {p_id}")
-            print(f"     {pack.name_vi} — {pack.description[:80]}...")
-
-
-# ─────────────────────────────────────────────────────────────────
-# MAIN
+# CLI
 # ─────────────────────────────────────────────────────────────────
 
 def main():
-    load_dotenv()
-
     parser = argparse.ArgumentParser(
-        prog="srt_translator_v2",
-        description="Dịch SRT phim Trung Quốc → tiếng Việt cho lồng tiếng",
+        prog="run.py",
+        description="SRT Translator v3 — TQ→Việt cho lồng tiếng",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # ── translate (full) ──
-    p_trans = sub.add_parser("translate", help="Full pipeline (5 stages)")
-    p_trans.add_argument("--input", required=True, help="Input SRT (tiếng Trung)")
-    p_trans.add_argument("--output-dir", default="./output", help="Thư mục output")
-    p_trans.add_argument("--api-key", default=None, help="API key (hoặc set env)")
-    p_trans.add_argument("--provider", default="gemini",
-                          choices=["gemini", "openai", "deepseek"])
-    p_trans.add_argument("--model", default=None,
-                          help="Override model name (vd: gemini-2.5-pro)")
-    p_trans.add_argument("--project-type", default="short_drama",
-                          choices=["short_drama", "drama_series", "movie"])
-    p_trans.add_argument("--genre-pack", default="auto",
-                          help="auto / modern_ceo_romance / reborn_revenge / ...")
-    p_trans.add_argument("--cps-max", type=float, default=None,
-                          help="Max CPS (default 15 cho short drama)")
-    p_trans.add_argument("--concurrency", type=int, default=None,
-                          help="Số call song song (default 5)")
+    # translate
+    p_tr = sub.add_parser("translate", help="Run full pipeline")
+    p_tr.add_argument("--input", required=True, help="Input SRT file")
+    p_tr.add_argument("--output-dir", required=True, help="Output directory")
+    p_tr.add_argument("--api-key", help="API key (or env GEMINI_API_KEY/OPENAI_API_KEY/DEEPSEEK_API_KEY)")
+    p_tr.add_argument("--provider", choices=["gemini", "openai", "deepseek"], default="gemini")
+    p_tr.add_argument("--project", choices=["short_drama", "drama_series", "movie"],
+                      default="short_drama")
+    p_tr.add_argument("--variant", choices=["off", "important_only", "always"],
+                      help="Variant 2 bản dịch")
+    p_tr.add_argument("--no-cache", action="store_true", help="Tắt prompt caching")
+    p_tr.add_argument("--concurrency", type=int, help="Override concurrency (default 5)")
+    p_tr.add_argument("--model-heavy", help="Override heavy model")
+    p_tr.add_argument("--model-medium", help="Override medium model")
+    p_tr.add_argument("--model-light", help="Override light model")
 
-    # ── bible only ──
-    p_bible = sub.add_parser("bible", help="Stage 1 only — sinh Bible")
-    p_bible.add_argument("--input", required=True)
-    p_bible.add_argument("--output", default="bible.json")
-    p_bible.add_argument("--api-key", default=None)
-    p_bible.add_argument("--provider", default="gemini")
-    p_bible.add_argument("--model", default=None)
-    p_bible.add_argument("--project-type", default="short_drama")
-    p_bible.add_argument("--genre-pack", default="auto")
-    p_bible.add_argument("--cps-max", type=float, default=None)
-    p_bible.add_argument("--concurrency", type=int, default=None)
-
-    # ── scenes only ──
-    p_scenes = sub.add_parser("scenes", help="Stage 2 only — scene detection")
-    p_scenes.add_argument("--input", required=True)
-    p_scenes.add_argument("--bible", required=True)
-    p_scenes.add_argument("--output", default="scenes.json")
-    p_scenes.add_argument("--api-key", default=None)
-    p_scenes.add_argument("--provider", default="gemini")
-    p_scenes.add_argument("--model", default=None)
-    p_scenes.add_argument("--project-type", default="short_drama")
-    p_scenes.add_argument("--genre-pack", default="auto")
-    p_scenes.add_argument("--cps-max", type=float, default=None)
-    p_scenes.add_argument("--concurrency", type=int, default=None)
-
-    # ── speaker only ──
-    p_speak = sub.add_parser("speaker", help="Stage 3 only — speaker assignment")
-    p_speak.add_argument("--input", required=True)
-    p_speak.add_argument("--bible", required=True)
-    p_speak.add_argument("--scenes", required=True)
-    p_speak.add_argument("--output", default="speakers.json")
-    p_speak.add_argument("--api-key", default=None)
-    p_speak.add_argument("--provider", default="gemini")
-    p_speak.add_argument("--model", default=None)
-    p_speak.add_argument("--project-type", default="short_drama")
-    p_speak.add_argument("--genre-pack", default="auto")
-    p_speak.add_argument("--cps-max", type=float, default=None)
-    p_speak.add_argument("--concurrency", type=int, default=None)
-
-    # ── stats ──
-    p_stats = sub.add_parser("stats", help="Hiển thị stats SRT (không cần API)")
-    p_stats.add_argument("--input", required=True)
-
-    # ── list packs ──
-    sub.add_parser("list-packs", help="Liệt kê các genre pack có sẵn")
+    # info
+    p_info = sub.add_parser("info", help="In thống kê SRT")
+    p_info.add_argument("--input", required=True)
 
     args = parser.parse_args()
     setup_logging(args.verbose)
 
-    # Sync commands
-    if args.cmd == "stats":
-        cmd_stats(args)
-        return
-    if args.cmd == "list-packs":
-        cmd_list_packs(args)
-        return
-
-    # Async commands
-    cmd_map = {
-        "translate": cmd_translate,
-        "bible": cmd_bible,
-        "scenes": cmd_scenes,
-        "speaker": cmd_speaker,
-    }
-    asyncio.run(cmd_map[args.cmd](args))
+    if args.cmd == "translate":
+        return asyncio.run(cmd_translate(args))
+    elif args.cmd == "info":
+        return cmd_info(args)
+    else:
+        parser.print_help()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

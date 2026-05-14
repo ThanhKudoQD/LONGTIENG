@@ -28,17 +28,17 @@ def get_db():
 
 
 def init_db():
-    """Tạo tables (idempotent) + chạy migration tự động cho v2."""
+    """Tạo tables (idempotent) + chạy migration tự động."""
     from dubeditor import models  # noqa
     Base.metadata.create_all(bind=engine)
-    _migrate_v2()
+    _migrate_v3()
 
 
-def _migrate_v2():
+def _migrate_v3():
     """Migration on-startup: thêm cột mới + tạo tables mới nếu thiếu.
 
     Đây là phiên bản nhẹ, tự động chạy khi app start.
-    Để migrate đầy đủ (kể cả import data cũ), chạy: python migrate_to_v2.py
+    Bao gồm cả migration v2 + v3.
     """
     import sqlite3
     if not DB_PATH.exists():
@@ -62,7 +62,7 @@ def _migrate_v2():
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {type_def}")
                 conn.commit()
 
-        # projects v2 fields
+        # projects v2/v3 fields
         if has_table("projects"):
             add_col("projects", "current_chapter_id", "INTEGER")
             add_col("projects", "source_lang", "TEXT DEFAULT 'vi'")
@@ -71,11 +71,10 @@ def _migrate_v2():
             add_col("projects", "translate_status", "TEXT DEFAULT 'idle'")
             add_col("projects", "translate_progress", "REAL DEFAULT 0.0")
             add_col("projects", "translate_error", "TEXT")
-            # v3: emotion voice toggle (global per-project)
             add_col("projects", "use_emotion_voice", "BOOLEAN DEFAULT 0")
             add_col("projects", "tts_voice_mode", "TEXT")
 
-        # characters v2 fields
+        # characters v2 fields (giữ nguyên column cũ để không mất data)
         if has_table("characters"):
             add_col("characters", "shortcut_key", "TEXT")
             add_col("characters", "tts_speed", "REAL DEFAULT 1.0")
@@ -93,7 +92,7 @@ def _migrate_v2():
             add_col("characters", "relationships_json", "TEXT")
             add_col("characters", "notes", "TEXT DEFAULT ''")
 
-        # subtitles v2 fields
+        # subtitles v2 + v3 fields
         if has_table("subtitles"):
             add_col("subtitles", "tts_speed", "REAL")
             add_col("subtitles", "original_text", "TEXT")
@@ -109,27 +108,37 @@ def _migrate_v2():
             add_col("subtitles", "text_draft", "TEXT")
             add_col("subtitles", "is_hook", "BOOLEAN DEFAULT 0")
             add_col("subtitles", "translation_version", "INTEGER DEFAULT 1")
-            # v3: per-line voice mode override
             add_col("subtitles", "tts_voice_mode", "TEXT")
-            # v3: mode đã dùng khi tạo audio (track cho UI)
             add_col("subtitles", "audio_voice_mode", "TEXT")
+            # v3 NEW: 2 variants
+            add_col("subtitles", "text_v1", "TEXT")
+            add_col("subtitles", "text_v2", "TEXT")
+            add_col("subtitles", "variant_selected", "INTEGER DEFAULT 1")
+            add_col("subtitles", "chunk_id", "INTEGER")
+
+        # scenes: thêm chunk_id FK (v3)
+        if has_table("scenes"):
+            add_col("scenes", "chunk_id", "INTEGER")
 
         # roles
         if has_table("roles"):
             add_col("roles", "lora_path", "TEXT DEFAULT ''")
-            # v3: multi-mode voice refs (toggle ở project level)
             add_col("roles", "voice_modes", "TEXT")
 
         # Drop old translate_chunks if exists (deprecated)
         if has_table("translate_chunks"):
             cur.execute("DROP TABLE translate_chunks")
             conn.commit()
-            print("[migrate v2] Dropped deprecated table: translate_chunks")
+            print("[migrate v3] Dropped deprecated table: translate_chunks")
 
-        # Note: tables bibles, scenes, story_arcs, polish_issues được tạo
-        # tự động bởi Base.metadata.create_all (SQLAlchemy).
+        # Note: tables bibles, scenes, story_arcs, polish_issues, chunks (NEW)
+        # được tạo tự động bởi Base.metadata.create_all (SQLAlchemy).
 
     except Exception as e:
-        print(f"[migrate v2] Warning: {e}")
+        print(f"[migrate v3] Warning: {e}")
     finally:
         conn.close()
+
+
+# Backwards compat
+_migrate_v2 = _migrate_v3

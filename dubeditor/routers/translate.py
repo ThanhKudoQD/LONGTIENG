@@ -39,16 +39,18 @@ from dubeditor.database import get_db, SessionLocal
 from dubeditor.models import (
     Project, Subtitle, Character,
     Bible as DBBible, Scene as DBScene, StoryArc as DBStoryArc,
+    Chunk as DBChunk,
     PolishIssue as DBPolishIssue,
 )
 from dubeditor.schemas import (
     TranslateStartRequest, TranslateStageRequest, RetranslateRequest,
-    BibleOut, SceneOut, StoryArcOut, PolishIssueOut,
-    TranslateStatusOut, GenrePackInfo,
+    SelectVariantRequest,
+    BibleOut, SceneOut, StoryArcOut, PolishIssueOut, ChunkOut,
+    TranslateStatusOut,
 )
 from dubeditor.translate_service import (
-    TranslateRunner, build_pipeline_config, get_available_genre_packs,
-    load_active_bible_from_db, load_scenes_from_db,
+    TranslateRunner, build_pipeline_config,
+    load_active_bible_from_db,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,9 +114,28 @@ def _db_scene_to_out(s: DBScene) -> SceneOut:
         emotion_arc=s.emotion_arc or "",
         summary=s.summary or "", purpose=s.purpose or "",
         story_arc_id=s.story_arc_id,
+        chunk_id=s.chunk_id,  # v3
         is_hook=bool(s.is_hook), is_emotion_peak=bool(s.is_emotion_peak),
         status=s.status or "pending", error_message=s.error_message,
         line_count=s.end_line - s.start_line + 1,
+    )
+
+
+def _db_chunk_to_out(c: DBChunk, scene_count: int = 0,
+                    arc_title: str = "", arc_tone: str = "") -> ChunkOut:
+    return ChunkOut(
+        id=c.id,
+        project_id=c.project_id,
+        arc_index=c.arc_index,
+        chunk_index=c.chunk_index,
+        title=c.title or "",
+        start_line=c.start_line,
+        end_line=c.end_line,
+        status=c.status or "pending",
+        line_count=c.end_line - c.start_line + 1,
+        scene_count=scene_count,
+        arc_title=arc_title,
+        arc_tone=arc_tone,
     )
 
 
@@ -155,32 +176,30 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         DBBible.is_active == True,  # noqa: E712
     ).first()
 
+    chunk_count = db.query(DBChunk).filter(DBChunk.project_id == pid).count()
     scene_count = db.query(DBScene).filter(DBScene.project_id == pid).count()
 
     subs = db.query(Subtitle).filter(Subtitle.project_id == pid).all()
 
-    # "translated" = đã được pipeline v2 dịch (KHÔNG tính text từ SRT upload ban đầu).
-    # Dấu hiệu: subtitle có translation_version > 1 HOẶC có text khác original_text.
-    # Cả 2 đều set bởi save_translations_to_db() trong translate_service.
     def is_translated(s: Subtitle) -> bool:
+        # v3: text_v1 có giá trị và khác original_text
+        if s.text_v1 and s.text_v1.strip() and s.text_v1 != s.original_text:
+            return True
         if (s.translation_version or 1) > 1:
             return True
-        # Fallback: text khác original_text (đảm bảo có dịch thật, không phải copy SRT)
         if s.text and s.original_text and s.text.strip() != s.original_text.strip():
             return True
         return False
 
     translated = sum(1 for s in subs if is_translated(s))
+    variants = sum(1 for s in subs if s.text_v2 and s.text_v2.strip())  # v3
     review = sum(1 for s in subs if s.needs_review)
-
-    # Speaker assigned = có speaker_zh hoặc character_id từ pipeline v2
-    # (character_id có thể đã được gán từ Diarization cũ → ưu tiên speaker_zh)
     speaker_assigned = sum(1 for s in subs if s.speaker_zh)
 
     cps_vals = [s.cps_value for s in subs if s.cps_value]
     avg_cps = sum(cps_vals) / len(cps_vals) if cps_vals else 0.0
 
-    # Tổng cost + tokens xuyên pipeline (Bible + Scenes — đại diện cho tổng)
+    # Tổng cost + tokens
     cost = 0.0
     tokens_in = 0
     tokens_out = 0
@@ -199,9 +218,11 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         current_stage=None,
         progress=p.translate_progress or 0.0,
         has_bible=bool(active_bible),
+        chunk_count=chunk_count,
         scene_count=scene_count,
         speaker_assigned_count=speaker_assigned,
         translated_count=translated,
+        variants_count=variants,
         review_count=review,
         avg_cps=round(avg_cps, 2),
         cost_usd=round(cost, 4),
@@ -223,42 +244,11 @@ async def _run_pipeline_background(pid: int, runner: TranslateRunner,
         if only_stage is None:
             await runner.run_full()
         else:
-            # Resume mode — load state cần thiết từ DB
-            if only_stage == "bible":
-                await runner.run_bible()
-            else:
-                v2_bible = load_active_bible_from_db(runner.db, pid)
-                if not v2_bible:
-                    raise ValueError("Chưa có Bible. Chạy stage 'bible' trước.")
-
-                if only_stage == "scenes":
-                    await runner.run_scenes(v2_bible)
-                else:
-                    v2_scene_map = load_scenes_from_db(runner.db, pid)
-                    if not v2_scene_map.scenes:
-                        raise ValueError("Chưa có Scenes. Chạy stage 'scenes' trước.")
-
-                    if only_stage == "speaker":
-                        await runner.run_speaker(v2_bible, v2_scene_map)
-                    elif only_stage == "translate":
-                        # Build speaker_map từ DB
-                        subs = runner.db.query(Subtitle).filter(
-                            Subtitle.project_id == pid
-                        ).all()
-                        speaker_map = {}
-                        for s in subs:
-                            if s.speaker_zh:
-                                speaker_map[s.index] = {
-                                    "speaker_zh": s.speaker_zh,
-                                    "confidence": s.speaker_confidence,
-                                    "reason": s.speaker_reason or "",
-                                    "speaker_vi": s.character.name if s.character else "",
-                                }
-                        await runner.run_translate(v2_bible, v2_scene_map, speaker_map)
-                    elif only_stage == "polish":
-                        await runner.run_polish(v2_bible)
-                    else:
-                        raise ValueError(f"Unknown stage: {only_stage}")
+            # Resume mode — run_stage() trong TranslateRunner đã tự load state từ DB
+            # qua load_active_bible_from_db + đọc chunks/scenes từ DB khi cần.
+            # Map "scenes" → "chunks" (alias cho backwards compat).
+            stage_alias = {"scenes": "chunks"}.get(only_stage, only_stage)
+            await runner.run_stage(stage_alias)
 
             # Update final status + emit "done" event để FE biết stage đã xong
             runner._save_status("done", 100.0)
@@ -407,7 +397,10 @@ def cancel_translate(pid: int):
 
 @router.post("/projects/{pid}/translate/reset")
 def reset_translate(pid: int, db: Session = Depends(get_db)):
-    """Xóa Bible + Scenes + Issues, KHÔNG xóa Subtitles/Characters."""
+    """Xóa Bible + Chunks + Scenes + Issues. KHÔNG xóa Subtitles/Characters.
+    
+    Reset Subtitles về trạng thái pre-pipeline (clear v3 variants).
+    """
     if pid in _active_runners:
         raise HTTPException(409, "Đang chạy, cancel trước.")
 
@@ -415,12 +408,14 @@ def reset_translate(pid: int, db: Session = Depends(get_db)):
 
     db.query(DBPolishIssue).filter(DBPolishIssue.project_id == pid).delete()
     db.query(DBScene).filter(DBScene.project_id == pid).delete()
+    db.query(DBChunk).filter(DBChunk.project_id == pid).delete()  # v3
     db.query(DBStoryArc).filter(DBStoryArc.project_id == pid).delete()
     db.query(DBBible).filter(DBBible.project_id == pid).delete()
 
-    # Reset subtitles
+    # Reset subtitles (clear v2 + v3 fields)
     db.query(Subtitle).filter(Subtitle.project_id == pid).update({
         "scene_id": None,
+        "chunk_id": None,             # v3
         "speaker_zh": None,
         "speaker_confidence": "low",
         "speaker_reason": "",
@@ -431,6 +426,10 @@ def reset_translate(pid: int, db: Session = Depends(get_db)):
         "review_reason": "",
         "text_draft": None,
         "is_hook": False,
+        # v3: clear variants
+        "text_v1": None,
+        "text_v2": None,
+        "variant_selected": 1,
     })
 
     p = db.query(Project).filter(Project.id == pid).first()
@@ -656,7 +655,7 @@ def dismiss_issue(pid: int, issue_id: int, db: Session = Depends(get_db)):
 @router.post("/projects/{pid}/translate/retranslate")
 async def retranslate_single(pid: int, req: RetranslateRequest,
                               db: Session = Depends(get_db)):
-    """Dịch lại 1 subtitle. Dùng Bible + scene context."""
+    """Dịch lại 1 subtitle, TRẢ 2 BẢN v1 (sát nghĩa) + v2 (thoát ý)."""
     _get_project(db, pid)
     sub = db.query(Subtitle).filter(
         Subtitle.id == req.subtitle_id,
@@ -669,23 +668,38 @@ async def retranslate_single(pid: int, req: RetranslateRequest,
     if not bible:
         raise HTTPException(400, "Project chưa có Bible. Chạy Stage 1 trước.")
 
-    # Build prompt đơn giản
-    from core.llm_client import LLMRequest, call_llm
+    # Build prompt
+    from core.llm_client import LLMRequest, call_llm, parse_json_response
     import httpx
 
-    bible_brief = {
-        "characters": [
-            {"vi": c.vi, "zh": c.zh, "self_address": c.self_address.default}
-            for c in bible.cast.characters[:8]
-        ],
-        "glossary": [
-            {"zh": t.zh, "vi": t.vi}
-            for t in bible.glossary.terms[:15]
-        ],
-        "tone": bible.world.tone_overall,
-    }
+    # Tìm speaker info
+    speaker_vi = "?"
+    rel_info = "(không có thông tin)"
+    if sub.speaker_zh:
+        ch = bible.cast.get_by_zh(sub.speaker_zh)
+        if ch:
+            speaker_vi = ch.vi
+            rel_pairs = []
+            for other_zh, rel in (ch.rel or {}).items():
+                other_ch = bible.cast.get_by_zh(other_zh)
+                other_vi = other_ch.vi if other_ch else other_zh
+                rel_pairs.append(f"- với {other_vi}: {rel}")
+            if rel_pairs:
+                rel_info = "\n".join(rel_pairs)
 
-    # Context: 3 dòng trước/sau
+    # Glossary terms có trong text
+    relevant_terms = bible.glossary.find_in_text(sub.original_text or "")
+    gloss_block = "\n".join(
+        f"- {t.zh} → \"{t.vi}\"" for t in relevant_terms
+    ) or "(Không có)"
+
+    # Top cast brief
+    cast_brief = "\n".join(
+        f"- {c.vi} ({c.zh}): {c.g}, {c.role}, {c.char}"
+        for c in bible.cast.characters[:10]
+    )
+
+    # Context 3 dòng trước/sau
     ctx_before = db.query(Subtitle).filter(
         Subtitle.project_id == pid,
         Subtitle.index < sub.index,
@@ -696,36 +710,67 @@ async def retranslate_single(pid: int, req: RetranslateRequest,
     ).order_by(Subtitle.index).limit(3).all()
 
     ctx_block = "\n".join([
-        *[f"  [{s.index}] {s.original_text or ''} → {s.text or ''}" for s in reversed(ctx_before)],
-        f"→ [{sub.index}] {sub.original_text or ''} → {sub.text or ''}",
-        *[f"  [{s.index}] {s.original_text or ''} → {s.text or ''}" for s in ctx_after],
+        *[f"  [{s.index}] {s.speaker_zh or '?'} | {s.original_text or ''} → {s.text or ''}"
+          for s in reversed(ctx_before)],
+        f"  → [{sub.index}] {sub.speaker_zh or '?'} | {sub.original_text or ''} (cần dịch)",
+        *[f"  [{s.index}] {s.speaker_zh or '?'} | {s.original_text or ''} → {s.text or ''}"
+          for s in ctx_after],
     ])
 
-    prompt = f"""Dịch lại 1 dòng phụ đề Trung→Việt cho phim đang dịch.
+    duration = max(0.01, (sub.end_time or 0) - (sub.start_time or 0))
 
-NGUYÊN BẢN (Trung): {sub.original_text}
-BẢN HIỆN TẠI (Việt): {sub.text}
-YÊU CẦU NGƯỜI DÙNG: {req.hint or "Dịch tốt hơn, giữ cảm xúc"}
+    prompt = f"""Dịch lại 1 dòng phụ đề TQ→Việt cho lồng tiếng.
 
-THÔNG TIN PHIM:
-{json.dumps(bible_brief, ensure_ascii=False, indent=2)}
+━━━ THÔNG TIN PHIM ━━━
+Thể loại: {', '.join(bible.world.genre)}
+Tone: {bible.world.tone}
 
-MẠCH HỘI THOẠI:
+━━━ NHÂN VẬT CHÍNH ━━━
+{cast_brief}
+
+━━━ SPEAKER DÒNG NÀY ━━━
+{speaker_vi} (TQ: {sub.speaker_zh or '?'})
+
+QUAN HỆ:
+{rel_info}
+
+━━━ GLOSSARY ━━━
+{gloss_block}
+
+━━━ MẠCH HỘI THOẠI ━━━
 {ctx_block}
 
-Yêu cầu output: TRẢ VỀ JSON THUẦN với {req.variants} variants:
-{{
-  "variants": [
-    {{"text_vi": "<bản dịch 1>"}},
-    {{"text_vi": "<bản dịch 2>"}}
-  ]
-}}
+━━━ DÒNG CẦN DỊCH ━━━
+Original TQ: {sub.original_text or ''}
+Hiện tại VI: {sub.text or '(chưa có)'}
+Duration: {duration:.1f}s
+Emotion: {sub.emotion or 'neutral'}, intensity: {sub.intensity or 5}
 
-Chỉ JSON, không markdown, không giải thích."""
+━━━ YÊU CẦU NGƯỜI DÙNG ━━━
+{req.hint or "Dịch lại tốt hơn, giữ cảm xúc"}
+
+━━━ NHIỆM VỤ ━━━
+Trả 2 BẢN DỊCH KHÁC NHAU:
+- text_v1: SÁT NGHĨA — dịch sát từng phần ý, giữ cấu trúc TQ, phù hợp subtitle
+- text_v2: THOÁT Ý — dịch theo cách người Việt nói tự nhiên trong tình huống đó, phù hợp lồng tiếng
+
+QUY TẮC:
+- Câu tròn, đủ chủ ngữ (cho TTS)
+- KHÔNG cụt cộc 1-2 từ
+- Đúng xưng hô theo quan hệ + emotion
+- Đúng glossary
+
+OUTPUT JSON THUẦN:
+{{
+  "text_v1": "...",
+  "text_v2": "...",
+  "emotion": "neutral|happy|sad|...",
+  "intensity": 5
+}}"""
 
     llm_req = LLMRequest(
         prompt=prompt, model=req.model, api_key=req.api_key,
-        temperature=0.7, max_output=2000, json_mode=True,
+        temperature=0.5, max_output=2000, json_mode=True,
     )
 
     try:
@@ -734,21 +779,165 @@ Chỉ JSON, không markdown, không giải thích."""
     except Exception as e:
         raise HTTPException(500, f"LLM call failed: {e}")
 
-    from core.llm_client import parse_json_response
-    data = parse_json_response(resp.text, default={"variants": []})
+    data = parse_json_response(resp.text, default={})
+
+    text_v1 = (data.get("text_v1") or "").strip()
+    text_v2 = (data.get("text_v2") or "").strip()
+    emotion = data.get("emotion")
+    intensity = data.get("intensity")
 
     return {
         "ok": True,
         "subtitle_id": sub.id,
-        "current_text": sub.text,
-        "variants": [v.get("text_vi", "") for v in data.get("variants", [])],
-        "tokens_in": resp.tokens_in, "tokens_out": resp.tokens_out,
+        "current_text_v1": sub.text_v1,
+        "current_text_v2": sub.text_v2,
+        "new_text_v1": text_v1,
+        "new_text_v2": text_v2 if text_v2 != text_v1 else None,
+        "emotion": emotion,
+        "intensity": intensity,
+        "tokens_in": resp.tokens_in,
+        "tokens_out": resp.tokens_out,
     }
 
 
-# ─── Genre packs ──────────────────────────────────────────────────────────────
+# ─── Chunks (v3 — 3 tầng arc/chunk/scene) ────────────────────────────────────
 
-@router.get("/translate/genre-packs", response_model=list[GenrePackInfo])
-def list_genre_packs():
-    """List các genre pack có sẵn cho FE chọn."""
-    return get_available_genre_packs()
+@router.get("/projects/{pid}/chunks", response_model=list[ChunkOut])
+def list_chunks(pid: int, db: Session = Depends(get_db)):
+    """List chunks của project, kèm arc info."""
+    _get_project(db, pid)
+    chunks = db.query(DBChunk).filter(
+        DBChunk.project_id == pid
+    ).order_by(DBChunk.chunk_index).all()
+    arcs = db.query(DBStoryArc).filter(
+        DBStoryArc.project_id == pid
+    ).all()
+    arc_by_idx = {a.arc_index: a for a in arcs}
+
+    result = []
+    for c in chunks:
+        arc = arc_by_idx.get(c.arc_index)
+        scene_count = db.query(DBScene).filter(DBScene.chunk_id == c.id).count()
+        result.append(_db_chunk_to_out(
+            c,
+            scene_count=scene_count,
+            arc_title=arc.title if arc else "",
+            arc_tone=arc.emotional_tone if arc else "",
+        ))
+    return result
+
+
+@router.get("/projects/{pid}/chunks/{chunk_id}")
+def get_chunk_detail(pid: int, chunk_id: int, db: Session = Depends(get_db)):
+    """Chi tiết 1 chunk + scenes + subtitles."""
+    _get_project(db, pid)
+    c = db.query(DBChunk).filter(
+        DBChunk.id == chunk_id,
+        DBChunk.project_id == pid,
+    ).first()
+    if not c:
+        raise HTTPException(404, "Chunk not found")
+
+    scenes = db.query(DBScene).filter(
+        DBScene.chunk_id == chunk_id
+    ).order_by(DBScene.start_line).all()
+
+    subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.chunk_id == chunk_id,
+    ).order_by(Subtitle.index).all()
+
+    arc = db.query(DBStoryArc).filter(
+        DBStoryArc.project_id == pid,
+        DBStoryArc.arc_index == c.arc_index,
+    ).first()
+
+    return {
+        "id": c.id,
+        "project_id": c.project_id,
+        "arc_index": c.arc_index,
+        "chunk_index": c.chunk_index,
+        "title": c.title,
+        "start_line": c.start_line,
+        "end_line": c.end_line,
+        "status": c.status,
+        "arc_title": arc.title if arc else "",
+        "arc_tone": arc.emotional_tone if arc else "",
+        "scenes": [_db_scene_to_out(s).dict() for s in scenes],
+        "subtitles_count": len(subs),
+    }
+
+
+# ─── Variant Selection (v3) ───────────────────────────────────────────────────
+
+@router.post("/projects/{pid}/subtitles/{sub_id}/select-variant")
+def select_variant(pid: int, sub_id: int, req: dict, db: Session = Depends(get_db)):
+    """User chọn bản v1 hoặc v2 dùng làm text active."""
+    sub = db.query(Subtitle).filter(
+        Subtitle.id == sub_id,
+        Subtitle.project_id == pid,
+    ).first()
+    if not sub:
+        raise HTTPException(404, "Subtitle not found")
+
+    variant = int(req.get("variant", 1))
+    if variant not in (1, 2):
+        raise HTTPException(400, "variant phải 1 hoặc 2")
+
+    sub.variant_selected = variant
+    # Update active text
+    if variant == 2 and sub.text_v2:
+        sub.text = sub.text_v2
+    else:
+        sub.text = sub.text_v1 or ""
+
+    # Recompute CPS
+    duration = max(0.01, sub.end_time - sub.start_time)
+    from core.srt_parser import calculate_cps
+    sub.cps_value = calculate_cps(sub.text, duration) if sub.text else None
+
+    # Reset tts_done vì text đã đổi
+    sub.tts_done = False
+    sub.audio_path = None
+
+    db.commit()
+    return {
+        "ok": True,
+        "subtitle_id": sub.id,
+        "variant_selected": sub.variant_selected,
+        "text": sub.text,
+        "cps_value": sub.cps_value,
+    }
+
+
+@router.post("/projects/{pid}/subtitles/bulk-select-variant")
+def bulk_select_variant(pid: int, req: dict, db: Session = Depends(get_db)):
+    """Bulk: chọn cùng 1 variant cho nhiều dòng (hoặc tất cả).
+
+    Body: {"variant": 1|2, "subtitle_ids": [...] | null (= all)}
+    """
+    variant = int(req.get("variant", 1))
+    if variant not in (1, 2):
+        raise HTTPException(400, "variant phải 1 hoặc 2")
+
+    ids = req.get("subtitle_ids")
+    q = db.query(Subtitle).filter(Subtitle.project_id == pid)
+    if ids:
+        q = q.filter(Subtitle.id.in_(ids))
+
+    from core.srt_parser import calculate_cps
+    updated = 0
+    for sub in q.all():
+        # Chỉ apply variant 2 nếu có text_v2
+        if variant == 2 and not sub.text_v2:
+            continue
+        sub.variant_selected = variant
+        sub.text = sub.text_v2 if variant == 2 else (sub.text_v1 or "")
+        duration = max(0.01, sub.end_time - sub.start_time)
+        sub.cps_value = calculate_cps(sub.text, duration) if sub.text else None
+        sub.tts_done = False
+        sub.audio_path = None
+        updated += 1
+
+    db.commit()
+    return {"ok": True, "updated": updated, "variant": variant}

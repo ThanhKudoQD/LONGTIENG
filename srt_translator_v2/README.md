@@ -1,142 +1,96 @@
-# SRT Translator v2 — Pipeline dịch C-drama Trung → Việt
+# SRT Translator v3
 
-Hệ thống dịch phim Trung Quốc → tiếng Việt với chất lượng cao,
-được thiết kế cho mục đích **lồng tiếng đa nhân vật**.
+Pipeline dịch SRT tiếng Trung → tiếng Việt **dành cho LỒNG TIẾNG** (TTS VoxCPM).
 
 ## Triết lý
 
-1. **Hiểu phim trước, dịch sau** — Bible toàn phim trước khi dịch dòng nào.
-2. **Dịch theo phân cảnh, không theo dòng** — AI thấy cả mạch hội thoại.
-3. **Mỗi stage một nhiệm vụ duy nhất** — không nhồi, không kiêm nhiệm.
-4. **TTS-friendly** — câu dịch phải nói được, không chỉ đọc được.
-5. **CPS-aware** — sub phải đọc kịp trên màn hình.
+> "Hiểu phim trước. Dịch sau."
 
-## Pipeline 5 stage
+Pipeline 5 stages:
 
-```
-SRT (ZH) → [1] Bible → [2] Scenes → [3] Speaker → [4] Translate → [5] Polish → SRT (VI)
-```
+1. **Bible** — phân tích phim, lập hồ sơ nhân vật + bối cảnh + thuật ngữ
+2. **Chunks + Scenes** — chia phim thành chương (chunk) lớn rồi cảnh con
+3. **Speaker** — gán speaker cho mỗi dòng thoại
+4. **Translate** — dịch theo chunk với **2 bản** (sát nghĩa + thoát ý) + sliding window
+5. **Retry** — code-based scan dòng còn TQ / rỗng, retry
 
-| Stage | Mô tả | Số call API điển hình (1 phim 60 tập, ~1500 dòng) |
-|-------|-------|---------------------------------------------------|
-| 1. Bible | Đọc cả phim, lập hồ sơ nhân vật + bối cảnh + thuật ngữ | 4 |
-| 2. Scenes | Chia phim thành 150-250 phân cảnh kịch | 1 |
-| 3. Speaker | Gán nhân vật cho mỗi dòng (text-based) | ~150-250 |
-| 4. Translate | Dịch theo phân cảnh, có cảm xúc + xưng hô | ~150-250 |
-| 5. Polish | CPS condense + nhất quán xuyên phim | ~20-30 |
-
-**Tổng:** ~325-535 calls/phim, ~$0.80-1.40/phim với prompt caching.
-
-## Cấu trúc thư mục
+## Cấu trúc 3 tầng (mới v3)
 
 ```
-srt_translator_v2/
-├── core/              # Components dùng chung
-│   ├── llm_client.py       # Unified Gemini/OpenAI/DeepSeek client + caching
-│   ├── srt_parser.py       # Parse/build SRT, tính CPS
-│   ├── token_counter.py    # Estimate tokens
-│   └── pipeline.py         # Orchestrator chính
-│
-├── stages/            # 5 stage chính
-│   ├── stage1_bible.py     # Cast + World + Glossary + Genre Pack
-│   ├── stage2_scenes.py    # Scene detection
-│   ├── stage3_speaker.py   # Speaker assignment
-│   ├── stage4_translate.py # Translate per scene
-│   └── stage5_polish.py    # CPS + Consistency
-│
-├── prompts/v2/        # Prompt templates (text files, dễ edit)
-│   ├── bible_cast.txt
-│   ├── bible_world.txt
-│   ├── bible_glossary.txt
-│   ├── scene_detect.txt
-│   ├── speaker.txt
-│   ├── translate_scene.txt
-│   ├── cps_condense.txt
-│   ├── polish_consistency.txt
-│   └── polish_glossary.txt
-│
-├── genre_packs/       # Thư viện thể loại có sẵn (5 cái cốt lõi)
-│   ├── modern_ceo_romance.json     # Tổng tài đô thị
-│   ├── reborn_revenge.json         # Trọng sinh báo thù
-│   ├── war_god_return.json         # Chiến thần trở về
-│   ├── mafia_lord.json             # Hắc đạo bá đạo
-│   └── ancient_palace.json         # Cung đấu cổ trang
-│
-├── models/            # Pydantic models cho I/O an toàn
-│   ├── bible.py
-│   ├── scene.py
-│   └── translation.py
-│
-├── schemas/           # JSON Schema cho LLM output validation
-│
-├── examples/          # Sample SRT + expected output
-│
-├── tests/             # Test scripts
-│
-├── config.py          # Cấu hình chung
-├── run.py             # CLI entry point
-├── requirements.txt
-└── README.md
+Story (Phim)
+├── Arc 1 ("Hôn nhân hợp đồng")           ← cốt truyện lớn
+│   ├── Chunk 1.1 ("Lần đầu gặp gỡ")      ← chương kịch
+│   │   ├── Scene 1 (office, tense)        ← cảnh con
+│   │   ├── Scene 2 (hospital, sad)
+│   │   └── Scene 3 (bedroom, intimate)
+│   └── Chunk 1.2 ("Ký hợp đồng")
+└── Arc 2 ("Phát triển tình cảm")
 ```
 
-## Cài đặt
+## 2 bản dịch (mới v3)
+
+Mỗi dòng có thể có 2 bản:
+
+- **text_v1** — *sát nghĩa*: dịch sát cấu trúc Trung, phù hợp subtitle
+- **text_v2** — *thoát ý*: dịch theo cách người Việt nói tự nhiên, phù hợp lồng tiếng
+
+Cấu hình `variant.mode`:
+- `off` — chỉ 1 bản
+- `important_only` (mặc định) — chỉ cảnh quan trọng có 2 bản (HOOK/PEAK/intimate/angry)
+- `always` — mọi dòng có 2 bản
+
+## Lưu ý LỒNG TIẾNG
+
+- Câu phải **tròn, đủ chủ ngữ** (cho TTS)
+- KHÔNG tạo câu dưới 1 giây (TTS lỗi giọng)
+- Câu rút phải có ≥ 4-5 âm tiết
+- CPS max cho lồng tiếng: 22 (cao hơn subtitle thường vì TTS chỉnh speed được)
+
+## Sử dụng CLI
 
 ```bash
-cd srt_translator_v2/
-pip install -r requirements.txt
-```
-
-## Sử dụng
-
-### 1. Chạy toàn bộ pipeline
-
-```bash
+# Full pipeline
 python run.py translate \
-    --input /path/to/movie.srt \
-    --output /path/to/movie_vi.srt \
+    --input movie.srt \
+    --output-dir ./out \
     --provider gemini \
-    --api-key YOUR_KEY \
-    --genre auto
+    --api-key YOUR_KEY
+
+# Với variant 2 bản cho mọi dòng
+python run.py translate --input movie.srt --output-dir ./out --variant always
+
+# Với DeepSeek (rẻ nhất + giỏi tiếng Trung)
+python run.py translate \
+    --input movie.srt --output-dir ./out \
+    --provider deepseek --api-key sk-... \
+    --model-heavy deepseek-chat --model-medium deepseek-chat
 ```
 
-### 2. Chạy từng stage (debug)
+## Output
 
-```bash
-# Chỉ Stage 1 — sinh Bible
-python run.py bible --input movie.srt --output bible.json
-
-# Stage 2 — scene detection
-python run.py scenes --input movie.srt --bible bible.json --output scenes.json
-
-# Stage 3 — speaker
-python run.py speaker --input movie.srt --bible bible.json --scenes scenes.json --output speakers.json
-
-# Stage 4 — translate
-python run.py translate-only --input movie.srt --bible bible.json --scenes scenes.json --speakers speakers.json --output draft.srt
-
-# Stage 5 — polish
-python run.py polish --input draft.srt --bible bible.json --output final.srt
+```
+out/
+├── bible.json          # Bible đầy đủ (cast, world, glossary)
+├── chunks.json         # Cấu trúc chunks + scenes
+├── translation.json    # Bản dịch chi tiết (cả 2 variants)
+├── movie_vi_v1.srt     # SRT bản sát nghĩa
+├── movie_vi_v2.srt     # SRT bản thoát ý (nếu có)
+└── polish_report.json  # Issues còn lại (nếu có)
 ```
 
-### 3. Tích hợp vào DubEditor (sau)
+## Cost ước tính
 
-Sẽ có file `integration.py` để mount vào FastAPI router hiện tại.
+Phim 6000 dòng:
 
-## Provider hỗ trợ
+| Provider | Cost | Notes |
+|---|---|---|
+| Gemini Pro | ~$2.0 | Chất lượng cao, cached prefix giảm 50% |
+| Gemini Flash | ~$0.6 | Cân bằng |
+| DeepSeek | ~$0.4 | Rẻ nhất, hiểu TQ tốt |
 
-| Provider | Models | Caching | Khuyên dùng |
-|----------|--------|---------|-------------|
-| **Gemini** | 2.5 Pro, 2.5 Flash | ✅ Context Cache (75% off) | Default — chất lượng + giá |
-| **OpenAI** | GPT-5, GPT-5-mini | ✅ Auto prefix cache (50% off) | Backup |
-| **DeepSeek** | DeepSeek-V3 | ✅ Auto context cache (90% off) | Rẻ nhất, hiểu TQ tốt |
+So với v2 cũ (~$5-7): giảm 3-5x.
 
-## Roadmap
+## Tài liệu thêm
 
-- [x] **Phase 1**: Pipeline dịch chuẩn (5 stage)
-- [ ] **Phase 2**: Visual lip-sync cho Speaker (kết hợp Pyannote)
-- [ ] **Phase 3**: Back-translation QC cho cảnh emotion peak
-- [ ] **Phase 4**: Bible incremental update xuyên series
-
-## License
-
-Proprietary — Internal use only.
+- `ARCHITECTURE.md` — chi tiết kiến trúc
+- `prompts/v3/` — toàn bộ prompts dùng cho LLM

@@ -1,274 +1,261 @@
 """
-Pipeline Orchestrator.
+Pipeline Orchestrator v3.
 
-Chạy tuần tự 5 stage và build TranslationResult cuối.
+Chạy tuần tự 5 stage + build TranslationResult cuối.
+
+Stages:
+1. Bible      → Cast + World + Glossary
+2. Chunks     → 1 call/arc → chunks + scenes lồng nhau
+3. Speaker    → 1 call/chunk
+4. Translate  → 1 call/chunk (2 variants v1/v2)
+5. Polish     → code retry dòng còn TQ / rỗng
+
+Có hỗ trợ checkpoint callbacks để DubEditor save DB sau mỗi chunk.
 """
 from __future__ import annotations
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 
 from config import PipelineConfig
 from core.llm_client import CostTracker
-from core.srt_parser import SrtEntry, parse_srt_file, srt_stats, build_srt, format_time
+from core.srt_parser import SrtEntry, parse_srt_file, srt_stats, build_srt, format_time, calculate_cps
 from models import (
-    Bible, SceneMap, SubtitleLine, TranslationResult, PolishReport,
+    Bible, ChunkMap, SubtitleLine, TranslationResult, PolishReport,
 )
 from stages import (
-    run_stage1_bible, run_stage2_scenes, run_stage3_speaker,
+    run_stage1_bible, run_stage2_chunks, run_stage3_speaker,
     run_stage4_translate, run_stage5_polish,
 )
-from stages.stage1_bible import load_genre_pack
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────
+# RESULT
+# ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class PipelineResult:
     """Kết quả 1 lần chạy pipeline."""
     bible: Bible
-    scene_map: SceneMap
+    chunk_map: ChunkMap
+    speaker_map: dict[int, dict]
     translation: TranslationResult
     polish_report: PolishReport
     cost: CostTracker
+    entries: list[SrtEntry] = field(default_factory=list)
 
+    @property
+    def scene_map(self) -> ChunkMap:
+        """Backwards compat alias."""
+        return self.chunk_map
+
+
+# ─────────────────────────────────────────────────────────────────
+# CHECKPOINT CALLBACKS (cho DubEditor)
+# ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class PipelineCallbacks:
+    """Callbacks để DubEditor checkpoint sau mỗi stage / chunk."""
+    on_stage1_done: Optional[Callable[[Bible], None]] = None
+    on_stage2_done: Optional[Callable[[ChunkMap], None]] = None
+    on_stage3_chunk_done: Optional[Callable[[dict], None]] = None
+    on_stage4_chunk_done: Optional[Callable[[dict], None]] = None
+    on_stage5_done: Optional[Callable[[PolishReport], None]] = None
+
+
+# ─────────────────────────────────────────────────────────────────
+# MAIN PIPELINE
+# ─────────────────────────────────────────────────────────────────
 
 async def run_full_pipeline(
     srt_path: str,
     config: PipelineConfig,
+    callbacks: Optional[PipelineCallbacks] = None,
 ) -> PipelineResult:
-    """Chạy toàn bộ 5 stage."""
+    """Chạy toàn bộ 5 stages."""
     logger.info("╔══════════════════════════════════════════════════════════╗")
-    logger.info("║  SRT TRANSLATOR v2 — Full Pipeline                       ║")
+    logger.info("║  SRT TRANSLATOR v3 — Full Pipeline                       ║")
     logger.info("╚══════════════════════════════════════════════════════════╝")
+
+    callbacks = callbacks or PipelineCallbacks()
 
     # ─── Parse SRT ────────────────────────────────────────────
     logger.info(f"📂 Loading SRT: {srt_path}")
     entries = parse_srt_file(srt_path)
     stats = srt_stats(entries)
     logger.info(f"   {stats['total_lines']} lines, "
-                f"{stats['total_duration_min']} min, "
-                f"avg CPS {stats['avg_cps']}")
+                f"{stats['total_duration_min']:.1f} min, "
+                f"avg CPS {stats['avg_cps']:.1f}")
 
-    # ─── Auto-tune config theo size (v3) ──────────────────────
-    # Tự chỉnh batch sizes + compact mode theo total subs.
-    config.auto_tune_for_size(len(entries))
-    logger.info(
-        f"⚙️  Auto-tune: compact={config.compact.enabled}, "
-        f"speaker={config.batch.speaker_lines_per_call} lines/call, "
-        f"translate={config.batch.translate_lines_per_call} lines/call"
-    )
+    # Auto-tune config theo size
+    config.auto_tune_for_size(stats["total_lines"])
+    logger.info(f"   Project: {config.project_type} | "
+                f"Chunk target: {config.chunk.target_lines} | "
+                f"Compact: {config.compact.enabled} | "
+                f"Variant: {config.variant.mode}")
 
     tracker = CostTracker()
 
-    # ─── Stage 1: Bible ───────────────────────────────────────
+    # ─── STAGE 1: Bible ───────────────────────────────────────
     bible = await run_stage1_bible(entries, config, tracker)
+    if callbacks.on_stage1_done:
+        try:
+            callbacks.on_stage1_done(bible)
+        except Exception as e:
+            logger.warning(f"on_stage1_done failed: {e}")
 
-    # ─── Stage 2: Scenes ──────────────────────────────────────
-    scene_map = await run_stage2_scenes(entries, bible, config, tracker)
+    # ─── STAGE 2: Chunks + Scenes ─────────────────────────────
+    chunk_map = await run_stage2_chunks(entries, bible, config, tracker)
+    if callbacks.on_stage2_done:
+        try:
+            callbacks.on_stage2_done(chunk_map)
+        except Exception as e:
+            logger.warning(f"on_stage2_done failed: {e}")
 
-    # ─── Stage 3: Speaker ─────────────────────────────────────
-    speaker_map = await run_stage3_speaker(entries, bible, scene_map, config, tracker)
-
-    # ─── Stage 4: Translate ───────────────────────────────────
-    genre_pack = None
-    if bible.genre_pack_id:
-        genre_pack = load_genre_pack(bible.genre_pack_id, config)
-
-    translation_map = await run_stage4_translate(
-        entries, bible, scene_map, speaker_map, config, tracker,
-        genre_pack=genre_pack,
+    # ─── STAGE 3: Speaker ─────────────────────────────────────
+    speaker_map = await run_stage3_speaker(
+        entries, bible, chunk_map, config, tracker,
+        on_chunk_done=callbacks.on_stage3_chunk_done,
     )
 
-    # Build SubtitleLine list
+    # ─── STAGE 4: Translate (2 variants) ──────────────────────
+    translation_map = await run_stage4_translate(
+        entries, bible, chunk_map, speaker_map, config, tracker,
+        on_chunk_done=callbacks.on_stage4_chunk_done,
+    )
+
+    # ─── Build SubtitleLines ──────────────────────────────────
     lines = []
     for e in entries:
-        speaker_info = speaker_map.get(e.index, {})
-        trans_info = translation_map.get(e.index, {})
-
         line = SubtitleLine(
             index=e.index,
             start_time_sec=e.start_sec,
             end_time_sec=e.end_sec,
             text_zh=e.text,
-            text_vi=trans_info.get("text_vi", "") or "",
-            speaker_zh=speaker_info.get("speaker_zh"),
-            speaker_vi=trans_info.get("speaker_vi") or speaker_info.get("speaker_vi"),
-            speaker_confidence=speaker_info.get("confidence", "low"),
-            speaker_reason=speaker_info.get("reason", ""),
-            emotion=trans_info.get("emotion"),
-            intensity=trans_info.get("intensity", 5),
-            scene_index=speaker_info.get("scene_index"),
         )
 
-        # Mark scene flags
-        if line.scene_index is not None and line.scene_index < len(scene_map.scenes):
-            scene = scene_map.scenes[line.scene_index]
+        # Apply speaker
+        sp_info = speaker_map.get(e.index)
+        if sp_info:
+            line.speaker_zh = sp_info.get("speaker_zh")
+            line.speaker_confidence = sp_info.get("confidence", "l")
+            line.scene_index = sp_info.get("scene_index")
+            line.arc_index = sp_info.get("arc_index")
+
+            # Tìm chunk_index
+            for c_idx, chunk in enumerate(chunk_map.chunks):
+                if chunk.r[0] <= e.index <= chunk.r[1]:
+                    line.chunk_index = c_idx
+                    break
+
+        # Resolve speaker_vi từ Bible
+        if line.speaker_zh:
+            ch_info = bible.cast.get_by_zh(line.speaker_zh)
+            if ch_info:
+                line.speaker_vi = ch_info.vi
+
+        # Apply translation
+        tr_info = translation_map.get(e.index)
+        if tr_info:
+            line.text_v1 = tr_info.get("text_v1")
+            line.text_v2 = tr_info.get("text_v2")
+            line.emotion = tr_info.get("emotion")
+            line.intensity = tr_info.get("intensity", 5)
+            if tr_info.get("speaker_vi"):
+                line.speaker_vi = tr_info["speaker_vi"]
+            line.variant_selected = 1  # mặc định v1
+        else:
+            # Chưa dịch → placeholder
+            line.text_v1 = "[CHƯA DỊCH]"
+            line.needs_review = True
+
+        # Tìm scene info để set hook/peak flags
+        scene = chunk_map.get_scene_for_line(e.index)
+        if scene:
             line.is_hook = scene.is_hook
-
-        # Speaker low confidence → review
-        if speaker_info.get("confidence") == "low":
-            line.needs_review = True
-            line.review_reason = "Speaker low confidence"
-
-        # Untranslated → review
-        if not line.text_vi:
-            line.needs_review = True
-            line.review_reason = (line.review_reason + "; " if line.review_reason else "") + "Untranslated"
-            # Placeholder: keep zh
-            line.text_vi = f"[CHƯA DỊCH: {line.text_zh}]"
+            line.is_emotion_peak = scene.is_emotion_peak
 
         lines.append(line)
 
-    # ─── Stage 5: Polish ──────────────────────────────────────
-    lines, polish_report = await run_stage5_polish(lines, bible, config, tracker)
+    # ─── STAGE 5: Polish (retry) ──────────────────────────────
+    lines, polish_report = await run_stage5_polish(
+        lines, bible, config, tracker,
+    )
+    if callbacks.on_stage5_done:
+        try:
+            callbacks.on_stage5_done(polish_report)
+        except Exception as e:
+            logger.warning(f"on_stage5_done failed: {e}")
 
-    # Build TranslationResult
-    total_cps = [l.cps_value for l in lines if l.cps_value]
-    avg_cps = sum(total_cps) / len(total_cps) if total_cps else 0
-    review_count = sum(1 for l in lines if l.needs_review)
+    # ─── Build TranslationResult ──────────────────────────────
+    translated_count = sum(1 for l in lines if l.text_v1 and l.text_v1 != "[CHƯA DỊCH]")
+    variants_count = sum(1 for l in lines if l.text_v2)
+    cps_values = [l.cps_value for l in lines if l.cps_value is not None and l.cps_value > 0]
+    avg_cps = sum(cps_values) / len(cps_values) if cps_values else 0.0
+    needs_review_count = sum(1 for l in lines if l.needs_review)
 
-    translation = TranslationResult(
+    result = TranslationResult(
         lines=lines,
         total_lines=len(lines),
+        translated_count=translated_count,
+        variants_count=variants_count,
         avg_cps=avg_cps,
-        lines_needing_review=review_count,
+        lines_needing_review=needs_review_count,
     )
 
-    # ─── Final stats ──────────────────────────────────────────
+    # ─── Summary log ──────────────────────────────────────────
     logger.info("=" * 60)
-    logger.info("✅ PIPELINE COMPLETE")
+    logger.info("PIPELINE DONE")
     logger.info("=" * 60)
-    logger.info(f"Total lines: {translation.total_lines}")
-    logger.info(f"Avg CPS: {avg_cps:.2f}")
-    logger.info(f"Lines needing review: {review_count}")
-    logger.info(f"Polish rating: {polish_report.overall_rating}")
-    logger.info("")
+    logger.info(f"  Translated: {translated_count}/{len(lines)} lines")
+    logger.info(f"  Variants v2: {variants_count} lines")
+    logger.info(f"  Avg CPS: {avg_cps:.2f}")
+    logger.info(f"  Needs review: {needs_review_count} lines")
     logger.info(tracker.summary())
 
     return PipelineResult(
         bible=bible,
-        scene_map=scene_map,
-        translation=translation,
+        chunk_map=chunk_map,
+        speaker_map=speaker_map,
+        translation=result,
         polish_report=polish_report,
         cost=tracker,
+        entries=entries,
     )
 
 
 # ─────────────────────────────────────────────────────────────────
-# SAVE HELPERS
+# EXPORT HELPERS
 # ─────────────────────────────────────────────────────────────────
 
-def save_pipeline_outputs(
-    result: PipelineResult,
-    output_dir: str,
-    base_name: str = "output",
-) -> dict[str, str]:
-    """Save toàn bộ output: SRT, Bible, Scene Map, Polish Report.
+def export_srt(result: PipelineResult, output_path: str, use_variant: int = 1) -> None:
+    """Export SRT từ kết quả pipeline.
 
-    Trả về dict tên → path.
+    use_variant:
+      1: dùng text_v1 (sát nghĩa)
+      2: dùng text_v2 nếu có, fallback v1
+      0: dùng line.text_active (theo variant_selected mỗi line)
     """
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    paths = {}
-
-    # 1. SRT tiếng Việt
-    srt_entries = []
+    out_entries = []
     for line in result.translation.lines:
-        srt_entries.append(SrtEntry(
+        if use_variant == 1:
+            text = line.text_v1 or ""
+        elif use_variant == 2:
+            text = line.text_v2 or line.text_v1 or ""
+        else:
+            text = line.text_active
+
+        out_entries.append(SrtEntry(
             index=line.index,
             start_sec=line.start_time_sec,
             end_sec=line.end_time_sec,
-            text=line.text_vi,
+            text=text,
         ))
-    srt_path = out_dir / f"{base_name}.vi.srt"
-    srt_path.write_text(build_srt(srt_entries), encoding="utf-8")
-    paths["srt_vi"] = str(srt_path)
 
-    # 2. Bible JSON
-    bible_path = out_dir / f"{base_name}.bible.json"
-    bible_path.write_text(
-        result.bible.model_dump_json(indent=2, exclude_none=True),
-        encoding="utf-8"
-    )
-    paths["bible"] = str(bible_path)
-
-    # 3. Scene Map JSON
-    scenes_path = out_dir / f"{base_name}.scenes.json"
-    scenes_path.write_text(
-        result.scene_map.model_dump_json(indent=2, exclude_none=True),
-        encoding="utf-8"
-    )
-    paths["scenes"] = str(scenes_path)
-
-    # 4. Polish Report JSON
-    report_path = out_dir / f"{base_name}.polish_report.json"
-    report_path.write_text(
-        result.polish_report.model_dump_json(indent=2, exclude_none=True),
-        encoding="utf-8"
-    )
-    paths["polish_report"] = str(report_path)
-
-    # 5. Review queue (CSV) — các dòng cần check tay
-    import csv
-    review_path = out_dir / f"{base_name}.review_queue.csv"
-    with open(review_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "line_idx", "time", "speaker", "speaker_confidence",
-            "emotion", "cps", "text_zh", "text_vi", "review_reason"
-        ])
-        for line in result.translation.lines:
-            if line.needs_review:
-                writer.writerow([
-                    line.index,
-                    format_time(line.start_time_sec),
-                    line.speaker_vi or "",
-                    line.speaker_confidence,
-                    line.emotion or "",
-                    f"{line.cps_value:.1f}" if line.cps_value else "",
-                    line.text_zh,
-                    line.text_vi,
-                    line.review_reason,
-                ])
-    paths["review_queue"] = str(review_path)
-
-    # 6. Full translation table (CSV)
-    full_path = out_dir / f"{base_name}.full.csv"
-    with open(full_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "idx", "start", "end", "scene", "speaker_zh", "speaker_vi",
-            "confidence", "emotion", "intensity", "cps", "needs_review",
-            "text_zh", "text_vi"
-        ])
-        for line in result.translation.lines:
-            writer.writerow([
-                line.index,
-                format_time(line.start_time_sec),
-                format_time(line.end_time_sec),
-                line.scene_index or "",
-                line.speaker_zh or "",
-                line.speaker_vi or "",
-                line.speaker_confidence,
-                line.emotion or "",
-                line.intensity,
-                f"{line.cps_value:.1f}" if line.cps_value else "",
-                "YES" if line.needs_review else "",
-                line.text_zh,
-                line.text_vi,
-            ])
-    paths["full_table"] = str(full_path)
-
-    # 7. Cost summary
-    cost_path = out_dir / f"{base_name}.cost.txt"
-    cost_path.write_text(result.cost.summary(), encoding="utf-8")
-    paths["cost"] = str(cost_path)
-
-    logger.info(f"💾 Saved outputs to {out_dir}/")
-    for name, p in paths.items():
-        logger.info(f"   {name}: {Path(p).name}")
-
-    return paths
+    srt_text = build_srt(out_entries)
+    Path(output_path).write_text(srt_text, encoding="utf-8")
+    logger.info(f"✅ Exported SRT to {output_path}")
