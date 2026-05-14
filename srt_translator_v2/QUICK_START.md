@@ -141,3 +141,4 @@ Lưu ý: Gemini free tier có rate limit thấp; với 5+ concurrent có thể b
 ## Kiến trúc
 
 Xem `README.md` để hiểu pipeline 5-stage chi tiết.
+ 
