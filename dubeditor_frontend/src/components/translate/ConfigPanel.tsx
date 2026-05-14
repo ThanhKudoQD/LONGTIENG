@@ -51,8 +51,12 @@ const MODELS: Record<'gemini' | 'openai' | 'deepseek', ModelOption[]> = {
     { id: 'gpt-4o-mini', label: 'GPT-4o Mini', priceIn: 0.15, priceOut: 0.60,  desc: 'Gen cũ, rẻ',       tier: 'balanced' },
   ],
   deepseek: [
-    { id: 'deepseek-chat',     label: 'DeepSeek-V3 (chat)',     priceIn: 0.27, priceOut: 1.10, desc: 'Hiểu TQ tốt, context cache 90% off', tier: 'balanced' },
-    { id: 'deepseek-reasoner', label: 'DeepSeek-R1 (reasoner)', priceIn: 0.55, priceOut: 2.19, desc: 'Có reasoning, chậm hơn',             tier: 'top' },
+    { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash',
+      priceIn: 0.14, priceOut: 0.28,
+      desc: 'Nhanh, rẻ. Cache hit $0.0028/1M. Context 1M.', tier: 'fast' },
+    { id: 'deepseek-v4-pro',   label: 'DeepSeek V4 Pro',
+      priceIn: 0.435, priceOut: 0.87,
+      desc: 'Top model DeepSeek. Cache hit $0.0036/1M. Context 1M.', tier: 'top' },
   ],
 }
 
@@ -76,7 +80,7 @@ const PRESETS: Preset[] = [
     models: {
       gemini:   ['gemini-2.5-flash',     'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
       openai:   ['gpt-5-mini',           'gpt-5-nano',            'gpt-5-nano'],
-      deepseek: ['deepseek-chat',        'deepseek-chat',         'deepseek-chat'],
+      deepseek: ['deepseek-v4-flash',    'deepseek-v4-flash',     'deepseek-v4-flash'],
     },
   },
   {
@@ -85,7 +89,7 @@ const PRESETS: Preset[] = [
     models: {
       gemini:   ['gemini-2.5-pro',       'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
       openai:   ['gpt-5',                'gpt-5-mini',            'gpt-5-nano'],
-      deepseek: ['deepseek-reasoner',    'deepseek-chat',         'deepseek-chat'],
+      deepseek: ['deepseek-v4-pro',      'deepseek-v4-flash',     'deepseek-v4-flash'],
     },
   },
   {
@@ -94,7 +98,7 @@ const PRESETS: Preset[] = [
     models: {
       gemini:   ['gemini-2.5-pro',       'gemini-2.5-pro',        'gemini-2.5-flash'],
       openai:   ['gpt-5',                'gpt-5',                 'gpt-5-mini'],
-      deepseek: ['deepseek-reasoner',    'deepseek-reasoner',     'deepseek-chat'],
+      deepseek: ['deepseek-v4-pro',      'deepseek-v4-pro',       'deepseek-v4-flash'],
     },
   },
 ]
@@ -253,9 +257,9 @@ export default function ConfigPanel({
       if (!modelLight.startsWith('gpt')) setModelLight('gpt-5-mini')
       if (stage0Model && !stage0Model.startsWith('gpt')) setStage0Model('')
     } else if (provider === 'deepseek') {
-      if (!modelHeavy.startsWith('deepseek')) setModelHeavy('deepseek-chat')
-      if (!modelMedium.startsWith('deepseek')) setModelMedium('deepseek-chat')
-      if (!modelLight.startsWith('deepseek')) setModelLight('deepseek-chat')
+      if (!modelHeavy.startsWith('deepseek')) setModelHeavy('deepseek-v4-pro')
+      if (!modelMedium.startsWith('deepseek')) setModelMedium('deepseek-v4-flash')
+      if (!modelLight.startsWith('deepseek')) setModelLight('deepseek-v4-flash')
       if (stage0Model && !stage0Model.startsWith('deepseek')) setStage0Model('')
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -304,6 +308,7 @@ export default function ConfigPanel({
   const hasChunks = (status?.chunk_count ?? 0) > 0
   const hasSpeaker = (status?.speaker_assigned_count ?? 0) > 0
   const hasTranslated = (status?.translated_count ?? 0) > 0
+  const hasNormalized = ((status?.cleaned_count ?? 0) + (status?.removed_count ?? 0)) > 0
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
@@ -702,7 +707,7 @@ export default function ConfigPanel({
             Hoặc chạy 1 stage cụ thể (resume / debug)
           </div>
           <div className="grid grid-cols-6 gap-2">
-            <StageButton onClick={() => handleRunStage('normalize')}>0. Chuẩn hóa</StageButton>
+            <StageButton onClick={() => handleRunStage('normalize')} done={hasNormalized}>0. Chuẩn hóa</StageButton>
             <StageButton onClick={() => handleRunStage('bible')} done={hasBible}>1. Bible</StageButton>
             <StageButton onClick={() => handleRunStage('chunks')} done={hasChunks} disabled={!hasBible}>2. Chunks</StageButton>
             <StageButton onClick={() => handleRunStage('speaker')} done={hasSpeaker} disabled={!hasChunks}>3. Speaker</StageButton>

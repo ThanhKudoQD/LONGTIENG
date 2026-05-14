@@ -185,23 +185,25 @@ def get_status(pid: int, db: Session = Depends(get_db)):
     subs = db.query(Subtitle).filter(Subtitle.project_id == pid).all()
 
     def is_translated(s: Subtitle) -> bool:
-        # v3: text_v1 có giá trị và khác original_text
-        if s.text_v1 and s.text_v1.strip() and s.text_v1 != s.original_text:
-            return True
-        if (s.translation_version or 1) > 1:
-            return True
-        if s.text and s.original_text and s.text.strip() != s.original_text.strip():
+        # v3: chỉ tính là đã dịch khi có text_v1 (bản dịch Việt thật sự từ Stage 4)
+        # KHÔNG dùng `text` vì cột này có thể chứa original TQ lúc import.
+        if s.text_v1 and s.text_v1.strip():
             return True
         return False
 
-    translated = sum(1 for s in subs if is_translated(s))
-    variants = sum(1 for s in subs if s.text_v2 and s.text_v2.strip())  # v3
-    review = sum(1 for s in subs if s.needs_review)
-    speaker_assigned = sum(1 for s in subs if s.speaker_zh)
-
     # v3.2: Stage 0 stats
     cleaned_count = sum(1 for s in subs if getattr(s, "is_cleaned", False))
-    removed_count = sum(1 for s in subs if getattr(s, "is_noise", False))
+    # removed_count = số dòng đã bị Stage 0 xóa khỏi DB (log riêng)
+    from dubeditor.models import RemovedSubtitle
+    removed_count = db.query(RemovedSubtitle).filter(
+        RemovedSubtitle.project_id == pid
+    ).count()
+
+    # Tất cả subtitle hiện tại đều cần dịch (Stage 0 đã xóa noise rồi)
+    translated = sum(1 for s in subs if is_translated(s))
+    variants = sum(1 for s in subs if s.text_v2 and s.text_v2.strip())
+    review = sum(1 for s in subs if s.needs_review)
+    speaker_assigned = sum(1 for s in subs if s.speaker_zh)
 
     cps_vals = [s.cps_value for s in subs if s.cps_value]
     avg_cps = sum(cps_vals) / len(cps_vals) if cps_vals else 0.0
@@ -246,16 +248,24 @@ def get_status(pid: int, db: Session = Depends(get_db)):
 @router.get("/projects/{pid}/translate/normalize/cleaned",
             response_model=list[CleanedSubtitleOut])
 def get_cleaned_subtitles(pid: int, db: Session = Depends(get_db)):
-    """Danh sách subtitles đã được Stage 0 xử lý (clean / remove)."""
+    """Danh sách subtitles đã được Stage 0 xử lý.
+
+    Trả về 2 nguồn:
+    - Subtitle còn trong DB có is_cleaned=True → "clean" (đã sửa text)
+    - RemovedSubtitle log → "remove" (đã bị xóa khỏi DB)
+    """
+    from dubeditor.models import RemovedSubtitle
+
     _get_project(db, pid)
+    result = []
+
+    # 1. Dòng đã clean (còn trong DB)
     subs = db.query(Subtitle).filter(
         Subtitle.project_id == pid,
         Subtitle.is_cleaned == True,
     ).order_by(Subtitle.index).all()
 
-    result = []
     for s in subs:
-        action = "remove" if (s.is_noise or False) else "clean"
         result.append(CleanedSubtitleOut(
             id=s.id,
             index=s.index,
@@ -263,10 +273,32 @@ def get_cleaned_subtitles(pid: int, db: Session = Depends(get_db)):
             end_time=s.end_time,
             original_raw=s.original_raw,
             current_text=s.original_text or "",
-            is_noise=s.is_noise or False,
+            is_noise=False,
             clean_reason=s.clean_reason,
-            action=action,
+            action="clean",
         ))
+
+    # 2. Dòng đã remove (log RemovedSubtitle, không còn trong subtitles)
+    removed = db.query(RemovedSubtitle).filter(
+        RemovedSubtitle.project_id == pid,
+    ).order_by(RemovedSubtitle.original_index).all()
+
+    for r in removed:
+        # Dùng negative id để FE phân biệt với clean (id = -removed_id)
+        result.append(CleanedSubtitleOut(
+            id=-r.id,
+            index=r.original_index,
+            start_time=r.start_time,
+            end_time=r.end_time,
+            original_raw=r.original_text,
+            current_text="",
+            is_noise=True,
+            clean_reason=r.clean_reason,
+            action="remove",
+        ))
+
+    # Sắp xếp theo index gốc
+    result.sort(key=lambda x: x.index)
     return result
 
 
@@ -378,24 +410,91 @@ async def run_normalize_sync(pid: int, req: TranslateStartRequest,
 
 @router.post("/projects/{pid}/translate/normalize/revert/{subtitle_id}")
 def revert_cleaned_subtitle(pid: int, subtitle_id: int, db: Session = Depends(get_db)):
-    """Hoàn tác 1 dòng đã bị Stage 0 sửa — khôi phục original_raw."""
-    _get_project(db, pid)
-    sub = db.query(Subtitle).filter(
-        Subtitle.id == subtitle_id,
-        Subtitle.project_id == pid,
-    ).first()
-    if not sub:
-        raise HTTPException(404, "Subtitle not found")
-    if not sub.is_cleaned or not sub.original_raw:
-        raise HTTPException(400, "Subtitle chưa được Stage 0 xử lý")
+    """Hoàn tác 1 dòng đã bị Stage 0 xử lý.
 
-    sub.original_text = sub.original_raw
-    sub.is_noise = False
-    sub.is_cleaned = False
-    sub.clean_reason = None
-    sub.original_raw = None
+    Nếu subtitle_id > 0 → dòng đã clean (còn trong DB) → khôi phục original_raw
+    Nếu subtitle_id < 0 → dòng đã remove (id = -removed_subtitle.id) →
+                          insert lại + reindex tất cả
+    """
+    from dubeditor.models import RemovedSubtitle
+
+    _get_project(db, pid)
+
+    # Trường hợp 1: revert clean (id dương)
+    if subtitle_id > 0:
+        sub = db.query(Subtitle).filter(
+            Subtitle.id == subtitle_id,
+            Subtitle.project_id == pid,
+        ).first()
+        if not sub:
+            raise HTTPException(404, "Subtitle not found")
+        if not sub.is_cleaned or not sub.original_raw:
+            raise HTTPException(400, "Subtitle chưa được Stage 0 xử lý")
+
+        sub.original_text = sub.original_raw
+        sub.is_cleaned = False
+        sub.clean_reason = None
+        sub.original_raw = None
+        db.commit()
+        return {"ok": True, "subtitle_id": subtitle_id, "action": "restored_clean"}
+
+    # Trường hợp 2: revert remove (id âm = -removed.id)
+    removed_id = -subtitle_id
+    removed = db.query(RemovedSubtitle).filter(
+        RemovedSubtitle.id == removed_id,
+        RemovedSubtitle.project_id == pid,
+    ).first()
+    if not removed:
+        raise HTTPException(404, "RemovedSubtitle not found")
+
+    # Reset chunks/scenes (vì index sẽ shift sau khi insert)
+    from dubeditor.models import Scene as DBScene, Chunk as DBChunk
+    db.query(DBScene).filter(DBScene.project_id == pid).delete()
+    db.query(DBChunk).filter(DBChunk.project_id == pid).delete()
+
+    # Insert dòng mới vào vị trí original_index (hoặc cuối nếu vượt range)
+    target_idx = removed.original_index
+    # Shift các dòng có index >= target_idx lên 1
+    db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.index >= target_idx,
+    ).update({Subtitle.index: Subtitle.index + 1}, synchronize_session=False)
+
+    # Insert dòng đã xóa
+    new_sub = Subtitle(
+        project_id=pid,
+        index=target_idx,
+        start_time=removed.start_time,
+        end_time=removed.end_time,
+        original_text=removed.original_text,
+        text="",
+        is_cleaned=False,
+        original_raw=None,
+        clean_reason=None,
+    )
+    db.add(new_sub)
+
+    # Xóa log
+    db.delete(removed)
+
+    # Reindex liên tục để đảm bảo không có gap
     db.commit()
-    return {"ok": True, "subtitle_id": subtitle_id}
+    remaining = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+    ).order_by(Subtitle.index).all()
+    for new_idx, sub in enumerate(remaining, start=1):
+        if sub.index != new_idx:
+            sub.index = new_idx
+    db.commit()
+
+    # Cập nhật subtitle_count
+    from dubeditor.models import Project
+    project = db.query(Project).filter(Project.id == pid).first()
+    if project:
+        project.subtitle_count = len(remaining)
+        db.commit()
+
+    return {"ok": True, "subtitle_id": subtitle_id, "action": "restored_removed"}
 
 
 # ─── Pipeline control ─────────────────────────────────────────────────────────

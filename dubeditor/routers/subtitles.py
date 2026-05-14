@@ -12,9 +12,24 @@ router = APIRouter()
 
 @router.get("/project/{project_id}", response_model=list[SubtitleOut])
 def get_subtitles(project_id: int, db: Session = Depends(get_db)):
-    return db.query(Subtitle).filter(
+    subs = db.query(Subtitle).filter(
         Subtitle.project_id == project_id
     ).order_by(Subtitle.index).all()
+
+    # Auto-clean: dòng đã được Stage 0 normalize (is_cleaned=True) nhưng
+    # cột `text` legacy vẫn chứa TQ gốc lúc import → clear text.
+    # Stage 4 sẽ ghi lại text bằng bản dịch Việt sau này.
+    dirty = False
+    for s in subs:
+        if s.is_cleaned and s.text and s.text != (s.text_v1 or ""):
+            # text khác text_v1 (Việt) → có thể là TQ legacy, clear đi
+            if s.text != s.original_text:  # tránh xóa nhầm
+                s.text = s.text_v1 or ""
+                dirty = True
+    if dirty:
+        db.commit()
+
+    return subs
 
 
 @router.get("/{subtitle_id}", response_model=SubtitleOut)

@@ -708,32 +708,93 @@ class TranslateRunner:
     def _save_normalize_updates(self, update_map: dict):
         """Save kết quả Stage 0 vào DB.
 
-        update_map: {line_idx → {action, new_text, is_noise, reason}}
+        update_map: {line_idx → {action, new_text, reason}}
+
+        Logic:
+        - "clean": ghi text mới vào original_text, giữ dòng
+        - "remove": XÓA HẲN dòng khỏi DB (không giữ rỗng)
+                    Sau khi xóa, reindex các dòng sau để liên tục.
         """
         if not update_map:
             return
-        subs = self.db.query(Subtitle).filter(
-            Subtitle.project_id == self.project_id,
-            Subtitle.index.in_(list(update_map.keys())),
-        ).all()
-        for sub in subs:
-            u = update_map.get(sub.index)
-            if not u:
-                continue
-            # Lưu original_raw nếu chưa lưu (lần đầu apply)
-            if not sub.is_cleaned and not sub.original_raw:
-                sub.original_raw = sub.original_text
 
-            sub.is_cleaned = True
-            sub.clean_reason = u.get("reason") or ""
+        # Phân loại
+        clean_updates = {idx: u for idx, u in update_map.items() if u.get("action") == "clean"}
+        remove_indices = sorted(
+            [idx for idx, u in update_map.items() if u.get("action") == "remove"]
+        )
 
-            if u["action"] == "remove":
-                sub.original_text = ""
-                sub.is_noise = True
-            elif u["action"] == "clean":
+        # 1. Apply clean
+        if clean_updates:
+            subs = self.db.query(Subtitle).filter(
+                Subtitle.project_id == self.project_id,
+                Subtitle.index.in_(list(clean_updates.keys())),
+            ).all()
+            for sub in subs:
+                u = clean_updates.get(sub.index)
+                if not u:
+                    continue
+                # Lưu original_raw lần đầu apply
+                if not sub.is_cleaned and not sub.original_raw:
+                    sub.original_raw = sub.original_text
+                sub.is_cleaned = True
+                sub.clean_reason = u.get("reason") or ""
                 sub.original_text = u.get("new_text") or ""
-                sub.is_noise = False
-        self.db.commit()
+                # Clear cột `text` (bản dịch Việt) vì nó có thể chứa TQ legacy
+                # và sẽ được Stage 4 ghi lại với bản dịch Việt thật sự.
+                sub.text = ""
+                sub.text_v1 = None
+                sub.text_v2 = None
+            self.db.commit()
+
+        # 2. Apply remove: XÓA HẲN + REINDEX
+        if remove_indices:
+            # Trước khi xóa: nếu đã có chunks/scenes → reset (vì line index sẽ shift)
+            from dubeditor.models import Scene as DBScene, Chunk as DBChunk, RemovedSubtitle
+            self.db.query(DBScene).filter(DBScene.project_id == self.project_id).delete()
+            self.db.query(DBChunk).filter(DBChunk.project_id == self.project_id).delete()
+
+            # Lưu log RemovedSubtitle TRƯỚC khi xóa
+            to_remove = self.db.query(Subtitle).filter(
+                Subtitle.project_id == self.project_id,
+                Subtitle.index.in_(remove_indices),
+            ).all()
+            for sub in to_remove:
+                reason = (update_map.get(sub.index) or {}).get("reason") or ""
+                self.db.add(RemovedSubtitle(
+                    project_id=self.project_id,
+                    original_index=sub.original_raw and sub.index or sub.index,
+                    removed_after_index=sub.index,
+                    start_time=sub.start_time,
+                    end_time=sub.end_time,
+                    original_text=sub.original_raw or sub.original_text or "",
+                    clean_reason=reason,
+                ))
+
+            # Xóa các dòng cần xóa
+            self.db.query(Subtitle).filter(
+                Subtitle.project_id == self.project_id,
+                Subtitle.index.in_(remove_indices),
+            ).delete(synchronize_session=False)
+
+            # Reindex các dòng còn lại liên tục 1, 2, 3...
+            remaining = self.db.query(Subtitle).filter(
+                Subtitle.project_id == self.project_id,
+            ).order_by(Subtitle.index).all()
+            for new_idx, sub in enumerate(remaining, start=1):
+                if sub.index != new_idx:
+                    sub.index = new_idx
+            self.db.commit()
+
+            # Cập nhật subtitle_count của project
+            from dubeditor.models import Project
+            project = self.db.query(Project).filter(Project.id == self.project_id).first()
+            if project:
+                project.subtitle_count = len(remaining)
+                self.db.commit()
+
+            logger.info(f"[Stage 0] Đã xóa {len(remove_indices)} dòng + reindex còn "
+                        f"{len(remaining)} dòng")
 
     async def run_bible(self) -> V3Bible:
         await self._emit("bible", 0, "Stage 1: Phân tích phim...")

@@ -145,6 +145,27 @@ class Chapter(Base):
     project = relationship("Project", back_populates="chapters")
 
 
+# ── v3.2: Log dòng đã bị Stage 0 xóa (để hiển thị tab Chuẩn hóa) ──────────────
+class RemovedSubtitle(Base):
+    """Log dòng đã bị Stage 0 xóa khỏi DB.
+
+    Sau khi Stage 0 quyết định "remove" 1 dòng, ta lưu thông tin gốc ở đây
+    để user có thể xem lại và hoàn tác (re-insert vào subtitles + reindex).
+    """
+    __tablename__ = "removed_subtitles"
+    id              = Column(Integer, primary_key=True, index=True)
+    project_id      = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    # Index gốc tại thời điểm xóa (trong dải 1..N của lần upload đầu)
+    original_index  = Column(Integer, nullable=False)
+    # Index hiện tại trong DB sau khi đã reindex (có thể null nếu xóa nhiều lần)
+    removed_after_index = Column(Integer, nullable=True)
+    start_time      = Column(Float, nullable=False)
+    end_time        = Column(Float, nullable=False)
+    original_text   = Column(Text, default="")
+    clean_reason    = Column(Text, default="")
+    removed_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Bible(Base):
     """Bible v2 — hồ sơ phim đầy đủ.
 

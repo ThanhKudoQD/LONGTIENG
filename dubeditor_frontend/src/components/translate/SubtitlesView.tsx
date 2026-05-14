@@ -114,8 +114,18 @@ export default function SubtitlesView({ projectId }: { projectId: number }) {
         api.get<SubRow[]>(`/subtitles/project/${projectId}`).then(r => setSubs(r.data))
       })
     }
+    // Reload toàn bộ sau khi Stage 0 chuẩn hóa (text gốc thay đổi, có dòng bị xóa)
+    function onStage0Done() {
+      api.get<SubRow[]>(`/subtitles/project/${projectId}`)
+        .then(r => setSubs(r.data))
+        .catch(() => {})
+    }
     window.addEventListener('subtitle-variant-changed', onVariantChanged)
-    return () => window.removeEventListener('subtitle-variant-changed', onVariantChanged)
+    window.addEventListener('stage0-done', onStage0Done)
+    return () => {
+      window.removeEventListener('subtitle-variant-changed', onVariantChanged)
+      window.removeEventListener('stage0-done', onStage0Done)
+    }
   }, [projectId])
 
   const speakers = useMemo(() => {
@@ -482,6 +492,8 @@ function SubRowComponent({ sub, isActive, onActivate, onSave, onBlurAll }: {
 
             if (!hasV2) {
               // Chỉ 1 bản — render đơn giản
+              // Chỉ coi là "đã dịch" khi text khác original_text (TQ) và khác rỗng
+              const displayText = sub.text && sub.text !== sub.original_text ? sub.text : ''
               return (
                 <span style={{
                   fontSize: 14, lineHeight: 1.4,
@@ -489,7 +501,7 @@ function SubRowComponent({ sub, isActive, onActivate, onSave, onBlurAll }: {
                   fontWeight: 500,
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
                 }}>
-                  {sub.text || <span style={{ fontStyle: 'italic', opacity: 0.4, fontSize: 13 }}>Chưa dịch — click để thêm</span>}
+                  {displayText || <span style={{ fontStyle: 'italic', opacity: 0.4, fontSize: 13 }}>Chưa dịch — click để thêm</span>}
                 </span>
               )
             }

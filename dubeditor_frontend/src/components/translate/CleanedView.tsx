@@ -10,7 +10,7 @@ import React, { useEffect, useState } from 'react'
 import { translateApi } from '../../api'
 import type { CleanedSubtitle, ScanResult, TranslateConfig } from '../../types'
 
-const CONFIG_STORAGE_KEY = 'srt_translator_config_v3'
+const CONFIG_STORAGE_KEY = 'translate_config_v3'
 
 type ResultFilter = 'all' | 'clean' | 'remove'
 
@@ -71,15 +71,33 @@ export default function CleanedView({ projectId }: { projectId: number }) {
   }
 
   async function handleAnalyzeAI() {
-    const stored = loadStoredConfig()
-    const provider = (stored?.provider || 'gemini') as 'gemini' | 'openai' | 'deepseek'
-    // api_keys (mới) hoặc api_key (cũ) — backward compat
-    const apiKey = (stored as any)?.api_keys?.[provider] || (stored as any)?.api_key || ''
+    const stored = loadStoredConfig() as any
+    // Provider lưu trong storage (mặc định gemini)
+    let provider = (stored?.provider || 'gemini') as 'gemini' | 'openai' | 'deepseek'
+    // Tìm key theo provider hiện tại
+    let apiKey = stored?.api_keys?.[provider] || ''
+    // Fallback 1: format cũ (api_key string đơn)
+    if (!apiKey) apiKey = stored?.api_key || ''
+    // Fallback 2: nếu provider hiện tại không có key, dùng provider khác có key
+    if (!apiKey && stored?.api_keys) {
+      for (const p of ['gemini', 'openai', 'deepseek'] as const) {
+        if (stored.api_keys[p]) {
+          provider = p
+          apiKey = stored.api_keys[p]
+          break
+        }
+      }
+    }
+
     if (!apiKey) {
-      alert(`Cần API key cho ${provider}. Mở "Cấu hình" trước khi phân tích.`)
+      alert(
+        `Chưa có API key.\n\n` +
+        `Mở "Cấu hình" → chọn provider → paste key → bấm "💾 Lưu cấu hình".`
+      )
       return
     }
-    if (!confirm(`Gửi ${scan?.suspicious_count || 0} dòng nghi ngờ + context lên AI (1 call)?\n\nƯớc tính chi phí Flash: ~$0.005`)) {
+
+    if (!confirm(`Gửi ${scan?.suspicious_count || 0} dòng nghi ngờ + context lên AI (1 call)?\n\nProvider: ${provider}\nƯớc tính chi phí Flash: ~$0.005`)) {
       return
     }
 
@@ -108,16 +126,20 @@ export default function CleanedView({ projectId }: { projectId: number }) {
 
       // Gọi sync — đợi xong, trả kết quả ngay
       const result = await translateApi.runNormalize(projectId, config)
-      // Refresh danh sách cleaned
+      // Refresh danh sách cleaned trong tab này
       await refresh()
+      // Báo cho parent (TranslatePage) + SubtitlesView refresh
+      window.dispatchEvent(new CustomEvent('stage0-done', {
+        detail: { projectId },
+      }))
       // Báo kết quả
       alert(
         `✓ Phân tích xong\n\n` +
         `Tổng: ${result.total_lines} dòng\n` +
         `Nghi ngờ: ${result.suspicious_count}\n` +
         `Đã gửi AI: ${result.cluster_count} dòng (1 call)\n\n` +
-        `🗑 Loại bỏ: ${result.removed_count}\n` +
-        `🔧 Sửa: ${result.cleaned_count}\n` +
+        `🗑 Loại bỏ: ${result.removed_count} (đã xóa khỏi DB + reindex)\n` +
+        `🔧 Sửa: ${result.cleaned_count} (đã ghi đè text gốc)\n` +
         `✓ Giữ: ${result.kept_count}\n\n` +
         `Chi phí: $${result.cost_usd.toFixed(4)}`
       )

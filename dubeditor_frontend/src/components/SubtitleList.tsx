@@ -285,11 +285,14 @@ const Row = React.memo(function Row({
           fontWeight: isActive ? 700 : 500,
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
         }}>
-          {s.text
-            ? (s.text.includes('|')
-                ? s.text.split('|').slice(1).join('|').trim() || s.text
-                : s.text)
-            : <span style={{ fontStyle: 'italic', opacity: 0.35, fontSize: 13 }}>Chưa dịch</span>}
+          {(() => {
+            // Chỉ hiển thị text khi đã dịch (khác original_text TQ)
+            const t = s.text && s.text !== s.original_text ? s.text : ''
+            if (!t) return <span style={{ fontStyle: 'italic', opacity: 0.35, fontSize: 13 }}>Chưa dịch</span>
+            return t.includes('|')
+              ? t.split('|').slice(1).join('|').trim() || t
+              : t
+          })()}
         </span>
       </div>
 

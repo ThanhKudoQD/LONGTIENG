@@ -60,7 +60,8 @@ def cap_max_output(max_output: int, model: str) -> int:
         return min(max_output, 4096)
     if m.startswith(("o1", "o3", "o4", "gpt-5")):
         return min(max_output, 32768)
-    if "deepseek-reasoner" in m:
+    # DeepSeek V4 — context 1M, max output 384K (thực tế cap ở 8192 cho ổn định)
+    if "deepseek-v4" in m or "deepseek-reasoner" in m:
         return min(max_output, 8192)
     if "deepseek" in m:
         return min(max_output, 8192)
@@ -444,10 +445,13 @@ PRICING = {
     "gpt-5-nano":                  {"in": 0.05, "out": 0.40,  "cached_in": 0.005},
     "gpt-4o":                      {"in": 2.50, "out": 10.00, "cached_in": 1.25},
     "gpt-4o-mini":                 {"in": 0.15, "out": 0.60,  "cached_in": 0.075},
-    # DeepSeek
-    "deepseek-chat":               {"in": 0.27, "out": 1.10,  "cached_in": 0.027},
-    "deepseek-v3":                 {"in": 0.27, "out": 1.10,  "cached_in": 0.027},
-    "deepseek-reasoner":           {"in": 0.55, "out": 2.19,  "cached_in": 0.055},
+    # DeepSeek V4 (mới — chính thức)
+    "deepseek-v4-flash":           {"in": 0.14,  "out": 0.28, "cached_in": 0.0028},
+    "deepseek-v4-pro":             {"in": 0.435, "out": 0.87, "cached_in": 0.003625},
+    # DeepSeek V3 (legacy — deprecated, alias về v4)
+    "deepseek-chat":               {"in": 0.14,  "out": 0.28, "cached_in": 0.0028},
+    "deepseek-v3":                 {"in": 0.14,  "out": 0.28, "cached_in": 0.0028},
+    "deepseek-reasoner":           {"in": 0.435, "out": 0.87, "cached_in": 0.003625},
 }
 
 

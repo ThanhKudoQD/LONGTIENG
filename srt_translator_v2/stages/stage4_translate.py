@@ -273,28 +273,17 @@ async def process_one_chunk(
                 text_v2_raw = t.get("text_v2")
                 text_v2 = (text_v2_raw or "").strip() or None
 
-                # AI đánh dấu noise bằng cách trả text_v1 = "" (rỗng)
-                is_noise = (text_v1 == "")
-
-                if is_noise:
-                    noise_count += 1
-                    result[line_idx] = {
-                        "speaker_vi": "",
-                        "text_v1": "",
-                        "text_v2": None,
-                        "emotion": "neutral",
-                        "intensity": 1,
-                        "is_noise": True,
-                    }
-                else:
-                    result[line_idx] = {
-                        "speaker_vi": (t.get("speaker_vi") or "").strip(),
-                        "text_v1": text_v1,
-                        "text_v2": text_v2,
-                        "emotion": normalize_emotion(t.get("emotion")),
-                        "intensity": _clamp_intensity(t.get("intensity")),
-                        "is_noise": False,
-                    }
+                # KHÔNG tự đánh dấu noise nữa. Stage 0 là người duy nhất
+                # quyết định cái gì cần dịch (bằng cách set original_text="").
+                # Stage 4 chỉ lưu text AI trả về, kể cả rỗng.
+                result[line_idx] = {
+                    "speaker_vi": (t.get("speaker_vi") or "").strip(),
+                    "text_v1": text_v1,
+                    "text_v2": text_v2,
+                    "emotion": normalize_emotion(t.get("emotion")),
+                    "intensity": _clamp_intensity(t.get("intensity")),
+                    "is_noise": False,
+                }
             except Exception as e:
                 logger.debug(f"[Stage 4] Skip invalid translation: {e}")
                 continue

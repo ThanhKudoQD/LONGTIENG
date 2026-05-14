@@ -127,6 +127,16 @@ export default function TranslatePage({
     return close
   }, [projectId])
 
+  // Listen event stage0-done từ CleanedView (chạy chuẩn hóa sync, không qua SSE)
+  useEffect(() => {
+    function onStage0Done() {
+      refreshAll()
+    }
+    window.addEventListener('stage0-done', onStage0Done)
+    return () => window.removeEventListener('stage0-done', onStage0Done)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId])
+
   // ─── Refresh helpers ──────────────────────────────────────────────────────
 
   async function refreshAll() {
@@ -521,7 +531,9 @@ function Overview({ project, status, bible, chunks, scenes, arcs, issues, stageD
           <StageCard icon={stageDoneIcon('chunks')} title="2. Chunks"
             desc={`${chunks.length} chunks · ${arcs.length} arcs · ${scenes.length} scenes`} />
           <StageCard icon={stageDoneIcon('speaker')} title="3. Speaker"
-            desc={speakerAssigned > 0 ? `${speakerAssigned}/${totalLines} dòng` : 'Gán nhân vật'} />
+            desc={speakerAssigned > 0
+              ? `${speakerAssigned}/${totalLines} dòng`
+              : 'Gán nhân vật'} />
           <StageCard icon={stageDoneIcon('translate')} title="4. Dịch"
             desc={translated > 0 ? `${translated} dòng${variants > 0 ? ` · ${variants} v2` : ''}` : 'Dịch per chunk'} />
           <StageCard icon={stageDoneIcon('polish')} title="5. Retry"
@@ -531,9 +543,18 @@ function Overview({ project, status, bible, chunks, scenes, arcs, issues, stageD
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <StatCard label="Tổng dòng" value={totalLines.toString()} sub="subtitles" />
-        <StatCard label="Đã dịch" value={`${translated}/${totalLines}`}
-                  sub={totalLines > 0 ? `${((translated/totalLines)*100).toFixed(0)}%` : ''} />
+        <StatCard
+          label="Tổng dòng"
+          value={totalLines.toString()}
+          sub={(status?.removed_count ?? 0) > 0
+            ? `+${status?.removed_count} dòng đã xóa ở Stage 0`
+            : 'subtitles'}
+        />
+        <StatCard
+          label="Đã dịch"
+          value={`${translated}/${totalLines}`}
+          sub={totalLines > 0 ? `${((translated/totalLines)*100).toFixed(0)}%` : ''}
+        />
         <StatCard label="Cần review" value={review.toString()}
                   sub={review > 0 ? 'kiểm tra tay' : 'OK'}
                   warning={review > 0} />
