@@ -50,10 +50,30 @@ ModelTier = Literal["heavy", "medium", "light"]
 
 @dataclass
 class ModelConfig:
-    """Phân tầng model theo độ phức tạp."""
-    heavy: str = "gemini-2.5-pro"      # Bible (Cast), Translate
-    medium: str = "gemini-2.5-flash"   # Scene chia chunk, Speaker, Bible (World, Glossary)
-    light: str = "gemini-2.5-flash"    # Retry, Polish
+    """Phân tầng model + toggle thinking cho từng stage.
+
+    Mỗi stage có 1 cặp (model, thinking):
+      thinking=False (mặc định): tắt thinking → nhanh + rẻ, hợp task JSON đơn giản
+      thinking=True            : bật thinking dynamic → chậm + tốn hơn nhưng chất lượng cao
+                                  (chủ yếu hữu ích cho Stage 4 Translate — task suy luận)
+
+    Default: chỉ Stage 4 Translate bật thinking (đây là task khó nhất).
+    Các stage còn lại tắt vì chỉ là extract/parse JSON.
+    """
+    # Stage 1A Cast + Glossary (heavy)
+    heavy: str = "gemini-2.5-pro"
+    heavy_thinking: bool = True       # Bible Cast cần suy luận về quan hệ + Hán Việt
+
+    # Stage 1B World, Stage 2 Chunks, Stage 3 Speaker (medium)
+    medium: str = "gemini-2.5-flash"
+    medium_thinking: bool = False     # Extract structure đơn giản
+
+    # Stage 0 Normalize, Stage 5 Polish/Retry (light)
+    light: str = "gemini-2.5-flash"
+    light_thinking: bool = False      # Clean noise, retry — không cần suy luận
+
+    # Stage 4 Translate dùng heavy nhưng có toggle riêng vì đây là task quan trọng nhất
+    translate_thinking: bool = True   # MẶC ĐỊNH BẬT — đây là task chính, quality > cost
 
 
 # ─────────────────────────────────────────────────────────────────

@@ -525,6 +525,17 @@ def build_pipeline_config(req) -> PipelineConfig:
     config.models.heavy = req.model_heavy
     config.models.medium = req.model_medium
     config.models.light = req.model_light
+
+    # v3.3: thinking toggles per stage (chỉ apply cho Gemini 2.5+ / model có thinking)
+    if hasattr(req, "heavy_thinking") and req.heavy_thinking is not None:
+        config.models.heavy_thinking = bool(req.heavy_thinking)
+    if hasattr(req, "medium_thinking") and req.medium_thinking is not None:
+        config.models.medium_thinking = bool(req.medium_thinking)
+    if hasattr(req, "light_thinking") and req.light_thinking is not None:
+        config.models.light_thinking = bool(req.light_thinking)
+    if hasattr(req, "translate_thinking") and req.translate_thinking is not None:
+        config.models.translate_thinking = bool(req.translate_thinking)
+
     config.project_type = req.project_type
     config.apply_project_type()
 

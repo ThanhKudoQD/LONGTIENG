@@ -340,6 +340,12 @@ export interface TranslateConfig {
   model_heavy: string
   model_medium: string
   model_light: string
+  // v3.3: thinking toggles per stage (chỉ Gemini 2.5+ / OpenAI o-series)
+  // null = giữ default backend (heavy/translate = bật, medium/light = tắt)
+  heavy_thinking: boolean | null
+  medium_thinking: boolean | null
+  light_thinking: boolean | null
+  translate_thinking: boolean | null
   project_type: 'short_drama' | 'drama_series' | 'movie'
   cps_max: number | null
   concurrency: number

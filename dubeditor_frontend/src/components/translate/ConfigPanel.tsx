@@ -113,6 +113,11 @@ interface StoredConfig {
   model_heavy: string
   model_medium: string
   model_light: string
+  // v3.3: thinking toggles per stage
+  heavy_thinking: boolean
+  medium_thinking: boolean
+  light_thinking: boolean
+  translate_thinking: boolean
   concurrency: number
   variant_mode: VariantMode
   chunk_overlap: number
@@ -152,6 +157,11 @@ function defaultStored(): StoredConfig {
     model_heavy: 'gemini-2.5-pro',
     model_medium: 'gemini-2.5-flash',
     model_light: 'gemini-2.5-flash',
+    // v3.3: thinking defaults — heavy & translate bật (task khó), medium/light tắt (parse JSON đơn giản)
+    heavy_thinking: true,
+    medium_thinking: false,
+    light_thinking: false,
+    translate_thinking: true,
     concurrency: 5,
     variant_mode: 'important_only',
     chunk_overlap: 30,
@@ -182,6 +192,11 @@ export default function ConfigPanel({
   const [modelHeavy, setModelHeavy] = useState(stored.model_heavy)
   const [modelMedium, setModelMedium] = useState(stored.model_medium)
   const [modelLight, setModelLight] = useState(stored.model_light)
+  // v3.3: thinking flags
+  const [heavyThinking, setHeavyThinking] = useState(stored.heavy_thinking)
+  const [mediumThinking, setMediumThinking] = useState(stored.medium_thinking)
+  const [lightThinking, setLightThinking] = useState(stored.light_thinking)
+  const [translateThinking, setTranslateThinking] = useState(stored.translate_thinking)
   const [concurrency, setConcurrency] = useState(stored.concurrency)
 
   const [projectType, setProjectType] = useState<'short_drama' | 'drama_series' | 'movie'>(
@@ -214,6 +229,10 @@ export default function ConfigPanel({
     return {
       api_keys: apiKeys, provider,
       model_heavy: modelHeavy, model_medium: modelMedium, model_light: modelLight,
+      heavy_thinking: heavyThinking,
+      medium_thinking: mediumThinking,
+      light_thinking: lightThinking,
+      translate_thinking: translateThinking,
       concurrency,
       variant_mode: variantMode,
       chunk_overlap: chunkOverlap,
@@ -234,6 +253,7 @@ export default function ConfigPanel({
     }, 300)
     return () => clearTimeout(handle)
   }, [apiKeys, provider, modelHeavy, modelMedium, modelLight, concurrency,
+      heavyThinking, mediumThinking, lightThinking, translateThinking,
       variantMode, chunkOverlap, cacheEnabled, chunksParallel, speakerParallel,
       speakerContextWindow, stage0Enabled, stage0Model, stage0ContextWindow])
 
@@ -272,6 +292,10 @@ export default function ConfigPanel({
       model_heavy: modelHeavy.trim(),
       model_medium: modelMedium.trim(),
       model_light: modelLight.trim(),
+      heavy_thinking: heavyThinking,
+      medium_thinking: mediumThinking,
+      light_thinking: lightThinking,
+      translate_thinking: translateThinking,
       project_type: projectType,
       cps_max: cpsMax ? parseFloat(cpsMax) : null,
       concurrency,
@@ -424,12 +448,22 @@ export default function ConfigPanel({
 
             <div className="text-[11px] text-zinc-500 mb-1.5">Hoặc chỉnh tay:</div>
             <div className="space-y-2">
-              <ModelSelector tier="Heavy" stages="Bible (Cast) · Translate"
-                provider={provider} value={modelHeavy} onChange={setModelHeavy} />
-              <ModelSelector tier="Medium" stages="Bible (World/Glossary) · Chunks · Speaker"
-                provider={provider} value={modelMedium} onChange={setModelMedium} />
-              <ModelSelector tier="Light" stages="Retry dòng thiếu"
-                provider={provider} value={modelLight} onChange={setModelLight} />
+              <ModelSelector tier="Heavy" stages="Stage 1A Bible Cast+Glossary"
+                provider={provider} value={modelHeavy} onChange={setModelHeavy}
+                thinking={heavyThinking} onThinkingChange={setHeavyThinking}
+                thinkingHint="Trích nhân vật + Hán Việt — bật thinking giúp Bible chuẩn hơn" />
+              <ModelSelector tier="Translate" stages="Stage 4 Translate (dùng model Heavy)"
+                provider={provider} value={modelHeavy} onChange={setModelHeavy}
+                thinking={translateThinking} onThinkingChange={setTranslateThinking}
+                thinkingHint="⭐ TASK CHÍNH — bật để dịch chất lượng cao hơn (recommended)" />
+              <ModelSelector tier="Medium" stages="Stage 1B World · Stage 2 Chunks · Stage 3 Speaker"
+                provider={provider} value={modelMedium} onChange={setModelMedium}
+                thinking={mediumThinking} onThinkingChange={setMediumThinking}
+                thinkingHint="Extract structure — tắt là đủ" />
+              <ModelSelector tier="Light" stages="Stage 5 Retry dòng thiếu"
+                provider={provider} value={modelLight} onChange={setModelLight}
+                thinking={lightThinking} onThinkingChange={setLightThinking}
+                thinkingHint="Retry đơn giản — tắt là đủ" />
               <ModelSelector tier="Stage 0" stages="Chuẩn hóa phụ đề (phân tích noise)"
                 provider={provider} value={stage0Model} onChange={setStage0Model}
                 allowEmpty emptyLabel={`↪ Dùng Light (${modelLight || 'mặc định'})`} />
@@ -730,7 +764,8 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   )
 }
 
-function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, emptyLabel }: {
+function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, emptyLabel,
+                        thinking, onThinkingChange, thinkingHint }: {
   tier: string
   stages: string
   provider: 'gemini' | 'openai' | 'deepseek'
@@ -738,6 +773,10 @@ function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, em
   onChange: (v: string) => void
   allowEmpty?: boolean
   emptyLabel?: string
+  // v3.3: thinking toggle (undefined = không hiển thị)
+  thinking?: boolean
+  onThinkingChange?: (v: boolean) => void
+  thinkingHint?: string
 }) {
   const options = MODELS[provider] || []
   const known = options.find(m => m.id === value)
@@ -752,9 +791,18 @@ function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, em
 
   const tierColor =
     tier === 'Heavy' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+    : tier === 'Translate' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300'
     : tier === 'Medium' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
     : tier === 'Light' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
     : 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'  // Stage 0
+
+  // Thinking chỉ hợp lệ với Gemini 2.5+ hoặc OpenAI o-series / gpt-5
+  const thinkingSupported = thinking !== undefined && (
+    value.startsWith('gemini-2.5') ||
+    value.startsWith('gemini-3') ||
+    value.startsWith('o1') || value.startsWith('o3') || value.startsWith('o4') ||
+    value.startsWith('gpt-5')
+  )
 
   return (
     <div className="border border-zinc-200 dark:border-zinc-700 rounded-lg p-2.5 bg-zinc-50/50 dark:bg-zinc-900/50">
@@ -806,6 +854,33 @@ function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, em
             </div>
           )}
         </>
+      )}
+
+      {/* v3.3: Thinking toggle ngay dưới model selector */}
+      {thinking !== undefined && onThinkingChange && (
+        <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-700 flex items-center gap-2">
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={thinking}
+              onChange={e => onThinkingChange(e.target.checked)}
+              disabled={!thinkingSupported}
+              className="w-3.5 h-3.5"
+            />
+            <span className={`text-[11px] font-medium ${
+              thinkingSupported ? 'text-zinc-700 dark:text-zinc-300' : 'text-zinc-400'
+            }`}>
+              🧠 Thinking {thinking ? 'BẬT' : 'TẮT'}
+            </span>
+          </label>
+          <span className="text-[10px] text-zinc-500 leading-snug flex-1">
+            {!thinkingSupported
+              ? '(không hỗ trợ với model này)'
+              : (thinkingHint || (thinking
+                  ? 'Chậm + tốn output token hơn, chất lượng cao hơn'
+                  : 'Nhanh + rẻ, hợp task JSON đơn giản'))}
+          </span>
+        </div>
       )}
     </div>
   )

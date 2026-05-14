@@ -266,6 +266,7 @@ async def run_stage0_normalize(
         temperature=0.2,
         max_output=8000,
         json_mode=True,
+        thinking=config.models.light_thinking,
         max_retries=config.concurrency.retry_max,
     )
 

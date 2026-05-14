@@ -101,6 +101,7 @@ async def stage1a_cast_and_glossary(
         temperature=0.2,
         max_output=20000,           # đủ cho cả Cast + Glossary
         json_mode=True,
+        thinking=config.models.heavy_thinking,
         max_retries=config.concurrency.retry_max,
     )
 
@@ -187,6 +188,7 @@ async def stage1b_world(
         temperature=0.3,
         max_output=10000,           # tăng vì có arc summaries
         json_mode=True,
+        thinking=config.models.medium_thinking,
         max_retries=config.concurrency.retry_max,
     )
 

@@ -130,6 +130,7 @@ async def retry_batch(
             temperature=0.3,
             max_output=8000,
             json_mode=True,
+            thinking=config.models.light_thinking,
             max_retries=config.concurrency.retry_max,
         )
 

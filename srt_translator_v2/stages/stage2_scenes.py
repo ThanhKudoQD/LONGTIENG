@@ -211,6 +211,7 @@ async def _process_arc_inner(
         temperature=0.3,
         max_output=8000,
         json_mode=True,
+        thinking=config.models.medium_thinking,
         max_retries=config.concurrency.retry_max,
     )
 

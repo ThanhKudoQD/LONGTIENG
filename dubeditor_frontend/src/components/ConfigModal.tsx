@@ -22,6 +22,11 @@ export interface TranslateConfig {
   variant_mode?: 'off' | 'important_only' | 'always'
   chunk_overlap?: number
   cache_enabled?: boolean
+  // v3.3: thinking toggles (optional — null/undefined = giữ default backend)
+  heavy_thinking?: boolean | null
+  medium_thinking?: boolean | null
+  light_thinking?: boolean | null
+  translate_thinking?: boolean | null
   // Legacy compat
   model_pass1?: string
   model_pass3?: string
@@ -38,6 +43,11 @@ const DEFAULT_CONFIG: TranslateConfig = {
   variant_mode: 'important_only',
   chunk_overlap: 30,
   cache_enabled: true,
+  // v3.3: thinking toggles (null = giữ default backend)
+  heavy_thinking: null,
+  medium_thinking: null,
+  light_thinking: null,
+  translate_thinking: null,
 }
 
 export function loadConfig(): TranslateConfig {

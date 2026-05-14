@@ -109,6 +109,11 @@ export default function CleanedView({ projectId }: { projectId: number }) {
         model_heavy: stored?.model_heavy || 'gemini-2.5-pro',
         model_medium: stored?.model_medium || 'gemini-2.5-flash',
         model_light: stored?.model_light || 'gemini-2.5-flash',
+        // v3.3: thinking toggles (null = giữ default backend)
+        heavy_thinking: stored?.heavy_thinking ?? null,
+        medium_thinking: stored?.medium_thinking ?? null,
+        light_thinking: stored?.light_thinking ?? null,
+        translate_thinking: stored?.translate_thinking ?? null,
         project_type: stored?.project_type || 'short_drama',
         cps_max: stored?.cps_max ?? null,
         concurrency: stored?.concurrency || 5,

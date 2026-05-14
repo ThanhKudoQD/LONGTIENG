@@ -194,6 +194,7 @@ async def _process_chunk_inner(
         temperature=0.2,
         max_output=12000,
         json_mode=True,
+        thinking=config.models.medium_thinking,
         max_retries=config.concurrency.retry_max,
     )
 

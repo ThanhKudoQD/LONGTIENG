@@ -110,6 +110,12 @@ class LLMRequest:
     system_prompt: Optional[str] = None
     cached_prefix: Optional[str] = None  # Block lớn để cache (Bible, instructions)
 
+    # Thinking control (Gemini 2.5+ / OpenAI o-series)
+    # None  = không gửi config (dùng default của model — Gemini Pro auto thinking)
+    # True  = bật thinking dynamic (Gemini: thinkingBudget=-1)
+    # False = tắt hẳn thinking (Gemini: thinkingBudget=0) — nhanh + rẻ, hợp task JSON đơn giản
+    thinking: Optional[bool] = False
+
     # Retry
     max_retries: int = 3
     retry_backoff: float = 2.0
@@ -137,14 +143,17 @@ async def call_gemini(req: LLMRequest, client: httpx.AsyncClient) -> LLMResponse
         "generationConfig": {
             "temperature": req.temperature,
             "maxOutputTokens": cap_max_output(req.max_output, req.model),
-            # v3: Tắt thinking cho Gemini 2.5 — tránh tốn output budget cho reasoning
-            # mà JSON-task không cần. Giúp output không bị truncate.
-            # Note: chỉ áp dụng cho 2.5+ family (Flash/Pro), older models ignore.
-            "thinkingConfig": {
-                "thinkingBudget": 0,
-            },
         },
     }
+
+    # Thinking control — chỉ gửi nếu được set explicit
+    # thinking=False → thinkingBudget=0 (tắt, tiết kiệm output budget cho JSON task)
+    # thinking=True  → thinkingBudget=-1 (dynamic, model tự quyết)
+    # thinking=None  → không gửi config (Gemini Pro default = thinking bật, Flash default = bật nhẹ)
+    if req.thinking is not None:
+        payload["generationConfig"]["thinkingConfig"] = {
+            "thinkingBudget": -1 if req.thinking else 0,
+        }
 
     if req.system_prompt:
         payload["systemInstruction"] = {"parts": [{"text": req.system_prompt}]}

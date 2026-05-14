@@ -246,6 +246,7 @@ async def process_one_chunk(
             temperature=0.4,
             max_output=16000,
             json_mode=True,
+            thinking=config.models.translate_thinking,
             max_retries=config.concurrency.retry_max,
         )
 

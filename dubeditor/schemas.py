@@ -262,6 +262,13 @@ class TranslateConfig(BaseModel):
     model_heavy:   str = "gemini-2.5-pro"      # Bible, Translate
     model_medium:  str = "gemini-2.5-flash"    # Scene, Speaker
     model_light:   str = "gemini-2.5-flash"    # Retry
+    # v3.3: thinking toggles per stage (chỉ Gemini 2.5+ / OpenAI o-series)
+    # None = giữ default config (heavy/translate = bật, medium/light = tắt)
+    # True/False = override
+    heavy_thinking:     Optional[bool] = None   # Stage 1A Cast+Glossary
+    medium_thinking:    Optional[bool] = None   # Stage 1B World, Stage 2, Stage 3
+    light_thinking:     Optional[bool] = None   # Stage 0, Stage 5
+    translate_thinking: Optional[bool] = None   # Stage 4 Translate (task chính)
     project_type:  str = "short_drama"
     cps_max:       Optional[float] = None      # None = dùng preset của project_type
     concurrency:   int = 5
