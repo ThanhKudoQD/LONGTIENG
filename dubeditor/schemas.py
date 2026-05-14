@@ -133,6 +133,12 @@ class SubtitleOut(SubtitleBase):
     text_v2:            Optional[str] = None
     variant_selected:   int           = 1
     chunk_id:           Optional[int] = None
+    # v3.1: noise filter
+    is_noise:           bool          = False
+    # v3.2: Stage 0 normalize
+    is_cleaned:         bool          = False
+    original_raw:       Optional[str] = None
+    clean_reason:       Optional[str] = None
 
     @model_validator(mode="after")
     def _compute_voice_mode(self):
@@ -266,6 +272,17 @@ class TranslateConfig(BaseModel):
     chunk_overlap: int = 30
     # v3: cached prefix
     cache_enabled: bool = True
+    # v3: Bước 2 chạy song song hay tuần tự
+    # False = tuần tự (mặc định) — chậm hơn 30% nhưng cache hit Bible giảm 50-90% cost
+    # True  = song song — nhanh hơn nhưng tốn input token (không cache giữa arcs)
+    chunks_parallel: bool = False
+    # v3: Bước 3 speaker
+    speaker_parallel: bool = True              # True=song song (nhanh), False=tuần tự (cache Bible)
+    speaker_context_window: int = 20           # Số dòng context trước/sau chunk (read-only)
+    # v3.2: Stage 0 — chuẩn hóa phụ đề
+    stage0_enabled: bool = True                # Bật/tắt Stage 0 normalize
+    stage0_model: Optional[str] = None         # Model cho Stage 0 (None = dùng model_light)
+    stage0_context_window: int = 10            # Số dòng context xung quanh cluster (mỗi bên)
 
 
 class TranslateStartRequest(TranslateConfig):
@@ -275,7 +292,7 @@ class TranslateStartRequest(TranslateConfig):
 
 class TranslateStageRequest(TranslateConfig):
     """Chạy chỉ 1 stage cụ thể (debug)."""
-    stage: Literal["bible", "scenes", "chunks", "speaker", "translate", "polish"]
+    stage: Literal["normalize", "bible", "scenes", "chunks", "speaker", "translate", "polish"]
 
 
 class RetranslateRequest(BaseModel):
@@ -394,3 +411,49 @@ class TranslateStatusOut(BaseModel):
     tokens_in:        int = 0
     tokens_out:       int = 0
     error_message:    Optional[str] = None
+    # v3.2: Stage 0 normalize stats
+    cleaned_count:    int = 0       # dòng đã được Stage 0 sửa (is_cleaned=True)
+    removed_count:    int = 0       # dòng đã bị Stage 0 đánh dấu noise
+
+
+class CleanedSubtitleOut(BaseModel):
+    """1 dòng đã được Stage 0 xử lý."""
+    id:           int
+    index:        int
+    start_time:   float
+    end_time:     float
+    original_raw: Optional[str] = None    # text gốc trước khi clean
+    current_text: str                      # text hiện tại (sau clean) — rỗng nếu removed
+    is_noise:     bool                     # True = bị remove
+    clean_reason: Optional[str] = None     # AI giải thích lý do
+    action:       str                      # "remove" | "clean" (derived)
+
+    model_config = {"from_attributes": True}
+
+
+class SuspiciousLineOut(BaseModel):
+    """1 dòng nghi ngờ từ scan heuristic (chưa qua AI)."""
+    index:        int
+    text:         str
+    reasons:      list[str]
+
+
+class ScanResultOut(BaseModel):
+    """Kết quả scan heuristic — preview trước khi gửi AI."""
+    total_lines:       int
+    suspicious_count:  int
+    cluster_count:     int
+    suspicious_lines:  list[SuspiciousLineOut]
+
+
+class Stage0RunResultOut(BaseModel):
+    """Kết quả chạy Stage 0 (scan + AI analyze + apply)."""
+    total_lines:       int
+    suspicious_count:  int
+    cluster_count:     int
+    removed_count:     int
+    cleaned_count:     int
+    kept_count:        int
+    cost_usd:          float
+    tokens_in:         int
+    tokens_out:        int

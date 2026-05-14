@@ -29,10 +29,11 @@ import ConfigPanel from './translate/ConfigPanel'
 import BibleViewer from './translate/BibleViewer'
 import SceneList from './translate/SceneList'
 import SubtitlesView from './translate/SubtitlesView'
+import CleanedView from './translate/CleanedView'
 import IssueQueue from './translate/IssueQueue'
 import ProgressLog from './translate/ProgressLog'
 
-type Tab = 'overview' | 'bible' | 'scenes' | 'subtitles' | 'issues' | 'logs'
+type Tab = 'overview' | 'bible' | 'cleaned' | 'scenes' | 'subtitles' | 'issues' | 'logs'
 
 export default function TranslatePage({
   projectId, onBack,
@@ -242,8 +243,10 @@ export default function TranslatePage({
   }
 
   const stageDoneIcon = (stage: string) => {
+    if (stage === 'normalize') return (status?.cleaned_count ?? 0) > 0 || (status?.removed_count ?? 0) > 0 ? '✅' : '⚪'
     if (stage === 'bible')     return status?.has_bible ? '✅' : '⚪'
     if (stage === 'scenes')    return (status?.scene_count ?? 0) > 0 ? '✅' : '⚪'
+    if (stage === 'chunks')    return (status?.chunk_count ?? 0) > 0 ? '✅' : '⚪'
     if (stage === 'speaker')   return (status?.speaker_assigned_count ?? 0) > 0 ? '✅' : '⚪'
     if (stage === 'translate') return (status?.translated_count ?? 0) > 0 ? '✅' : '⚪'
     if (stage === 'polish')    return (status?.avg_cps ?? 0) > 0 ? '✅' : '⚪'
@@ -321,6 +324,14 @@ export default function TranslatePage({
         <TabButton active={tab === 'overview'} onClick={() => setTab('overview')}>
           📊 Tổng quan
         </TabButton>
+        <TabButton active={tab === 'cleaned'} onClick={() => setTab('cleaned')}>
+          🧹 Chuẩn hóa
+          {((status?.cleaned_count ?? 0) + (status?.removed_count ?? 0)) > 0 && (
+            <Pill className="bg-emerald-500/20 text-emerald-700">
+              {(status?.cleaned_count ?? 0) + (status?.removed_count ?? 0)}
+            </Pill>
+          )}
+        </TabButton>
         <TabButton active={tab === 'bible'} onClick={() => setTab('bible')}>
           📖 Bible {bible && <Pill>{bible.cast?.characters?.length || 0}</Pill>}
         </TabButton>
@@ -361,6 +372,10 @@ export default function TranslatePage({
             bible={bible}
             onUpdate={refreshBible}
           />
+        )}
+
+        {tab === 'cleaned' && (
+          <CleanedView projectId={projectId} />
         )}
 
         {tab === 'scenes' && (
@@ -492,9 +507,15 @@ function Overview({ project, status, bible, chunks, scenes, arcs, issues, stageD
       {/* Stage pipeline */}
       <div className="bg-white dark:bg-zinc-950 rounded-xl border border-zinc-200 dark:border-zinc-800 p-5">
         <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-widest mb-3">
-          Pipeline 5 stage (v3)
+          Pipeline (v3)
         </div>
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+          <StageCard icon={stageDoneIcon('normalize')} title="0. Chuẩn hóa"
+            desc={
+              (status?.cleaned_count ?? 0) > 0 || (status?.removed_count ?? 0) > 0
+                ? `${status?.cleaned_count ?? 0} sửa · ${status?.removed_count ?? 0} bỏ`
+                : 'Làm sạch phụ đề'
+            } />
           <StageCard icon={stageDoneIcon('bible')} title="1. Bible"
             desc={bible ? `${bible.cast.characters.length} nhân vật · ${bible.glossary.terms?.length || 0} thuật ngữ` : 'Phân tích phim'} />
           <StageCard icon={stageDoneIcon('chunks')} title="2. Chunks"

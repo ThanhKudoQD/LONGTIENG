@@ -8,6 +8,13 @@
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', sans-serif;
     -webkit-font-smoothing: antialiased;
+    /* Nền tổng thể off-white (giống bản v2) — dịu mắt, tránh chói */
+    background: #FAFAF7;
+    color: #1F2937;
+  }
+  .dark body {
+    background: #0A0A0B;
+    color: #E5E5E5;
   }
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -50,4 +57,28 @@
            bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400
            border border-zinc-200 dark:border-zinc-700;
   }
+
+  /* ── Soft surface classes (dịu mắt thay cho bg-white cứng) ──── */
+  .surface       { @apply bg-[#FAFAF7] dark:bg-zinc-950; }
+  .surface-card  { @apply bg-white dark:bg-zinc-900 border border-zinc-200/70 dark:border-zinc-800; }
+  .surface-soft  { @apply bg-zinc-50/70 dark:bg-zinc-900/40; }
+  .surface-sub   { @apply bg-[#F5F5F0] dark:bg-zinc-900/60; }
+
+  /* ── Emotion badge presets (giống v2) ───────────────────────── */
+  .emo-badge {
+    @apply inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium;
+  }
+  .emo-neutral    { @apply bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400; }
+  .emo-happy      { @apply bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300; }
+  .emo-sad        { @apply bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300; }
+  .emo-angry      { @apply bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300; }
+  .emo-tense      { @apply bg-orange-50 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300; }
+  .emo-intimate   { @apply bg-pink-50 text-pink-700 dark:bg-pink-900/30 dark:text-pink-300; }
+  .emo-determined { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300; }
+  .emo-shocked    { @apply bg-orange-50 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300; }
+
+  /* Confidence pill */
+  .conf-h { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300; }
+  .conf-m { @apply bg-blue-50    text-blue-700    dark:bg-blue-900/30    dark:text-blue-300; }
+  .conf-l { @apply bg-amber-50   text-amber-700   dark:bg-amber-900/30   dark:text-amber-300; }
 }

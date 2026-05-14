@@ -2,6 +2,7 @@ import axios from 'axios'
 import type {
   Bible, Scene, StoryArc, Chunk, PolishIssue,
   TranslateStatus, TranslateConfig, RetranslateResult,
+  CleanedSubtitle, ScanResult, Stage0RunResult,
 } from './types'
 
 // API instance — timeout 5 phút cho LLM calls.
@@ -66,6 +67,23 @@ export const translateApi = {
     const qs = params.toString() ? `?${params.toString()}` : ''
     return api.get<PolishIssue[]>(`/projects/${pid}/polish-issues${qs}`).then(r => r.data)
   },
+
+  // Stage 0 normalize — danh sách dòng đã clean / remove
+  listCleaned: (pid: number) =>
+    api.get<CleanedSubtitle[]>(`/projects/${pid}/translate/normalize/cleaned`).then(r => r.data),
+
+  revertCleaned: (pid: number, subtitleId: number) =>
+    api.post(`/projects/${pid}/translate/normalize/revert/${subtitleId}`).then(r => r.data),
+
+  // Stage 0 — Quét heuristic preview (không gọi AI)
+  scanSuspicious: (pid: number) =>
+    api.get<ScanResult>(`/projects/${pid}/translate/normalize/scan`).then(r => r.data),
+
+  // Stage 0 — Chạy full (scan + AI) SYNC. Đợi xong rồi trả kết quả.
+  runNormalize: (pid: number, config: TranslateConfig) =>
+    api.post<Stage0RunResult>(`/projects/${pid}/translate/normalize/run`, config, {
+      timeout: 10 * 60 * 1000,  // 10 phút cho task nặng
+    }).then(r => r.data),
 
   applyIssue: (pid: number, issueId: number) =>
     api.post(`/projects/${pid}/polish-issues/${issueId}/apply`).then(r => r.data),

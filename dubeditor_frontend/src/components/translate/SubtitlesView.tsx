@@ -11,14 +11,18 @@
  *   - Có badge cảm xúc + CPS
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import api from '../../api'
+import api, { translateApi } from '../../api'
 
 interface SubRow {
   id: number
+  project_id: number
   index: number
   start_time: number
   end_time: number
   text: string
+  text_v1?: string | null
+  text_v2?: string | null
+  variant_selected?: 1 | 2
   original_text: string | null
   speaker_zh: string | null
   character: { id: number; name: string; color?: string } | null
@@ -96,6 +100,22 @@ export default function SubtitlesView({ projectId }: { projectId: number }) {
       .catch(e => { if (!cancelled) setError(e?.message || 'Load failed') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
+  }, [projectId])
+
+  // Listen variant-changed event để reload sub đó (cập nhật text active từ server)
+  useEffect(() => {
+    function onVariantChanged(e: Event) {
+      const detail = (e as CustomEvent).detail as { id: number; variant: 1 | 2 }
+      if (!detail) return
+      api.get<SubRow>(`/subtitles/${detail.id}`).then(r => {
+        setSubs(prev => prev.map(s => s.id === detail.id ? { ...s, ...r.data } : s))
+      }).catch(() => {
+        // Fallback: re-fetch all
+        api.get<SubRow[]>(`/subtitles/project/${projectId}`).then(r => setSubs(r.data))
+      })
+    }
+    window.addEventListener('subtitle-variant-changed', onVariantChanged)
+    return () => window.removeEventListener('subtitle-variant-changed', onVariantChanged)
   }, [projectId])
 
   const speakers = useMemo(() => {
@@ -454,14 +474,76 @@ function SubRowComponent({ sub, isActive, onActivate, onSave, onBlurAll }: {
             </div>
           </div>
         ) : (
-          <span style={{
-            fontSize: 14, lineHeight: 1.4,
-            color: '#1F2937',
-            fontWeight: 500,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
-          }}>
-            {sub.text || <span style={{ fontStyle: 'italic', opacity: 0.4, fontSize: 13 }}>Chưa dịch — click để thêm</span>}
-          </span>
+          (() => {
+            const v1 = sub.text_v1 || sub.text || ''
+            const v2 = sub.text_v2 || ''
+            const hasV2 = !!v2 && v2 !== v1
+            const sel = sub.variant_selected || 1
+
+            if (!hasV2) {
+              // Chỉ 1 bản — render đơn giản
+              return (
+                <span style={{
+                  fontSize: 14, lineHeight: 1.4,
+                  color: '#1F2937',
+                  fontWeight: 500,
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
+                }}>
+                  {sub.text || <span style={{ fontStyle: 'italic', opacity: 0.4, fontSize: 13 }}>Chưa dịch — click để thêm</span>}
+                </span>
+              )
+            }
+
+            // Có 2 bản → hiển thị compact bản đang active + bản còn lại nhỏ phía dưới
+            const switchTo = async (v: 1 | 2) => {
+              try {
+                await translateApi.selectVariant(sub.project_id, sub.id, v)
+                // Reload sub trong list (parent quản lý)
+                window.dispatchEvent(new CustomEvent('subtitle-variant-changed', { detail: { id: sub.id, variant: v } }))
+              } catch (e) { console.warn(e) }
+            }
+
+            return (
+              <div className="flex flex-col gap-0.5" onClick={e => e.stopPropagation()}>
+                {/* Bản active — lớn */}
+                <div className="flex items-baseline gap-1.5">
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, padding: '0px 4px', borderRadius: 3,
+                    background: sel === 1 ? '#DBEAFE' : '#F3E8FF',
+                    color: sel === 1 ? '#1D4ED8' : '#7E22CE',
+                    flexShrink: 0,
+                  }}>
+                    v{sel}
+                  </span>
+                  <span style={{
+                    fontSize: 14, lineHeight: 1.35, color: '#1F2937', fontWeight: 500,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {sel === 2 ? v2 : v1}
+                  </span>
+                </div>
+                {/* Bản còn lại — nhỏ, click để switch */}
+                <div className="flex items-baseline gap-1.5 opacity-60 hover:opacity-100 transition-opacity cursor-pointer"
+                     onClick={() => switchTo(sel === 1 ? 2 : 1)}
+                     title="Click để chuyển sang bản này">
+                  <span style={{
+                    fontSize: 9, fontWeight: 600, padding: '0px 4px', borderRadius: 3,
+                    background: sel === 1 ? '#F3E8FF' : '#DBEAFE',
+                    color: sel === 1 ? '#7E22CE' : '#1D4ED8',
+                    flexShrink: 0,
+                  }}>
+                    v{sel === 1 ? 2 : 1}
+                  </span>
+                  <span style={{
+                    fontSize: 12, lineHeight: 1.3, color: '#6B7280', fontStyle: 'italic',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {sel === 1 ? v2 : v1}
+                  </span>
+                </div>
+              </div>
+            )
+          })()
         )}
 
         {/* Review reason (chỉ khi không editing) */}

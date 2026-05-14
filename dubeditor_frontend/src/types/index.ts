@@ -90,9 +90,15 @@ export interface Subtitle {
   is_hook?: boolean
   translation_version?: number
   // v3: 2 variants
-  text_v1?: string | null                // sát nghĩa
-  text_v2?: string | null                // thoát ý
+  text_v1?: string | null                // sát nghĩa (v1, ràng buộc rule)
+  text_v2?: string | null                // thoát ý (v2, AI tự do)
   variant_selected?: 1 | 2
+  // v3.1: noise filter — true nếu là marker [音乐] / (笑) / filler
+  is_noise?: boolean
+  // v3.2: Stage 0 normalize
+  is_cleaned?: boolean
+  original_raw?: string | null
+  clean_reason?: string | null
   // v3: per-line voice mode
   tts_voice_mode?: string | null
   voice_mode?: string
@@ -146,6 +152,7 @@ export interface BibleStoryArc {
   index: number
   r: [number, number]                    // [start_line, end_line]
   t: string                              // title
+  summary?: string                       // tóm tắt 2-3 câu (v3 mới)
   tone: string                           // tense|warm|sad|intimate|angry|neutral|mixed
 }
 
@@ -272,6 +279,48 @@ export interface TranslateStatus {
   tokens_in: number
   tokens_out: number
   error_message?: string | null
+  // v3.2: Stage 0 normalize
+  cleaned_count?: number                 // số dòng đã được Stage 0 sửa
+  removed_count?: number                 // số dòng đã bị Stage 0 đánh dấu noise
+}
+
+// v3.2: Stage 0 — dòng đã được chuẩn hóa
+export interface CleanedSubtitle {
+  id: number
+  index: number
+  start_time: number
+  end_time: number
+  original_raw: string | null            // text gốc trước Stage 0
+  current_text: string                   // text hiện tại (rỗng nếu removed)
+  is_noise: boolean                      // true = removed
+  clean_reason: string | null            // AI giải thích lý do
+  action: 'remove' | 'clean'             // derived
+}
+
+// v3.2: Stage 0 — kết quả scan heuristic (chưa qua AI)
+export interface SuspiciousLine {
+  index: number
+  text: string
+  reasons: string[]                      // lý do bị flag (regex pattern, watermark, ...)
+}
+
+export interface ScanResult {
+  total_lines: number
+  suspicious_count: number
+  cluster_count: number
+  suspicious_lines: SuspiciousLine[]
+}
+
+export interface Stage0RunResult {
+  total_lines: number
+  suspicious_count: number
+  cluster_count: number
+  removed_count: number
+  cleaned_count: number
+  kept_count: number
+  cost_usd: number
+  tokens_in: number
+  tokens_out: number
 }
 
 export interface ProgressEvent {
@@ -299,6 +348,13 @@ export interface TranslateConfig {
   variant_mode: VariantMode
   chunk_overlap: number
   cache_enabled: boolean
+  chunks_parallel: boolean  // Bước 2: true=song song, false=tuần tự (mặc định, tiết kiệm)
+  speaker_parallel: boolean // Bước 3: true=song song (mặc định), false=tuần tự (cache Bible)
+  speaker_context_window: number  // Bước 3: số dòng context trước/sau (mặc định 20)
+  // v3.2: Stage 0 normalize
+  stage0_enabled: boolean   // Bước 0: bật/tắt chuẩn hóa phụ đề
+  stage0_model: string | null  // Model cho Stage 0 (null = dùng model_light)
+  stage0_context_window: number  // Số dòng context xung quanh cluster (mặc định 10)
 }
 
 // ─── Retranslate (1 dòng) ────────────────────────────────────────────────────

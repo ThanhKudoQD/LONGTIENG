@@ -36,6 +36,7 @@ from models import (
     PolishReport,
     Character as V3Character,
 )
+from stages.stage0_normalize import run_stage0_normalize, Stage0Report
 from stages.stage1_bible import run_stage1_bible
 from stages.stage2_scenes import run_stage2_chunks
 from stages.stage3_speaker import run_stage3_speaker
@@ -173,6 +174,7 @@ def _sync_story_arcs(db: Session, project_id: int, v3_bible: V3Bible):
             project_id=project_id,
             arc_index=arc.index,
             title=arc.t,
+            summary=arc.summary or "",
             start_line=arc.r[0],
             end_line=arc.r[1],
             emotional_tone=arc.tone,
@@ -450,10 +452,12 @@ def save_translations_to_db(db: Session, project_id: int,
 
         text_v1 = info.get("text_v1") or ""
         text_v2 = info.get("text_v2")
+        is_noise = bool(info.get("is_noise", False))
         sub.text_v1 = text_v1
         sub.text_v2 = text_v2
         sub.variant_selected = 1
         sub.text = text_v1  # active
+        sub.is_noise = is_noise
 
         # Compute CPS
         duration = max(0.01, sub.end_time - sub.start_time)
@@ -461,9 +465,14 @@ def save_translations_to_db(db: Session, project_id: int,
 
         sub.emotion = info.get("emotion")
         sub.intensity = info.get("intensity", 5)
-        # Update needs_review nếu rỗng / còn TQ
+
+        # Update needs_review
         import re
-        if not text_v1 or re.search(r'[\u4e00-\u9fff]', text_v1):
+        if is_noise:
+            # Noise lines: không cần review, sẵn sàng skip khi export
+            sub.needs_review = False
+            sub.review_reason = "noise"
+        elif not text_v1 or re.search(r'[\u4e00-\u9fff]', text_v1):
             sub.needs_review = True
             sub.review_reason = "Chưa dịch hoặc còn TQ"
         else:
@@ -531,6 +540,19 @@ def build_pipeline_config(req) -> PipelineConfig:
         config.variant.mode = req.variant_mode
     if hasattr(req, "chunk_overlap") and req.chunk_overlap is not None:
         config.chunk.overlap_lines = req.chunk_overlap
+    if hasattr(req, "chunks_parallel"):
+        config.chunk.parallel = bool(req.chunks_parallel)
+    if hasattr(req, "speaker_parallel"):
+        config.speaker.parallel = bool(req.speaker_parallel)
+    if hasattr(req, "speaker_context_window") and req.speaker_context_window is not None:
+        config.speaker.context_window = int(req.speaker_context_window)
+    # v3.2: Stage 0 normalize
+    if hasattr(req, "stage0_enabled"):
+        config.stage0.enabled = bool(req.stage0_enabled)
+    if hasattr(req, "stage0_model") and req.stage0_model:
+        config.stage0.model = req.stage0_model
+    if hasattr(req, "stage0_context_window") and req.stage0_context_window is not None:
+        config.stage0.context_window = int(req.stage0_context_window)
     if hasattr(req, "cache_enabled"):
         config.cache.enabled = req.cache_enabled
 
@@ -623,6 +645,95 @@ class TranslateRunner:
         self.db.commit()
 
     # ─── Individual stages ──────────────────────────────────
+
+    async def run_normalize(self) -> Stage0Report:
+        """Stage 0 — Chuẩn hóa phụ đề (chạy trước Stage 1).
+
+        Scan dòng khả nghi → gửi AI Flash → apply remove/clean → cập nhật DB.
+        """
+        await self._emit("normalize", 0, "Stage 0: Chuẩn hóa phụ đề...")
+        self._check_cancelled()
+        self._save_status("running", 0.0)
+
+        # Skip nếu disabled
+        if not self.config.stage0.enabled:
+            logger.info("[Stage 0] Disabled by config — skip")
+            await self._emit("normalize_done", 4, "Stage 0 disabled — skipped")
+            return Stage0Report(total_lines=0)
+
+        entries = self._load_subtitles_as_entries()
+        if not entries:
+            raise ValueError("Project không có subtitles")
+
+        await self._emit("normalize_scan", 1, f"Scan {len(entries)} dòng...")
+
+        # Callback checkpoint per cluster — update DB ngay
+        async def on_cluster_done(update_map: dict):
+            if not update_map:
+                return
+            try:
+                self._save_normalize_updates(update_map)
+            except Exception as e:
+                logger.warning(f"[Stage 0] checkpoint save failed: {e}")
+
+        entries, report = await run_stage0_normalize(
+            entries, self.config, self.tracker,
+            on_cluster_done=on_cluster_done,
+        )
+        self._check_cancelled()
+
+        # Final save (full apply, idempotent)
+        await self._emit("normalize_save", 4, "Lưu kết quả chuẩn hóa...")
+        full_updates = {}
+        for d in report.decisions:
+            if d.action == "remove":
+                full_updates[d.line_index] = {
+                    "action": "remove",
+                    "is_noise": True,
+                    "new_text": "",
+                    "reason": d.reason,
+                }
+            elif d.action == "clean":
+                full_updates[d.line_index] = {
+                    "action": "clean",
+                    "is_noise": False,
+                    "new_text": d.new_text or "",
+                    "reason": d.reason,
+                }
+        self._save_normalize_updates(full_updates)
+
+        await self._emit("normalize_done", 5, report.summary)
+        return report
+
+    def _save_normalize_updates(self, update_map: dict):
+        """Save kết quả Stage 0 vào DB.
+
+        update_map: {line_idx → {action, new_text, is_noise, reason}}
+        """
+        if not update_map:
+            return
+        subs = self.db.query(Subtitle).filter(
+            Subtitle.project_id == self.project_id,
+            Subtitle.index.in_(list(update_map.keys())),
+        ).all()
+        for sub in subs:
+            u = update_map.get(sub.index)
+            if not u:
+                continue
+            # Lưu original_raw nếu chưa lưu (lần đầu apply)
+            if not sub.is_cleaned and not sub.original_raw:
+                sub.original_raw = sub.original_text
+
+            sub.is_cleaned = True
+            sub.clean_reason = u.get("reason") or ""
+
+            if u["action"] == "remove":
+                sub.original_text = ""
+                sub.is_noise = True
+            elif u["action"] == "clean":
+                sub.original_text = u.get("new_text") or ""
+                sub.is_noise = False
+        self.db.commit()
 
     async def run_bible(self) -> V3Bible:
         await self._emit("bible", 0, "Stage 1: Phân tích phim...")
@@ -736,6 +847,28 @@ class TranslateRunner:
         return translation_map
 
     async def run_polish(self) -> PolishReport:
+        """Stage 5 — TẠM DISABLE.
+
+        Trước đây: retry dòng còn TQ / rỗng.
+        Hiện tại: skip hoàn toàn — Stage 4 đã đủ tốt với prompt mới.
+        Nếu cần retry, dùng tính năng retranslate per-line từ UI.
+        """
+        await self._emit("polish", 95, "Stage 5: Disabled — skip")
+        logger.info("[Stage 5] DISABLED — skip polish/retry")
+
+        # Trả report rỗng để upstream không vỡ
+        report = PolishReport(
+            issues=[],
+            retried_count=0,
+            fixed_count=0,
+            still_problematic=0,
+            summary="Stage 5 disabled — không retry",
+        )
+        await self._emit("polish_done", 95, report.summary)
+        return report
+
+    async def run_polish_DEPRECATED(self) -> PolishReport:
+        """[CŨ] Stage 5 retry — giữ lại làm reference, không gọi từ đâu cả."""
         await self._emit("polish", 90, "Stage 5: Retry dòng còn TQ / rỗng...")
         self._check_cancelled()
 
@@ -792,10 +925,15 @@ class TranslateRunner:
     # ─── Full pipeline ──────────────────────────────────────
 
     async def run_full(self):
-        """Chạy đủ 5 stages."""
+        """Chạy đủ pipeline (Stage 0-4). Stage 5 hiện đang disabled."""
         self._install_llm_observer()
         try:
             self._save_status("running", 0.0)
+
+            # Stage 0 — chỉ chạy nếu enabled (mặc định True)
+            if self.config.stage0.enabled:
+                await self.run_normalize()
+                self._check_cancelled()
 
             await self.run_bible()
             self._check_cancelled()
@@ -809,7 +947,8 @@ class TranslateRunner:
             await self.run_translate()
             self._check_cancelled()
 
-            await self.run_polish()
+            # Stage 5 disabled — bỏ qua
+            # await self.run_polish()
 
             self._save_status("done", 100.0)
             await self._emit("done", 100,
@@ -832,7 +971,9 @@ class TranslateRunner:
         """Chạy 1 stage cụ thể (resume from middle)."""
         self._install_llm_observer()
         try:
-            if stage == "bible":
+            if stage == "normalize":
+                return await self.run_normalize()
+            elif stage == "bible":
                 return await self.run_bible()
             elif stage in ("chunks", "scenes"):
                 return await self.run_chunks()

@@ -17,6 +17,14 @@ def get_subtitles(project_id: int, db: Session = Depends(get_db)):
     ).order_by(Subtitle.index).all()
 
 
+@router.get("/{subtitle_id}", response_model=SubtitleOut)
+def get_subtitle(subtitle_id: int, db: Session = Depends(get_db)):
+    s = db.query(Subtitle).filter(Subtitle.id == subtitle_id).first()
+    if not s:
+        raise HTTPException(404, "Subtitle not found")
+    return s
+
+
 @router.post("/project/{project_id}", response_model=SubtitleOut)
 def create_subtitle(project_id: int, data: SubtitleCreate, db: Session = Depends(get_db)):
     s = Subtitle(project_id=project_id, **data.model_dump())

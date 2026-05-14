@@ -1,10 +1,16 @@
 """
-Stage 2 — Chunks + Scenes (v3).
+Stage 2 — Chunks + Scenes (v3 refactored).
 
-Logic mới:
-- 1 call/arc → AI chia chunks + scenes trong arc đó
-- 5 arcs phim 6000 dòng = 5 calls (song song)
-- Output compact: scenes là array thay vì object
+Cải tiến:
+- Cache marker tách BIBLE (cố định) khỏi ARC (biến) → mỗi arc gọi LLM
+  thì BIBLE được cache, giảm 50-90% input cost
+- Inject arc.summary vào prompt làm context dẫn dắt AI chia chunks
+  theo đúng mạch truyện
+- Toggle config.chunk.parallel:
+    · True  → chạy song song (nhanh, không cache hit giữa arcs)
+    · False → tuần tự (chậm hơn ~30%, cache hit Bible giảm 50-90% cost)
+
+Output compact: scenes là array thay vì object.
 """
 from __future__ import annotations
 import asyncio
@@ -20,6 +26,25 @@ from core.srt_parser import SrtEntry, format_time
 from models import Bible, Chunk, Scene, ChunkMap, StoryArc, normalize_emotion
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Cache marker (đồng bộ với prompt template)
+# ─────────────────────────────────────────────────────────────────
+
+CACHE_MARKER = "━━━ PHẦN BIẾN — CONTEXT ARC ━━━"
+
+
+def split_for_cache(prompt: str) -> tuple[str, str]:
+    """Tách prompt thành (cached_prefix, variable) tại marker.
+
+    cached_prefix = phần BIBLE + rules (giống nhau xuyên mọi arc)
+    variable = phần ARC riêng (summary, range, SRT)
+    """
+    if CACHE_MARKER in prompt:
+        idx = prompt.index(CACHE_MARKER)
+        return prompt[:idx], prompt[idx:]
+    return "", prompt
 
 
 def load_prompt(name: str, config: PipelineConfig) -> str:
@@ -41,31 +66,32 @@ def format_arc_srt(entries: list[SrtEntry], arc: StoryArc) -> str:
 
 
 def build_bible_reference(bible: Bible) -> str:
-    """Tóm tắt Bible dạng compact để inject vào prompt."""
+    """Tóm tắt Bible dạng compact để inject vào prompt.
+
+    PHẦN NÀY ĐƯỢC CACHE — phải GIỐNG NHAU xuyên mọi arc, không inject
+    field riêng arc vào đây.
+    """
     ref = {
         "genre": bible.world.genre,
         "era": bible.world.era,
+        "tone": bible.world.tone,
+        "plot": bible.world.plot,
         "characters": [
             {"zh": c.zh, "vi": c.vi, "g": c.g, "role": c.role}
-            for c in bible.cast.characters[:30]  # top 30 nhân vật
+            for c in bible.cast.characters[:30]
         ],
-        "tone": bible.world.tone,
     }
     return json.dumps(ref, ensure_ascii=False, indent=2)
 
 
 # ─────────────────────────────────────────────────────────────────
-# PARSE SCENES ARRAY
+# PARSE
 # ─────────────────────────────────────────────────────────────────
 
 def parse_scene_array(arr) -> Optional[Scene]:
-    """Parse 1 scene từ array [start, end, [chars], emotion, location, "HOOK"?].
-    
-    Tolerant: chấp nhận dict cũ luôn.
-    """
+    """Parse 1 scene từ array [start, end, [chars], emotion, location, "HOOK"?]."""
     try:
         if isinstance(arr, dict):
-            # Tolerate dict format
             r = arr.get("r") or [arr.get("start_line", 1), arr.get("end_line", 1)]
             return Scene(
                 r=(int(r[0]), int(r[1])),
@@ -133,68 +159,89 @@ async def process_one_arc(
     config: PipelineConfig,
     tracker: CostTracker,
     client: httpx.AsyncClient,
-    semaphore: asyncio.Semaphore,
+    semaphore: Optional[asyncio.Semaphore],
 ) -> list[Chunk]:
-    """Chia 1 arc thành chunks + scenes."""
-    async with semaphore:
-        logger.info(f"[Stage 2] Processing arc {arc.index}: \"{arc.t}\" "
-                    f"(dòng {arc.r[0]}-{arc.r[1]})")
+    """Chia 1 arc thành chunks + scenes.
 
-        prompt_template = load_prompt("chunks_and_scenes", config)
-        arc_srt = format_arc_srt(entries, arc)
-        bible_ref = build_bible_reference(bible)
+    Mỗi call dùng cached_prefix = phần Bible + rules → cache hit từ arc thứ 2.
+    """
+    if semaphore is None:
+        # Tuần tự — không cần lock
+        return await _process_arc_inner(arc, entries, bible, config, tracker, client)
+    else:
+        async with semaphore:
+            return await _process_arc_inner(arc, entries, bible, config, tracker, client)
 
-        prompt = (prompt_template
-                  .replace("{BIBLE_REFERENCE}", bible_ref)
-                  .replace("{ARC_INDEX}", str(arc.index))
-                  .replace("{ARC_TITLE}", arc.t)
-                  .replace("{ARC_TONE}", arc.tone)
-                  .replace("{ARC_START}", str(arc.r[0]))
-                  .replace("{ARC_END}", str(arc.r[1]))
-                  .replace("{ARC_SRT}", arc_srt)
-                  .replace("{CHUNK_TARGET}", str(config.chunk.target_lines))
-                  .replace("{MAX_CHUNKS}", str(config.chunk.max_chunks_per_arc)))
 
-        req = LLMRequest(
-            prompt=prompt,
-            model=config.models.medium,
-            api_key=config.api_key,
-            temperature=0.3,
-            max_output=8000,
-            json_mode=True,
-            max_retries=config.concurrency.retry_max,
-        )
+async def _process_arc_inner(
+    arc: StoryArc,
+    entries: list[SrtEntry],
+    bible: Bible,
+    config: PipelineConfig,
+    tracker: CostTracker,
+    client: httpx.AsyncClient,
+) -> list[Chunk]:
+    logger.info(f"[Stage 2] Processing arc {arc.index}: \"{arc.t}\" "
+                f"(dòng {arc.r[0]}-{arc.r[1]})")
 
-        try:
-            resp = await call_llm(req, client=client,
-                                  stage_tag=f"2_chunks_arc{arc.index}")
-            tracker.add("2_chunks", resp)
-            data = parse_json_response(resp.text, default={"chunks": []})
-        except Exception as e:
-            logger.warning(f"[Stage 2] Arc {arc.index} failed: {e}. "
-                           f"Fallback to 1 chunk for whole arc.")
-            return [_fallback_chunk_for_arc(arc)]
+    prompt_template = load_prompt("chunks_and_scenes", config)
+    arc_srt = format_arc_srt(entries, arc)
+    bible_ref = build_bible_reference(bible)
 
-        chunks = []
-        for c in data.get("chunks", []) or []:
-            chunk = parse_chunk_dict(c, arc.index)
-            if chunk:
-                chunks.append(chunk)
+    prompt = (prompt_template
+              .replace("{BIBLE_REFERENCE}", bible_ref)
+              .replace("{ARC_INDEX}", str(arc.index))
+              .replace("{ARC_TITLE}", arc.t)
+              .replace("{ARC_TONE}", arc.tone)
+              .replace("{ARC_SUMMARY}", arc.summary or "(không có tóm tắt)")
+              .replace("{ARC_START}", str(arc.r[0]))
+              .replace("{ARC_END}", str(arc.r[1]))
+              .replace("{ARC_SRT}", arc_srt)
+              .replace("{CHUNK_TARGET}", str(config.chunk.target_lines))
+              .replace("{MAX_CHUNKS}", str(config.chunk.max_chunks_per_arc)))
 
-        if not chunks:
-            logger.warning(f"[Stage 2] Arc {arc.index}: no chunks parsed, fallback")
-            return [_fallback_chunk_for_arc(arc)]
+    # Tách cached prefix
+    cached_prefix, variable = split_for_cache(prompt)
 
-        # Normalize chunks within arc
-        chunks = _normalize_chunks(chunks, arc)
+    req = LLMRequest(
+        prompt=variable if cached_prefix else prompt,
+        cached_prefix=cached_prefix if cached_prefix else None,
+        model=config.models.medium,
+        api_key=config.api_key,
+        temperature=0.3,
+        max_output=8000,
+        json_mode=True,
+        max_retries=config.concurrency.retry_max,
+    )
 
-        logger.info(f"[Stage 2] Arc {arc.index}: {len(chunks)} chunks, "
-                    f"{sum(len(c.scenes) for c in chunks)} scenes total")
-        return chunks
+    try:
+        resp = await call_llm(req, client=client,
+                              stage_tag=f"2_chunks_arc{arc.index}")
+        tracker.add("2_chunks", resp)
+        data = parse_json_response(resp.text, default={"chunks": []})
+    except Exception as e:
+        logger.warning(f"[Stage 2] Arc {arc.index} failed: {e}. "
+                       f"Fallback to 1 chunk for whole arc.")
+        return [_fallback_chunk_for_arc(arc)]
+
+    chunks = []
+    for c in data.get("chunks", []) or []:
+        chunk = parse_chunk_dict(c, arc.index)
+        if chunk:
+            chunks.append(chunk)
+
+    if not chunks:
+        logger.warning(f"[Stage 2] Arc {arc.index}: no chunks parsed, fallback")
+        return [_fallback_chunk_for_arc(arc)]
+
+    chunks = _normalize_chunks(chunks, arc)
+
+    logger.info(f"[Stage 2] Arc {arc.index}: {len(chunks)} chunks, "
+                f"{sum(len(c.scenes) for c in chunks)} scenes total")
+    return chunks
 
 
 def _fallback_chunk_for_arc(arc: StoryArc) -> Chunk:
-    """Fallback: 1 chunk cho cả arc nếu AI fail."""
     return Chunk(
         r=arc.r,
         t=arc.t or f"Arc {arc.index}",
@@ -204,7 +251,6 @@ def _fallback_chunk_for_arc(arc: StoryArc) -> Chunk:
 
 
 def _normalize_chunks(chunks: list[Chunk], arc: StoryArc) -> list[Chunk]:
-    """Sửa chunks liền nhau, không lấn/hở."""
     if not chunks:
         return [_fallback_chunk_for_arc(arc)]
 
@@ -224,13 +270,11 @@ def _normalize_chunks(chunks: list[Chunk], arc: StoryArc) -> list[Chunk]:
         if end < start:
             end = start
 
-        # Filter scenes trong chunk
         valid_scenes = []
         for sc in ch.scenes:
             if sc.start_line >= start and sc.end_line <= end:
                 valid_scenes.append(sc)
 
-        # Normalize scenes within chunk
         valid_scenes = _normalize_scenes(valid_scenes, start, end)
 
         fixed.append(Chunk(
@@ -244,9 +288,8 @@ def _normalize_chunks(chunks: list[Chunk], arc: StoryArc) -> list[Chunk]:
 
 
 def _normalize_scenes(scenes: list[Scene], chunk_start: int, chunk_end: int) -> list[Scene]:
-    """Sửa scenes liền nhau trong chunk."""
     if not scenes:
-        return []  # Chunk ngắn, không cần scenes
+        return []
 
     scenes = sorted(scenes, key=lambda s: s.r[0])
 
@@ -285,33 +328,49 @@ async def run_stage2_chunks(
     config: PipelineConfig,
     tracker: CostTracker,
 ) -> ChunkMap:
-    """Stage 2 — chia chunks + scenes cho toàn phim."""
+    """Stage 2 — chia chunks + scenes cho toàn phim.
+
+    Mode:
+    - config.chunk.parallel = False (mặc định) → tuần tự, cache hit Bible
+    - config.chunk.parallel = True             → song song, không cache giữa arcs
+    """
     logger.info("=" * 60)
-    logger.info("STAGE 2 — CHUNKS + SCENES")
+    mode = "PARALLEL" if config.chunk.parallel else "SEQUENTIAL (cache-friendly)"
+    logger.info(f"STAGE 2 — CHUNKS + SCENES ({mode})")
     logger.info("=" * 60)
 
     if not bible.world.arcs:
-        # Không có arcs → tạo 1 arc giả cho cả phim
         logger.warning("[Stage 2] No arcs in Bible, creating single arc")
-        arcs = [StoryArc(index=0, r=(1, len(entries)), t="Toàn phim", tone="neutral")]
+        arcs = [StoryArc(index=0, r=(1, len(entries)), t="Toàn phim",
+                         summary="", tone="neutral")]
     else:
         arcs = bible.world.arcs
 
-    semaphore = asyncio.Semaphore(config.concurrency.chunks)
+    all_chunks: list[Chunk] = []
 
     async with httpx.AsyncClient() as client:
-        tasks = [
-            process_one_arc(arc, entries, bible, config, tracker, client, semaphore)
-            for arc in arcs
-        ]
-        results = await asyncio.gather(*tasks)
-
-    all_chunks = []
-    for chunks_of_arc in results:
-        all_chunks.extend(chunks_of_arc)
+        if config.chunk.parallel:
+            # SONG SONG — nhanh nhưng không cache hit Bible giữa các arc
+            semaphore = asyncio.Semaphore(config.concurrency.chunks)
+            tasks = [
+                process_one_arc(arc, entries, bible, config, tracker, client, semaphore)
+                for arc in arcs
+            ]
+            results = await asyncio.gather(*tasks)
+            for chunks_of_arc in results:
+                all_chunks.extend(chunks_of_arc)
+        else:
+            # TUẦN TỰ — chậm hơn nhưng cache hit từ arc thứ 2 → giảm 50-90% input cost
+            for arc in arcs:
+                chunks_of_arc = await process_one_arc(
+                    arc, entries, bible, config, tracker, client,
+                    semaphore=None,
+                )
+                all_chunks.extend(chunks_of_arc)
 
     chunk_map = ChunkMap(chunks=all_chunks)
-    logger.info(f"[Stage 2] DONE. {len(all_chunks)} chunks total")
+    logger.info(f"[Stage 2] DONE. {len(all_chunks)} chunks total, "
+                f"cost so far: ${tracker.total_cost_usd:.4f}")
     return chunk_map
 
 

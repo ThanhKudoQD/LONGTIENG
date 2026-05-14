@@ -1,16 +1,16 @@
 """
-Stage 1 — Bible v3.
+Stage 1 — Bible v3 (refactored).
 
-3 sub-stages chạy song song / tuần tự:
-- 1A. Cast: trích xuất nhân vật (heavy model)
-- 1B. World: thể loại, plot, arcs (medium model)
-- 1C. Glossary: thuật ngữ + xưng hô theo thể loại (medium model)
+2 sub-stages CHẠY TUẦN TỰ để tận dụng prompt cache:
+- 1A. Cast + Glossary (1 call heavy) — gộp lại vì cùng cần Hán Việt + ngữ cảnh
+- 1B. World + arc summaries (1 call medium) — chạy SAU 1A, cache hit SRT prefix
 
-1A chạy trước (cần xong để 1C tham khảo).
-1B + 1C có thể chạy song song sau 1A.
+Lý do gộp/tách:
+- Cast & Glossary cùng cần model Pro (heavy) cho Hán Việt chuẩn → gộp tiết kiệm 1 call
+- World+Arc cần reasoning về plot/structure → medium model đủ, output ngắn
+- Tuần tự (không song song) → call 2 dùng prompt cache của call 1 → giảm 50-90% input cost
 """
 from __future__ import annotations
-import asyncio
 import json
 import logging
 from typing import Optional
@@ -50,37 +50,66 @@ def load_prompt(name: str, config: PipelineConfig) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# 1A. CAST
+# Helpers — split cached prefix vs variable
 # ─────────────────────────────────────────────────────────────────
 
-async def stage1a_cast(
+CACHE_MARKER = "━━━ PHẦN BIẾN — CONTEXT ━━━"
+
+
+def split_for_cache(prompt: str) -> tuple[str, str]:
+    """Tách prompt thành (cached_prefix, variable_suffix) tại marker.
+
+    Nếu không có marker → toàn bộ là variable (không cache).
+    """
+    if CACHE_MARKER in prompt:
+        idx = prompt.index(CACHE_MARKER)
+        return prompt[:idx], prompt[idx:]
+    return "", prompt
+
+
+# ─────────────────────────────────────────────────────────────────
+# 1A. CAST + GLOSSARY (gộp, 1 call heavy)
+# ─────────────────────────────────────────────────────────────────
+
+async def stage1a_cast_and_glossary(
     entries: list[SrtEntry],
     config: PipelineConfig,
     tracker: CostTracker,
     client: httpx.AsyncClient,
-) -> Cast:
-    """Trích xuất danh sách nhân vật."""
-    logger.info("[Stage 1A] Extracting cast...")
+) -> tuple[Cast, Glossary]:
+    """Trích xuất nhân vật + thuật ngữ trong 1 call.
 
-    prompt_template = load_prompt("bible_cast", config)
+    Lý do gộp:
+    - Cùng cần đọc toàn bộ SRT (input lớn nhất)
+    - Cùng cần Hán Việt chuẩn (model heavy)
+    - Cùng cần ngữ cảnh nhân vật để gán xưng hô (TỰ XƯNG ↔ Cast)
+    - Output 2 phần độc lập, AI không bị nhầm
+    """
+    logger.info("[Stage 1A] Extracting Cast + Glossary (1 call)...")
+
+    prompt_template = load_prompt("bible_cast_glossary", config)
     srt_text = format_srt_for_prompt(entries, with_timing=False)
     prompt = prompt_template.replace("{SRT_FULL}", srt_text)
 
+    cached_prefix, variable = split_for_cache(prompt)
+
     req = LLMRequest(
-        prompt=prompt,
+        prompt=variable if cached_prefix else prompt,
+        cached_prefix=cached_prefix if cached_prefix else None,
         model=config.models.heavy,
         api_key=config.api_key,
         temperature=0.2,
-        max_output=16000,
+        max_output=20000,           # đủ cho cả Cast + Glossary
         json_mode=True,
         max_retries=config.concurrency.retry_max,
     )
 
-    resp = await call_llm(req, client=client, stage_tag="1a_cast")
-    tracker.add("1a_cast", resp)
+    resp = await call_llm(req, client=client, stage_tag="1a_cast_glossary")
+    tracker.add("1a_cast_glossary", resp)
 
-    data = parse_json_response(resp.text, default={"characters": []})
+    data = parse_json_response(resp.text, default={"characters": [], "terms": []})
 
+    # Parse Cast
     characters = []
     for ch_data in data.get("characters", []) or []:
         try:
@@ -99,35 +128,64 @@ async def stage1a_cast(
         except Exception as e:
             logger.warning(f"[Stage 1A] Skip invalid character: {e}")
 
-    logger.info(f"[Stage 1A] Got {len(characters)} characters")
-    return Cast(characters=characters)
+    # Parse Glossary
+    terms = []
+    for t_data in data.get("terms", []) or []:
+        try:
+            terms.append(GlossaryTerm(
+                zh=t_data.get("zh", "") or "",
+                vi=t_data.get("vi", "") or "",
+                cat=(t_data.get("cat") or t_data.get("category") or "khac") or "khac",
+                n=int(t_data.get("n", 0)),
+                note=t_data.get("note"),
+            ))
+        except Exception as e:
+            logger.warning(f"[Stage 1A] Skip invalid term: {e}")
+
+    logger.info(f"[Stage 1A] Got {len(characters)} characters, {len(terms)} terms")
+    return Cast(characters=characters), Glossary(terms=terms)
 
 
 # ─────────────────────────────────────────────────────────────────
-# 1B. WORLD
+# 1B. WORLD + ARC SUMMARIES (1 call medium, sau 1A để cache hit)
 # ─────────────────────────────────────────────────────────────────
 
 async def stage1b_world(
     entries: list[SrtEntry],
+    cast: Cast,
     config: PipelineConfig,
     tracker: CostTracker,
     client: httpx.AsyncClient,
 ) -> World:
-    """Trích xuất bối cảnh + story arcs."""
-    logger.info("[Stage 1B] Extracting world + arcs...")
+    """Trích xuất bối cảnh + story arcs CÓ TÓM TẮT.
+
+    Chạy SAU 1A → SRT đã được Gemini/OpenAI cache → input cost giảm 50-90%.
+    """
+    logger.info("[Stage 1B] Extracting World + Arc summaries...")
 
     prompt_template = load_prompt("bible_world", config)
     srt_text = format_srt_for_prompt(entries, with_timing=False)
+
+    # Cast brief để AI biết ai là ai khi tóm tắt arc
+    cast_brief = "\n".join(
+        f"- {c.zh} → {c.vi} ({c.role}, {c.char})"
+        for c in cast.characters[:15]
+    )
+
     prompt = (prompt_template
               .replace("{SRT_FULL}", srt_text)
+              .replace("{CAST_BRIEF}", cast_brief)
               .replace("{TOTAL_LINES}", str(len(entries))))
 
+    cached_prefix, variable = split_for_cache(prompt)
+
     req = LLMRequest(
-        prompt=prompt,
+        prompt=variable if cached_prefix else prompt,
+        cached_prefix=cached_prefix if cached_prefix else None,
         model=config.models.medium,
         api_key=config.api_key,
         temperature=0.3,
-        max_output=8000,
+        max_output=10000,           # tăng vì có arc summaries
         json_mode=True,
         max_retries=config.concurrency.retry_max,
     )
@@ -147,6 +205,7 @@ async def stage1b_world(
                 index=arc_data.get("index", i),
                 r=(int(r[0]), int(r[1])),
                 t=arc_data.get("t", "") or arc_data.get("title", ""),
+                summary=arc_data.get("summary", "") or arc_data.get("s", ""),
                 tone=arc_data.get("tone", "neutral") or "neutral",
             ))
         except Exception as e:
@@ -159,6 +218,7 @@ async def stage1b_world(
             index=0,
             r=(1, len(entries)),
             t="Toàn phim",
+            summary="",
             tone="neutral",
         ))
 
@@ -172,101 +232,37 @@ async def stage1b_world(
         plot=data.get("plot", "") or "",
         arcs=arcs,
     )
-    logger.info(f"[Stage 1B] Genre: {world.genre}, {len(arcs)} arcs")
+    logger.info(f"[Stage 1B] Genre: {world.genre}, {len(arcs)} arcs with summaries")
     return world
 
 
 def _normalize_arcs(arcs: list[StoryArc], total_lines: int) -> list[StoryArc]:
     """Sửa arcs nếu chia sai (lấn / hở / sai range)."""
     if not arcs:
-        return [StoryArc(index=0, r=(1, total_lines), t="Toàn phim", tone="neutral")]
+        return [StoryArc(index=0, r=(1, total_lines), t="Toàn phim", summary="", tone="neutral")]
 
-    # Sort theo start_line
     arcs = sorted(arcs, key=lambda a: a.r[0])
 
     fixed = []
     for i, arc in enumerate(arcs):
         start, end = arc.r
-        # Arc đầu phải bắt đầu từ 1
         if i == 0:
             start = 1
-        # Arc i+1 phải = fixed[-1].end + 1
         elif fixed and start != fixed[-1].r[1] + 1:
             start = fixed[-1].r[1] + 1
 
-        # Arc cuối phải end = total_lines
         if i == len(arcs) - 1:
             end = total_lines
 
-        # End phải >= start
         if end < start:
             end = start
 
-        fixed.append(StoryArc(index=i, r=(start, end), t=arc.t, tone=arc.tone))
+        fixed.append(StoryArc(
+            index=i, r=(start, end),
+            t=arc.t, summary=arc.summary, tone=arc.tone,
+        ))
 
     return fixed
-
-
-# ─────────────────────────────────────────────────────────────────
-# 1C. GLOSSARY
-# ─────────────────────────────────────────────────────────────────
-
-async def stage1c_glossary(
-    entries: list[SrtEntry],
-    cast: Cast,
-    world: World,
-    config: PipelineConfig,
-    tracker: CostTracker,
-    client: httpx.AsyncClient,
-) -> Glossary:
-    """Trích xuất glossary (gộp thuật ngữ riêng + xưng hô thể loại)."""
-    logger.info("[Stage 1C] Extracting glossary...")
-
-    prompt_template = load_prompt("bible_glossary", config)
-    srt_text = format_srt_for_prompt(entries, with_timing=False)
-
-    # Bible reference tóm tắt cho prompt
-    bible_ref = {
-        "characters_zh": [c.zh for c in cast.characters if c.zh],
-        "genre": world.genre,
-        "era": world.era,
-    }
-    bible_ref_str = json.dumps(bible_ref, ensure_ascii=False, indent=2)
-
-    prompt = (prompt_template
-              .replace("{SRT_FULL}", srt_text)
-              .replace("{BIBLE_REFERENCE}", bible_ref_str))
-
-    req = LLMRequest(
-        prompt=prompt,
-        model=config.models.medium,
-        api_key=config.api_key,
-        temperature=0.2,
-        max_output=8000,
-        json_mode=True,
-        max_retries=config.concurrency.retry_max,
-    )
-
-    resp = await call_llm(req, client=client, stage_tag="1c_glossary")
-    tracker.add("1c_glossary", resp)
-
-    data = parse_json_response(resp.text, default={"terms": []})
-
-    terms = []
-    for t_data in data.get("terms", []) or []:
-        try:
-            terms.append(GlossaryTerm(
-                zh=t_data.get("zh", "") or "",
-                vi=t_data.get("vi", "") or "",
-                cat=(t_data.get("cat") or t_data.get("category") or "khac") or "khac",
-                n=int(t_data.get("n", 0)),
-                note=t_data.get("note"),
-            ))
-        except Exception as e:
-            logger.warning(f"[Stage 1C] Skip invalid term: {e}")
-
-    logger.info(f"[Stage 1C] Got {len(terms)} glossary terms")
-    return Glossary(terms=terms)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -278,25 +274,22 @@ async def run_stage1_bible(
     config: PipelineConfig,
     tracker: CostTracker,
 ) -> Bible:
-    """Stage 1 — Bible đầy đủ.
+    """Stage 1 — Bible v3.
 
-    Order:
-    1A Cast trước (đồng bộ)
-    1B World + 1C Glossary song song (cần Cast cho 1C)
+    Order TUẦN TỰ (cache-friendly):
+    1A Cast + Glossary (heavy, full SRT)
+    1B World + Arc summaries (medium, SRT cached từ 1A → giảm 50-90% input cost)
     """
     logger.info("=" * 60)
-    logger.info("STAGE 1 — BIBLE")
+    logger.info("STAGE 1 — BIBLE (2 sub-calls, sequential for cache)")
     logger.info("=" * 60)
 
     async with httpx.AsyncClient() as client:
-        # 1A trước
-        cast = await stage1a_cast(entries, config, tracker, client)
+        # 1A trước — Cast + Glossary gộp
+        cast, glossary = await stage1a_cast_and_glossary(entries, config, tracker, client)
 
-        # 1B + 1C song song
-        world_task = stage1b_world(entries, config, tracker, client)
-        glossary_task = stage1c_glossary(entries, cast, World(), config, tracker, client)
-
-        world, glossary = await asyncio.gather(world_task, glossary_task)
+        # 1B sau — World + Arc summaries (cache hit SRT từ 1A)
+        world = await stage1b_world(entries, cast, config, tracker, client)
 
     bible = Bible(
         cast=cast,

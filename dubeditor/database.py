@@ -115,6 +115,12 @@ def _migrate_v3():
             add_col("subtitles", "text_v2", "TEXT")
             add_col("subtitles", "variant_selected", "INTEGER DEFAULT 1")
             add_col("subtitles", "chunk_id", "INTEGER")
+            # v3.1: noise filter (Stage 4)
+            add_col("subtitles", "is_noise", "INTEGER DEFAULT 0")
+            # v3.2: Stage 0 normalize
+            add_col("subtitles", "is_cleaned", "INTEGER DEFAULT 0")
+            add_col("subtitles", "original_raw", "TEXT")
+            add_col("subtitles", "clean_reason", "TEXT")
 
         # scenes: thêm chunk_id FK (v3)
         if has_table("scenes"):

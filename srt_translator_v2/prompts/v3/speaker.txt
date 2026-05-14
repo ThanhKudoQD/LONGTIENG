@@ -4,13 +4,19 @@ Bạn là chuyên gia phân tích thoại phim Trung Quốc.
 NHIỆM VỤ
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Đoán speaker (người nói) cho MỖI dòng phụ đề dưới đây.
+Đoán speaker (người nói) cho MỖI dòng phụ đề trong phần "THOẠI CẦN GÁN" dưới đây.
+
+Bạn sẽ được cung cấp:
+- Bible nhân vật + arc summary (context cố định)
+- Context trước/sau: ~20 dòng trước và sau chunk (read-only — KHÔNG gán speaker cho phần này, chỉ dùng để hiểu mạch hội thoại)
+- Scenes của chunk (giới hạn nhân vật của từng đoạn)
+- Thoại cần gán
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 QUY TẮC
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. CHỌN SPEAKER từ characters của SCENE chứa dòng đó.
+1. CHỌN SPEAKER từ characters của SCENE chứa dòng đó (đã liệt kê).
 
 2. SIGNAL ĐỂ ĐOÁN:
    - Tên trong thoại → đối tượng được gọi, KHÔNG phải speaker
@@ -18,15 +24,18 @@ QUY TẮC
    - Đối thoại luân phiên A→B→A→B
    - Xưng hô + chức vụ (顾总 = nói VỚI Cố tổng, không phải Cố)
    - Context scene (nếu scene chỉ có 2 người, dễ đoán luân phiên)
+   - DÙNG CONTEXT TRƯỚC/SAU: dòng đầu chunk có thể trả lời câu hỏi từ context trước; dòng cuối có thể được trả lời ở context sau
 
 3. CONFIDENCE:
-   - "h" (high): chắc chắn từ context rõ
+   - "h" (high): chắc chắn từ context rõ (tên gọi đáp lại, scene 2 người luân phiên...)
    - "m" (mid): có thể đoán nhưng không chắc 100%
-   - "l" (low): đoán mò, hoặc dòng off-screen (điện thoại, narrator)
+   - "l" (low): đoán mò, hoặc dòng off-screen (điện thoại, narrator, monologue)
 
 4. KHÔNG GÁN:
-   - Nếu dòng là chú thích phim (vd: title, narrator), gán "?" với confidence "l"
-   - Nếu không thể xác định trong characters của scene, gán nhân vật khả thi nhất với confidence "l"
+   - Nếu dòng là chú thích phim (title, narrator off-screen), gán "?" với confidence "l"
+   - Nếu không xác định được trong characters của scene → chọn khả thi nhất, confidence "l"
+
+5. CHỈ TRẢ VỀ SPEAKER CHO PHẦN "THOẠI CẦN GÁN", KHÔNG bao gồm context trước/sau.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT (COMPACT)
@@ -46,19 +55,32 @@ Trả về JSON THUẦN, dùng array để tiết kiệm token:
 Mỗi entry = array [line_index, speaker_zh, confidence].
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NHÂN VẬT TRONG ARC (tham khảo)
+BIBLE NHÂN VẬT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {ARC_CHARACTERS}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SCENES TRONG CHUNK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ PHẦN BIẾN — CONTEXT CHUNK ━━━
+
+ARC: {ARC_TITLE}
+Tóm tắt mạch truyện arc này:
+
+{ARC_SUMMARY}
+
+CHUNK HIỆN TẠI: "{CHUNK_TITLE}" (dòng {CHUNK_START}-{CHUNK_END})
+
+SCENES TRONG CHUNK (giới hạn nhân vật mỗi scene):
 
 {SCENES_INFO}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-THOẠI CẦN GÁN SPEAKER
+CONTEXT TRƯỚC (read-only, không gán speaker)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{CONTEXT_BEFORE}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+THOẠI CẦN GÁN SPEAKER (chỉ gán phần này)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Format: line_index | text_zh
@@ -66,11 +88,18 @@ Format: line_index | text_zh
 {CHUNK_SRT}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONTEXT SAU (read-only, không gán speaker)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{CONTEXT_AFTER}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CHECKLIST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-□ Mọi line_index trong input đều có speaker
-□ speaker_zh là tên Trung (không phải tên Việt)
+□ Mọi line_index trong "THOẠI CẦN GÁN" đều có speaker
+□ KHÔNG gán cho dòng trong CONTEXT TRƯỚC/SAU
+□ speaker_zh là tên Trung (zh), không phải tên Việt
 □ Speaker chỉ trong characters của scene đó (trừ "?" cho narrator)
 □ confidence "h" / "m" / "l"
 □ Output là JSON thuần

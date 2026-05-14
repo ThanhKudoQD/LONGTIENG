@@ -60,7 +60,8 @@ class StoryArc(BaseModel):
     """1 đoạn cốt truyện lớn."""
     index: int                                # Thứ tự arc (0-based)
     r: tuple[int, int]                        # [start_line, end_line]
-    t: str = ""                               # Title arc
+    t: str = ""                               # Title arc (5-10 chữ)
+    summary: str = ""                         # Tóm tắt nội dung arc (2-3 câu)
     tone: str = "neutral"                     # tone arc: tense/warm/sad/intimate/angry/neutral/mixed
 
 

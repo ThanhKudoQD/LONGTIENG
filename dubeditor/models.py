@@ -19,7 +19,7 @@ class Project(Base):
     source_lang        = Column(String, default='vi')          # 'zh' | 'vi'
     project_type       = Column(String, default='short_drama') # 'short_drama'|'drama_series'|'movie'
     genre_pack         = Column(String, nullable=True)         # ID của genre pack
-    translate_status   = Column(String, default='idle')        # idle|stage1|stage2|stage3|stage4|stage5|done|error
+    translate_status   = Column(String, default='idle')        # idle|stage0|stage1|stage2|stage3|stage4|stage5|done|error
     translate_progress = Column(Float, default=0.0)            # 0-100
     translate_error    = Column(Text, nullable=True)
     # ── TTS settings (per-project) ───────────────────────────────────────────
@@ -109,6 +109,17 @@ class Subtitle(Base):
     text_v1              = Column(Text, nullable=True)
     text_v2              = Column(Text, nullable=True)
     variant_selected     = Column(Integer, default=1)
+    # ── v3: noise filter ─────────────────────────────────────────────────────
+    # True nếu dòng là marker phụ đề ([音乐], (笑), *sigh*...) hoặc filler rỗng nghĩa
+    # FE có thể ẩn các dòng này khi export SRT / TTS
+    is_noise             = Column(Boolean, default=False)
+    # ── v3.2: Stage 0 normalize (Bước 0 — Chuẩn hóa phụ đề) ─────────────────
+    # is_cleaned: True nếu AI đã sửa text gốc ở Stage 0
+    # original_raw: text gốc trước khi Stage 0 sửa (giữ để recover)
+    # clean_reason: lý do AI sửa/xóa (vd "watermark 腾讯视频", "tab thừa")
+    is_cleaned           = Column(Boolean, default=False)
+    original_raw         = Column(Text, nullable=True)
+    clean_reason         = Column(Text, nullable=True)
     # ── v3: Reference chunk (để FE group) ────────────────────────────────────
     chunk_id             = Column(Integer, ForeignKey("chunks.id"), nullable=True, index=True)
     # ── v3: TTS per-line override ────────────────────────────────────────────

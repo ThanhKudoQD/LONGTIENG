@@ -1,11 +1,16 @@
 """
-Stage 4 — Translate (v3).
+Stage 4 — Translate (v3 refactored, Option A).
 
-Trái tim pipeline. Dịch theo chunk với:
-- 2 bản dịch (text_v1 sát nghĩa, text_v2 thoát ý)
-- Sliding window overlap (30-50 dòng trước/sau)
-- Checkpoint per chunk (callback save DB)
-- Heavy model (Pro hoặc DeepSeek)
+Thay đổi so với cũ:
+- BỎ duration_sec khỏi prompt → không bóp câu vì CPS
+- BỎ rule "match duration"
+- BỎ pre-filter regex noise → AI TỰ QUYẾT noise (theo 8 nguyên tắc trong prompt)
+- THÊM arc.summary vào context
+- v1 = 8 nguyên tắc (đọc cụm sub, ưu tiên nghĩa, xưng hô, thành ngữ, văn phong, mượt, đa nghĩa, bỏ qua marker)
+- v2 = AI tự do
+
+AI bỏ qua dòng noise bằng cách trả text_v1 = "" (rỗng).
+Backend nhận text_v1 = "" → tự set is_noise=True.
 """
 from __future__ import annotations
 import asyncio
@@ -37,7 +42,6 @@ def format_characters_in_chunk(chunk: Chunk, bible: Bible) -> str:
     chars_in_chunk = set()
     for sc in chunk.scenes:
         chars_in_chunk.update(sc.ch)
-    # Nếu chunk không có scenes → fallback tất cả cast top
     if not chars_in_chunk:
         for c in bible.cast.characters[:15]:
             chars_in_chunk.add(c.zh)
@@ -123,9 +127,11 @@ def format_dialogue_input(
     chunk: Chunk,
     entries_by_idx: dict[int, SrtEntry],
     speaker_map: dict[int, dict],
-    bible: Bible,
 ) -> str:
-    """Format thoại CẦN DỊCH với speaker + duration."""
+    """Format thoại CẦN DỊCH với speaker (KHÔNG duration).
+
+    Gửi tất cả dòng trong chunk — AI sẽ tự đánh dấu noise bằng text_v1="".
+    """
     lines = []
     for i in range(chunk.r[0], chunk.r[1] + 1):
         e = entries_by_idx.get(i)
@@ -133,9 +139,8 @@ def format_dialogue_input(
             continue
         speaker_info = speaker_map.get(i, {})
         speaker_zh = speaker_info.get("speaker_zh") or "?"
-        duration = e.end_sec - e.start_sec
-        lines.append(f"{e.index} | {speaker_zh} | {e.text} | {duration:.1f}s")
-    return "\n".join(lines)
+        lines.append(f"{e.index} | {speaker_zh} | {e.text}")
+    return "\n".join(lines) if lines else "(Không có dòng nào trong chunk)"
 
 
 def format_context_window(
@@ -143,9 +148,8 @@ def format_context_window(
     speaker_map: dict[int, dict],
     start_line: int,
     end_line: int,
-    label: str = "context",
 ) -> str:
-    """Format context trước/sau (sliding window). Chỉ text TQ + speaker, không dịch."""
+    """Format context trước/sau (sliding window). Chỉ text TQ + speaker."""
     if start_line > end_line:
         return "(Không có)"
 
@@ -176,14 +180,17 @@ async def process_one_chunk(
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
 ) -> dict[int, dict]:
-    """Dịch 1 chunk, return map line_idx → translation info."""
+    """Dịch 1 chunk, return map line_idx → translation info.
+
+    AI tự quyết noise bằng text_v1="".
+    """
     async with semaphore:
         # Build context blocks
         characters_in_chunk = format_characters_in_chunk(chunk, bible)
         relationships = format_relationships(chunk, bible)
         glossary_chunk = format_glossary_chunk(chunk, entries_by_idx, bible)
         scenes_in_chunk = format_scenes_in_chunk(chunk)
-        dialogue_input = format_dialogue_input(chunk, entries_by_idx, speaker_map, bible)
+        dialogue_input = format_dialogue_input(chunk, entries_by_idx, speaker_map)
 
         # Sliding window context
         overlap = config.chunk.overlap_lines
@@ -191,46 +198,42 @@ async def process_one_chunk(
             entries_by_idx, speaker_map,
             max(1, chunk.r[0] - overlap),
             chunk.r[0] - 1,
-            "before",
         )
         context_after = format_context_window(
             entries_by_idx, speaker_map,
             chunk.r[1] + 1,
             min(len(entries), chunk.r[1] + overlap),
-            "after",
         )
 
-        # Get arc info
+        # Arc info — bao gồm SUMMARY
         arc = bible.world.arcs[chunk.arc_index] if chunk.arc_index < len(bible.world.arcs) else None
         arc_title = arc.t if arc else ""
         arc_tone = arc.tone if arc else "neutral"
+        arc_summary = (arc.summary if arc and arc.summary else "(không có tóm tắt)")
 
         # Build prompt
         prompt = (prompt_template
                   .replace("{CHUNK_TITLE}", chunk.t)
                   .replace("{ARC_TITLE}", arc_title)
                   .replace("{ARC_TONE}", arc_tone)
+                  .replace("{ARC_SUMMARY}", arc_summary)
                   .replace("{CHARACTERS_IN_CHUNK}", characters_in_chunk)
                   .replace("{RELATIONSHIPS}", relationships)
                   .replace("{GLOSSARY_CHUNK}", glossary_chunk)
                   .replace("{SCENES_IN_CHUNK}", scenes_in_chunk)
                   .replace("{CONTEXT_BEFORE}", context_before)
                   .replace("{CONTEXT_AFTER}", context_after)
-                  .replace("{DIALOGUE_INPUT}", dialogue_input)
-                  .replace("{MIN_CHARS}", str(config.variant.min_chars))
-                  .replace("{INTENSITY_MIN}", str(config.variant.important_intensity_min)))
+                  .replace("{DIALOGUE_INPUT}", dialogue_input))
 
-        # Cached prefix: phần Bible + rules đầu prompt
+        # Cached prefix: phần trước "PHẦN BIẾN — CONTEXT CHUNK"
         cached_prefix = None
         if config.cache.enabled:
-            # Lấy phần header (từ đầu đến trước "PHẦN BIẾN")
             split_marker = "PHẦN BIẾN — CONTEXT CHUNK"
             if split_marker in prompt:
                 idx = prompt.index(split_marker)
                 cached_prefix = prompt[:idx]
                 prompt_variable = prompt[idx:]
-                # Chỉ cache nếu đủ dài
-                if len(cached_prefix) >= config.cache.min_tokens_to_cache * 3:  # ~3 chars/tok
+                if len(cached_prefix) >= config.cache.min_tokens_to_cache * 3:
                     prompt = prompt_variable
                 else:
                     cached_prefix = None
@@ -256,21 +259,49 @@ async def process_one_chunk(
             return {}
 
         result = {}
+        noise_count = 0
         for t in data.get("translations", []) or []:
             try:
                 line_idx = int(t.get("line_index", -1))
                 if line_idx < 1:
                     continue
-                result[line_idx] = {
-                    "speaker_vi": (t.get("speaker_vi") or "").strip(),
-                    "text_v1": (t.get("text_v1") or "").strip() or None,
-                    "text_v2": (t.get("text_v2") or "").strip() or None,
-                    "emotion": normalize_emotion(t.get("emotion")),
-                    "intensity": _clamp_intensity(t.get("intensity")),
-                }
+                if not (chunk.r[0] <= line_idx <= chunk.r[1]):
+                    continue
+
+                text_v1_raw = t.get("text_v1")
+                text_v1 = (text_v1_raw or "").strip()
+                text_v2_raw = t.get("text_v2")
+                text_v2 = (text_v2_raw or "").strip() or None
+
+                # AI đánh dấu noise bằng cách trả text_v1 = "" (rỗng)
+                is_noise = (text_v1 == "")
+
+                if is_noise:
+                    noise_count += 1
+                    result[line_idx] = {
+                        "speaker_vi": "",
+                        "text_v1": "",
+                        "text_v2": None,
+                        "emotion": "neutral",
+                        "intensity": 1,
+                        "is_noise": True,
+                    }
+                else:
+                    result[line_idx] = {
+                        "speaker_vi": (t.get("speaker_vi") or "").strip(),
+                        "text_v1": text_v1,
+                        "text_v2": text_v2,
+                        "emotion": normalize_emotion(t.get("emotion")),
+                        "intensity": _clamp_intensity(t.get("intensity")),
+                        "is_noise": False,
+                    }
             except Exception as e:
                 logger.debug(f"[Stage 4] Skip invalid translation: {e}")
                 continue
+
+        if noise_count:
+            logger.info(f"[Stage 4] Chunk {chunk.r[0]}-{chunk.r[1]}: "
+                        f"{noise_count} lines marked as noise by AI")
 
         return result
 
@@ -297,7 +328,13 @@ def should_keep_variant(
     is_peak: bool,
     config: PipelineConfig,
 ) -> bool:
-    """Quyết định có giữ text_v2 không (theo config variant.mode)."""
+    """Quyết định có giữ text_v2 không (theo config variant.mode).
+
+    AI đã tự quyết v2=null khi thấy trùng v1. Hàm này enforce thêm theo mode user:
+    - off: bỏ tất cả v2
+    - always: giữ tất cả v2 AI trả
+    - important_only: chỉ giữ ở scene quan trọng / emotion mạnh
+    """
     if not text_v2 or text_v2 == text_v1:
         return False
 
@@ -311,15 +348,10 @@ def should_keep_variant(
     if not text_v1 or len(text_v1) < config.variant.min_chars:
         return False
 
-    # Important by emotion
     if emotion in config.variant.important_emotions:
         return True
-
-    # Important by intensity
     if intensity >= config.variant.important_intensity_min:
         return True
-
-    # Important by scene tag
     if is_hook or is_peak:
         return True
 
@@ -339,9 +371,9 @@ async def run_stage4_translate(
     tracker: CostTracker,
     on_chunk_done: Optional[Callable] = None,
 ) -> dict[int, dict]:
-    """Stage 4 — dịch toàn phim theo chunks. Per-chunk checkpoint."""
+    """Stage 4 — dịch toàn phim. AI tự quyết noise."""
     logger.info("=" * 60)
-    logger.info("STAGE 4 — TRANSLATE")
+    logger.info("STAGE 4 — TRANSLATE (no CPS, AI-driven noise filter, v2 free, +arc summary)")
     logger.info("=" * 60)
 
     if not chunk_map.chunks:
@@ -378,7 +410,6 @@ async def run_stage4_translate(
             if completed % 3 == 0 or completed == total:
                 logger.info(f"[Stage 4] {completed}/{total} chunks translated")
 
-            # Checkpoint callback
             if on_chunk_done:
                 try:
                     res = on_chunk_done(chunk_result)
@@ -387,14 +418,16 @@ async def run_stage4_translate(
                 except Exception as e:
                     logger.warning(f"[Stage 4] checkpoint failed: {e}")
 
-    # Coverage stats
+    # Stats
     covered = len(all_results)
     variant_count = sum(1 for r in all_results.values() if r.get("text_v2"))
+    noise_count = sum(1 for r in all_results.values() if r.get("is_noise"))
     expected = len(entries)
     missing = expected - covered
 
-    logger.info(f"[Stage 4] DONE. {covered}/{expected} lines translated, "
-                f"{variant_count} variants")
+    logger.info(f"[Stage 4] DONE. {covered}/{expected} lines, "
+                f"{variant_count} variants v2, {noise_count} noise (AI-marked), "
+                f"cost so far: ${tracker.total_cost_usd:.4f}")
     if missing > 0:
         logger.warning(f"[Stage 4] {missing} lines NOT translated (will retry in Stage 5)")
 

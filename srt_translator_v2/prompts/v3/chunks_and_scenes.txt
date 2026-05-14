@@ -10,6 +10,7 @@ CẤP 1 — CHUNKS (như "chương" trong tiểu thuyết):
 - Mỗi chunk ~{CHUNK_TARGET} dòng (target)
 - Chunk là 1 mạch kịch có ý nghĩa, có tên gợi tả (vd: "Lần đầu gặp gỡ", "Đêm tân hôn")
 - Mỗi arc có 3-{MAX_CHUNKS} chunks
+- Dùng ARC_SUMMARY làm chỉ dẫn để chia chunks theo mạch truyện đúng
 
 CẤP 2 — SCENES (cảnh con trong chunk):
 - Chunk ≤ 100 dòng → KHÔNG chia scenes, scenes = [] (chunk = scene duy nhất)
@@ -41,7 +42,7 @@ TAG SCENE (optional):
 - Bỏ trường tag nếu không có
 
 EMOTION (chọn 1 cho mỗi scene):
-neutral / happy / sad / angry / cold / tense / intimate / 
+neutral / happy / sad / angry / cold / tense / intimate /
 fearful / sarcastic / shocked / determined / regretful / humorous / threatening
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -83,7 +84,7 @@ CHECKLIST
 □ chunks liền nhau, không hở
 □ chunks[0].r[0] = ARC_START
 □ chunks[-1].r[1] = ARC_END
-□ Mỗi chunk có title gợi tả nội dung
+□ Mỗi chunk có title gợi tả nội dung khớp với mạch ARC_SUMMARY
 □ Chunk ≤ 100 dòng → scenes rỗng
 □ Chunk > 100 dòng → có scenes
 □ Scenes trong chunk liền nhau
@@ -93,20 +94,24 @@ CHECKLIST
 □ Output là JSON thuần
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BIBLE (tham khảo)
+BIBLE (tham khảo, dùng chung cho mọi arc)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 {BIBLE_REFERENCE}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ARC HIỆN TẠI
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━ PHẦN BIẾN — CONTEXT ARC ━━━
+
+ARC HIỆN TẠI:
 
 Arc {ARC_INDEX}: "{ARC_TITLE}"
 Tone: {ARC_TONE}
 Phạm vi dòng: {ARC_START} - {ARC_END}
 Target chunks: 3-{MAX_CHUNKS}
 Target lines/chunk: ~{CHUNK_TARGET}
+
+TÓM TẮT NỘI DUNG ARC (dùng để chia chunks theo mạch truyện đúng):
+
+{ARC_SUMMARY}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PHỤ ĐỀ ARC NÀY

@@ -8,6 +8,10 @@ import type { ProgressMessage, LLMCallMessage } from '../../api'
 
 const STAGE_LABEL: Record<string, string> = {
   'start':            'Bắt đầu',
+  'normalize':        '0. Chuẩn hóa',
+  'normalize_scan':   '0. Scan dòng khả nghi',
+  'normalize_save':   '0. Save kết quả',
+  'normalize_done':   '0. Chuẩn hóa ✓',
   'bible':            '1. Bible',
   'bible_1a':         '1A. Cast',
   'bible_save':       '1. Save Bible',
@@ -34,8 +38,9 @@ function stageColor(stage: string): string {
   if (stage === 'error') return 'bg-red-600'
   if (stage === 'cancelled') return 'bg-amber-500'
   if (stage.endsWith('_done')) return 'bg-green-500'
+  if (stage.startsWith('normalize')) return 'bg-emerald-500'
   if (stage.startsWith('bible')) return 'bg-purple-500'
-  if (stage.startsWith('scenes')) return 'bg-blue-500'
+  if (stage.startsWith('scenes') || stage.startsWith('chunks')) return 'bg-blue-500'
   if (stage.startsWith('speaker')) return 'bg-cyan-500'
   if (stage.startsWith('translate')) return 'bg-indigo-500'
   if (stage.startsWith('polish')) return 'bg-pink-500'

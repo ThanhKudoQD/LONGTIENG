@@ -47,6 +47,9 @@ from dubeditor.schemas import (
     SelectVariantRequest,
     BibleOut, SceneOut, StoryArcOut, PolishIssueOut, ChunkOut,
     TranslateStatusOut,
+    CleanedSubtitleOut,
+    ScanResultOut, SuspiciousLineOut,
+    Stage0RunResultOut,
 )
 from dubeditor.translate_service import (
     TranslateRunner, build_pipeline_config,
@@ -196,6 +199,10 @@ def get_status(pid: int, db: Session = Depends(get_db)):
     review = sum(1 for s in subs if s.needs_review)
     speaker_assigned = sum(1 for s in subs if s.speaker_zh)
 
+    # v3.2: Stage 0 stats
+    cleaned_count = sum(1 for s in subs if getattr(s, "is_cleaned", False))
+    removed_count = sum(1 for s in subs if getattr(s, "is_noise", False))
+
     cps_vals = [s.cps_value for s in subs if s.cps_value]
     avg_cps = sum(cps_vals) / len(cps_vals) if cps_vals else 0.0
 
@@ -229,7 +236,166 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         error_message=p.translate_error,
+        cleaned_count=cleaned_count,
+        removed_count=removed_count,
     )
+
+
+# ─── Stage 0 — Cleaned subtitles ─────────────────────────────────────────────
+
+@router.get("/projects/{pid}/translate/normalize/cleaned",
+            response_model=list[CleanedSubtitleOut])
+def get_cleaned_subtitles(pid: int, db: Session = Depends(get_db)):
+    """Danh sách subtitles đã được Stage 0 xử lý (clean / remove)."""
+    _get_project(db, pid)
+    subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.is_cleaned == True,
+    ).order_by(Subtitle.index).all()
+
+    result = []
+    for s in subs:
+        action = "remove" if (s.is_noise or False) else "clean"
+        result.append(CleanedSubtitleOut(
+            id=s.id,
+            index=s.index,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            original_raw=s.original_raw,
+            current_text=s.original_text or "",
+            is_noise=s.is_noise or False,
+            clean_reason=s.clean_reason,
+            action=action,
+        ))
+    return result
+
+
+@router.get("/projects/{pid}/translate/normalize/scan",
+            response_model=ScanResultOut)
+def scan_suspicious_lines(pid: int, db: Session = Depends(get_db)):
+    """Quét heuristic tìm dòng nghi ngờ — KHÔNG gọi AI, KHÔNG ghi DB.
+
+    Trả về danh sách dòng nghi ngờ + lý do flag để user xem trước khi gửi AI.
+    """
+    _get_project(db, pid)
+
+    # Import scanner trực tiếp (không qua TranslateRunner để khỏi đụng config)
+    import sys
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    if str(repo_root / "srt_translator_v2") not in sys.path:
+        sys.path.insert(0, str(repo_root / "srt_translator_v2"))
+    from core.suspicious_scanner import scan_suspicious
+    from core.srt_parser import SrtEntry
+    from stages.stage0_normalize import build_data_lines
+
+    subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid
+    ).order_by(Subtitle.index).all()
+    if not subs:
+        return ScanResultOut(
+            total_lines=0,
+            suspicious_count=0,
+            cluster_count=0,
+            suspicious_lines=[],
+        )
+
+    # Build entries từ DB
+    entries = [
+        SrtEntry(
+            index=s.index,
+            start_sec=s.start_time,
+            end_sec=s.end_time,
+            text=s.original_text or "",
+        )
+        for s in subs
+    ]
+
+    # Scan
+    flags = scan_suspicious(entries)
+
+    # Estimate số dòng sẽ gửi AI (suspicious + ±2 context, dedup)
+    _, lines_to_send = build_data_lines(entries, flags, context_window=2)
+
+    return ScanResultOut(
+        total_lines=len(entries),
+        suspicious_count=len(flags),
+        cluster_count=lines_to_send,  # nay là số dòng sẽ gửi AI (sau dedup)
+        suspicious_lines=[
+            SuspiciousLineOut(
+                index=f.line_index,
+                text=f.text,
+                reasons=f.reasons,
+            )
+            for f in flags
+        ],
+    )
+
+
+@router.post("/projects/{pid}/translate/normalize/run",
+             response_model=Stage0RunResultOut)
+async def run_normalize_sync(pid: int, req: TranslateStartRequest,
+                              db: Session = Depends(get_db)):
+    """Chạy Stage 0 SYNC — đợi xong rồi trả kết quả.
+
+    Khác với /run-stage (chạy background), endpoint này:
+    - Chạy ngay trong request
+    - Trả về kết quả Stage 0 (counts, cost)
+    - FE chỉ cần await 1 lần, không phải poll
+    """
+    _get_project(db, pid)
+
+    # Build config, ép stage0_enabled=True
+    config = build_pipeline_config(req)
+    config.stage0.enabled = True
+
+    runner = TranslateRunner(db, pid, config)
+    runner._install_llm_observer()
+    try:
+        report = await runner.run_normalize()
+    except Exception as e:
+        logger.error(f"[Stage 0 sync] failed: {e}", exc_info=True)
+        runner._save_status("idle", 0.0, error=str(e))
+        raise HTTPException(500, f"Lỗi Stage 0: {str(e)[:200]}")
+    finally:
+        runner._uninstall_llm_observer()
+
+    # Status về idle sau khi xong (KHÔNG phải done — chỉ stage riêng)
+    runner._save_status("idle", 0.0)
+
+    return Stage0RunResultOut(
+        total_lines=report.total_lines,
+        suspicious_count=report.suspicious_count,
+        cluster_count=report.context_lines_sent,  # số dòng đã gửi AI
+        removed_count=report.removed,
+        cleaned_count=report.cleaned,
+        kept_count=report.kept,
+        cost_usd=round(runner.tracker.total_cost_usd, 4),
+        tokens_in=runner.tracker.total_tokens_in,
+        tokens_out=runner.tracker.total_tokens_out,
+    )
+
+
+@router.post("/projects/{pid}/translate/normalize/revert/{subtitle_id}")
+def revert_cleaned_subtitle(pid: int, subtitle_id: int, db: Session = Depends(get_db)):
+    """Hoàn tác 1 dòng đã bị Stage 0 sửa — khôi phục original_raw."""
+    _get_project(db, pid)
+    sub = db.query(Subtitle).filter(
+        Subtitle.id == subtitle_id,
+        Subtitle.project_id == pid,
+    ).first()
+    if not sub:
+        raise HTTPException(404, "Subtitle not found")
+    if not sub.is_cleaned or not sub.original_raw:
+        raise HTTPException(400, "Subtitle chưa được Stage 0 xử lý")
+
+    sub.original_text = sub.original_raw
+    sub.is_noise = False
+    sub.is_cleaned = False
+    sub.clean_reason = None
+    sub.original_raw = None
+    db.commit()
+    return {"ok": True, "subtitle_id": subtitle_id}
 
 
 # ─── Pipeline control ─────────────────────────────────────────────────────────
@@ -250,8 +416,9 @@ async def _run_pipeline_background(pid: int, runner: TranslateRunner,
             stage_alias = {"scenes": "chunks"}.get(only_stage, only_stage)
             await runner.run_stage(stage_alias)
 
-            # Update final status + emit "done" event để FE biết stage đã xong
-            runner._save_status("done", 100.0)
+            # Sau khi 1 stage xong → status = "idle" (KHÔNG phải "done" cho cả pipeline)
+            # "done" chỉ áp dụng khi run_full() chạy đủ Stage 0-4.
+            runner._save_status("idle", 0.0)
             await _publish_progress(
                 pid, "done", 100.0,
                 f"✅ Stage '{only_stage}' hoàn tất",
@@ -320,7 +487,6 @@ async def start_translate(pid: int, req: TranslateStartRequest,
     # Persist project config
     p.project_type = req.project_type
     p.source_lang = req.source_lang
-    p.genre_pack = req.genre_pack
     db.commit()
 
     # Build config

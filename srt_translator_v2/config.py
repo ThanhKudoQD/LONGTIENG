@@ -80,6 +80,24 @@ class ChunkConfig:
     max_lines: int = 500                      # Chunk vượt này → AI buộc chia nhỏ
     overlap_lines: int = 30                   # Sliding window overlap cho Bước 4
     max_chunks_per_arc: int = 8               # Max chunks/arc
+    parallel: bool = False                    # True = chạy song song (nhanh, tốn token)
+                                              # False = tuần tự (chậm hơn ~30%, cache hit Bible giảm 50-90% input cost)
+
+
+@dataclass
+class SpeakerConfig:
+    """Cấu hình Bước 3 gán speaker."""
+    context_window: int = 20                  # Số dòng context trước/sau chunk (read-only)
+    parallel: bool = True                     # True = song song (nhanh, mỗi chunk cache độc lập)
+                                              # False = tuần tự (chậm, cache Bible+rules giữa chunks)
+
+
+@dataclass
+class Stage0Config:
+    """Cấu hình Bước 0 chuẩn hóa phụ đề."""
+    enabled: bool = True                      # Bật/tắt Stage 0
+    model: Optional[str] = None               # None = dùng models.light
+    context_window: int = 2                   # ±N dòng context quanh mỗi dòng nghi ngờ
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -192,6 +210,8 @@ class PipelineConfig:
     models: ModelConfig = field(default_factory=ModelConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     chunk: ChunkConfig = field(default_factory=ChunkConfig)
+    speaker: SpeakerConfig = field(default_factory=SpeakerConfig)
+    stage0: Stage0Config = field(default_factory=Stage0Config)
     compact: CompactModeConfig = field(default_factory=CompactModeConfig)
     variant: VariantConfig = field(default_factory=VariantConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
