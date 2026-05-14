@@ -106,20 +106,17 @@ Thoại trong phân cảnh (mỗi dòng: line_index | text_zh):
     {
       "line_index": 47,
       "speaker_zh": "顾沉舟",
-      "confidence": "high",
-      "reason": "Tự xưng 'tôi' + tone lạnh khớp speaking_style. Dòng trước (46) là Cố Tân hỏi → dòng này phải là người khác."
+      "confidence": "high"
     },
     {
       "line_index": 48,
       "speaker_zh": "顾辰",
-      "confidence": "high",
-      "reason": "Câu nói gọi 'anh' → đang nói với anh trai (Cố Trầm Châu). Mạch hỏi-đáp với dòng 47."
+      "confidence": "high"
     },
     {
       "line_index": 49,
       "speaker_zh": "?",
-      "confidence": "low",
-      "reason": "Câu 'Hừm.' quá ngắn, không có bằng chứng rõ. Có thể là Cố Trầm Châu (im lặng) hoặc Cố Tân."
+      "confidence": "low"
     }
   ]
 }
@@ -128,5 +125,5 @@ Thoại trong phân cảnh (mỗi dòng: line_index | text_zh):
 
 · LIỆT KÊ TẤT CẢ dòng trong phân cảnh, không bỏ sót
 · speaker_zh phải khớp với tên trong Cast hoặc placeholder (bac_si, phu_1, ?)
-· reason ngắn gọn (1-2 câu)
+· KHÔNG cần giải thích — chỉ trả JSON tối giản như format trên
 · Output bắt đầu `{` kết thúc `}`, KHÔNG markdown

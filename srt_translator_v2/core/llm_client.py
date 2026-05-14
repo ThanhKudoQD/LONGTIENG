@@ -133,6 +133,12 @@ async def call_gemini(req: LLMRequest, client: httpx.AsyncClient) -> LLMResponse
         "generationConfig": {
             "temperature": req.temperature,
             "maxOutputTokens": cap_max_output(req.max_output, req.model),
+            # v3: Tắt thinking cho Gemini 2.5 — tránh tốn output budget cho reasoning
+            # mà JSON-task không cần. Giúp output không bị truncate.
+            # Note: chỉ áp dụng cho 2.5+ family (Flash/Pro), older models ignore.
+            "thinkingConfig": {
+                "thinkingBudget": 0,
+            },
         },
     }
 
