@@ -40,7 +40,7 @@ QUY TẮC HÁN VIỆT:
 PHẦN B — TERMS (Glossary, 6 categories)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Mỗi term: zh, vi, cat, n (số lần xuất hiện), note (optional).
+Mỗi term: zh, vi, cat, note (optional).
 
 cat = "tu_xung" — TỰ XƯNG:
   朕→"trẫm", 本宫→"bản cung", 本王→"bản vương", 哀家→"ai gia",
@@ -93,11 +93,11 @@ Trả về JSON THUẦN:
     }
   ],
   "terms": [
-    {"zh": "朕", "vi": "trẫm", "cat": "tu_xung", "n": 35, "note": "Vua tự xưng"},
-    {"zh": "皇上", "vi": "hoàng thượng", "cat": "chuc_vu", "n": 47},
-    {"zh": "凤栖宫", "vi": "cung Phượng Hoa", "cat": "dia_danh", "n": 12},
-    {"zh": "宠幸", "vi": "sủng hạnh", "cat": "khai_niem", "n": 6, "note": "Vua sủng ái phi tần"},
-    {"zh": "拖出去", "vi": "Lôi ra ngoài", "cat": "cliche", "n": 8}
+    {"zh": "朕", "vi": "trẫm", "cat": "tu_xung", "note": "Vua tự xưng"},
+    {"zh": "皇上", "vi": "hoàng thượng", "cat": "chuc_vu"},
+    {"zh": "凤栖宫", "vi": "cung Phượng Hoa", "cat": "dia_danh"},
+    {"zh": "宠幸", "vi": "sủng hạnh", "cat": "khai_niem", "note": "Vua sủng ái phi tần"},
+    {"zh": "拖出去", "vi": "Lôi ra ngoài", "cat": "cliche"}
   ]
 }
 

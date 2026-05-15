@@ -83,7 +83,6 @@ class GlossaryTerm(BaseModel):
     zh: str = ""                              # Term tiếng Trung
     vi: str = ""                              # Dịch tiếng Việt chuẩn
     cat: str = "khac"                         # Category: chuc_vu/dia_danh/khai_niem/cliche/tu_xung/khac
-    n: int = 0                                # Số lần xuất hiện
     note: Optional[str] = None                # Ghi chú khi dùng (optional)
 
 

@@ -129,19 +129,37 @@ async def stage1a_cast_and_glossary(
         except Exception as e:
             logger.warning(f"[Stage 1A] Skip invalid character: {e}")
 
-    # Parse Glossary
-    terms = []
+    # Parse Glossary (KHÔNG còn field n — bỏ vì AI bịa số)
+    raw_terms = []
     for t_data in data.get("terms", []) or []:
         try:
-            terms.append(GlossaryTerm(
+            raw_terms.append(GlossaryTerm(
                 zh=t_data.get("zh", "") or "",
                 vi=t_data.get("vi", "") or "",
                 cat=(t_data.get("cat") or t_data.get("category") or "khac") or "khac",
-                n=int(t_data.get("n", 0)),
                 note=t_data.get("note"),
             ))
         except Exception as e:
             logger.warning(f"[Stage 1A] Skip invalid term: {e}")
+
+    # ━━━ FILTER: bỏ term xuất hiện < 2 lần (trừ cliche) ━━━
+    # AI hay phá rule "term phải lặp ≥ 2 lần" — code đếm thật để loại term thừa.
+    # Cliche giữ lại dù xuất hiện 1 lần vì là cụm điển hình quan trọng.
+    srt_text = format_srt_for_prompt(entries, with_timing=False)
+    terms = []
+    dropped = 0
+    for term in raw_terms:
+        if not term.zh:
+            continue
+        actual_count = srt_text.count(term.zh)
+        if actual_count >= 2 or term.cat == "cliche":
+            terms.append(term)
+        else:
+            dropped += 1
+            logger.debug(f"[Stage 1A] Drop term '{term.zh}' (count={actual_count}, cat={term.cat})")
+
+    if dropped:
+        logger.info(f"[Stage 1A] Dropped {dropped} terms appearing <2 times (kept {len(terms)})")
 
     logger.info(f"[Stage 1A] Got {len(characters)} characters, {len(terms)} terms")
     return Cast(characters=characters), Glossary(terms=terms)
