@@ -47,6 +47,7 @@ from stages.stage5_polish import run_stage5_polish
 from dubeditor.models import (
     Project, Subtitle, Character, Bible as DBBible,
     StoryArc, Scene as DBScene, Chunk as DBChunk, PolishIssue,
+    Chapter,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,55 @@ def _sync_story_arcs(db: Session, project_id: int, v3_bible: V3Bible):
             emotional_tone=arc.tone,
         )
         db.add(db_arc)
+
+
+def sync_arcs_to_chapters(db: Session, project_id: int) -> int:
+    """Sync StoryArc → Chapter (Editor).
+
+    Chỉ xóa Chapter có source='auto_from_arc' (giữ Chapter user tạo tay).
+    Tạo Chapter mới từ StoryArc với source='auto_from_arc'.
+
+    Returns: số Chapter đã tạo.
+    """
+    # Xóa Chapter auto cũ
+    db.query(Chapter).filter(
+        Chapter.project_id == project_id,
+        Chapter.source == "auto_from_arc",
+    ).delete()
+
+    # Lấy arcs từ DB
+    arcs = db.query(StoryArc).filter(
+        StoryArc.project_id == project_id
+    ).order_by(StoryArc.arc_index).all()
+
+    if not arcs:
+        logger.info(f"[sync_arcs_to_chapters] No arcs for project {project_id}")
+        return 0
+
+    # Lấy sort_order max hiện tại (Chapter user) để Chapter auto xếp sau
+    max_order = db.query(Chapter).filter(
+        Chapter.project_id == project_id
+    ).count()
+
+    created = 0
+    for i, arc in enumerate(arcs):
+        chapter = Chapter(
+            project_id=project_id,
+            name=f"Arc {arc.arc_index + 1}: {arc.title}" if arc.title else f"Arc {arc.arc_index + 1}",
+            start_sub_index=arc.start_line,
+            end_sub_index=arc.end_line,
+            status="pending",
+            collapsed=0,
+            sort_order=max_order + i,
+            source="auto_from_arc",
+            arc_index=arc.arc_index,
+        )
+        db.add(chapter)
+        created += 1
+
+    db.commit()
+    logger.info(f"[sync_arcs_to_chapters] Created {created} chapters from arcs")
+    return created
 
 
 def load_active_bible_from_db(db: Session, project_id: int) -> Optional[V3Bible]:
@@ -827,6 +877,13 @@ class TranslateRunner:
         await self._emit("bible_save", 18, "Lưu Bible...")
         save_bible_to_db(self.db, self.project_id, bible, self.tracker)
         self._bible = bible
+
+        # ━━━ AUTO SYNC: StoryArc → Chapter (Editor) ━━━
+        try:
+            created = sync_arcs_to_chapters(self.db, self.project_id)
+            logger.info(f"[Pipeline] Auto-synced {created} chapters from arcs")
+        except Exception as e:
+            logger.warning(f"[Pipeline] sync_arcs_to_chapters failed: {e}")
 
         await self._emit("bible_done", 20,
                          f"Bible OK: {len(bible.cast.characters)} nhân vật, "

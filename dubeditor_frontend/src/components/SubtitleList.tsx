@@ -13,9 +13,10 @@ interface Props {
   filterNoChar: boolean
   filterNoTTS: boolean
   overlapSubIds?: Set<number>
-  filterCharId?: number | null
+  filterCharIds?: number[]   // Lọc theo nhiều NV (rỗng = tất cả)
   chapters?: Chapter[]
   onToggleChapter?: (chapterId: number) => void
+  filterChapterIds?: number[]
 }
 
 const fmt = (s: number) => {
@@ -372,7 +373,7 @@ const Row = React.memo(function Row({
 })
 
 // ─── Main ──────────────────────────────────────────────────────────────────
-export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overlapSubIds, filterCharId, chapters = [], onToggleChapter }: Props) {
+export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overlapSubIds, filterCharIds, chapters = [], onToggleChapter, filterChapterIds }: Props) {
   // PERF: selectors riêng cho từng field — KHÔNG destructure useStore()
   const subtitles  = useStore(s => s.subtitles)
   const characters = useStore(s => s.characters)
@@ -447,16 +448,32 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   // PERF: memo filter — không chạy lại mỗi render
   const visible = useMemo(() => {
     const f = filter.toLowerCase()
+    // Pre-build chapter ranges nếu có filter chapter
+    const chapterRanges: [number, number][] = (filterChapterIds && filterChapterIds.length > 0)
+      ? chapters
+          .filter(c => filterChapterIds.includes(c.id))
+          .map(c => [c.start_sub_index, c.end_sub_index])
+      : []
+    const hasChapterFilter = chapterRanges.length > 0
+    const hasCharFilter = filterCharIds && filterCharIds.length > 0
     return subtitles.filter(s => {
       if (f && !s.text.toLowerCase().includes(f) &&
           !(s.character?.name.toLowerCase().includes(f))) return false
       if (filterNoChar && s.character_id) return false
       if (filterNoTTS && s.tts_done) return false
       if (overlapSubIds && overlapSubIds.size > 0 && !overlapSubIds.has(s.id)) return false
-      if (filterCharId != null && s.character_id !== filterCharId) return false
+      // Filter NV: nếu có lọc, chỉ giữ sub có character_id trong mảng
+      if (hasCharFilter) {
+        if (!s.character_id || !filterCharIds!.includes(s.character_id)) return false
+      }
+      // Filter chapter: chỉ giữ sub trong range của chapter đã chọn
+      if (hasChapterFilter) {
+        const inRange = chapterRanges.some(([lo, hi]) => s.index >= lo && s.index <= hi)
+        if (!inRange) return false
+      }
       return true
     })
-  }, [subtitles, filter, filterNoChar, filterNoTTS, overlapSubIds, filterCharId])
+  }, [subtitles, filter, filterNoChar, filterNoTTS, overlapSubIds, filterCharIds, filterChapterIds, chapters])
 
   const visibleIds = useMemo(() => visible.map(s => s.id), [visible])
 
@@ -472,8 +489,14 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
       return visible.map(s => ({ type: 'sub' as const, sub: s }))
     }
 
+    // Khi có filter chapter: chỉ hiển thị các chapter được chọn
+    const hasChapterFilter = filterChapterIds && filterChapterIds.length > 0
+    const activeChapters = hasChapterFilter
+      ? chapters.filter(c => filterChapterIds!.includes(c.id))
+      : chapters
+
     // Sort chapters theo sort_order
-    const sortedChapters = [...chapters].sort((a, b) => a.sort_order - b.sort_order)
+    const sortedChapters = [...activeChapters].sort((a, b) => a.sort_order - b.sort_order)
 
     // Group visible subs theo chapter (theo `index` của sub)
     const result: Item[] = []
@@ -482,8 +505,9 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
       subs: visible.filter(s => s.index >= c.start_sub_index && s.index <= c.end_sub_index),
     }))
     // Subs ngoài tất cả chapter (nếu có) — đẩy vào mục "Chưa phân loại" cuối
+    // Khi có filter chapter: KHÔNG hiển thị orphan (vì user chỉ muốn xem chapter đã chọn)
     const allChapterRanges = sortedChapters.map(c => [c.start_sub_index, c.end_sub_index] as [number, number])
-    const orphanSubs = visible.filter(s =>
+    const orphanSubs = hasChapterFilter ? [] : visible.filter(s =>
       !allChapterRanges.some(([lo, hi]) => s.index >= lo && s.index <= hi)
     )
 
@@ -504,7 +528,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
       result.push({ type: 'sub', sub: s })
     }
     return result
-  }, [visible, chapters])
+  }, [visible, chapters, filterChapterIds])
 
   const HEADER_H = 44
   const SUB_H    = 68

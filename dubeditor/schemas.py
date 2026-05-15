@@ -209,6 +209,8 @@ class ChapterUpdate(BaseModel):
 class ChapterOut(ChapterBase):
     id:         int
     project_id: int
+    source:     Optional[str] = "user"        # "user" | "auto_from_arc"
+    arc_index:  Optional[int] = None          # Chỉ có nếu source="auto_from_arc"
     created_at: Optional[datetime] = None
     class Config:
         from_attributes = True

@@ -141,6 +141,8 @@ class Chapter(Base):
     status          = Column(String, default="pending")
     collapsed       = Column(Integer, default=0)
     sort_order      = Column(Integer, default=0)
+    source          = Column(String, default="user")   # "user" (user tạo) | "auto_from_arc" (sync từ pipeline StoryArc)
+    arc_index       = Column(Integer, nullable=True)   # Nếu source="auto_from_arc": index arc tương ứng (để re-sync)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
     project = relationship("Project", back_populates="chapters")
 

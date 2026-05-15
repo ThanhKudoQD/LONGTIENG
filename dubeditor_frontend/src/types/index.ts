@@ -39,6 +39,8 @@ export interface Chapter {
   status: 'pending' | 'in_progress' | 'done'
   collapsed: boolean
   sort_order: number
+  source?: 'user' | 'auto_from_arc'  // v3.3: nguồn — user tạo tay hoặc auto sync từ Arc
+  arc_index?: number | null          // v3.3: index arc tương ứng (nếu source='auto_from_arc')
   created_at: string
 }
 

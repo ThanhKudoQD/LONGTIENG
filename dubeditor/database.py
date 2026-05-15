@@ -126,6 +126,11 @@ def _migrate_v3():
         if has_table("scenes"):
             add_col("scenes", "chunk_id", "INTEGER")
 
+        # chapters: v3.3 — sync từ StoryArc (source + arc_index)
+        if has_table("chapters"):
+            add_col("chapters", "source", "TEXT DEFAULT 'user'")
+            add_col("chapters", "arc_index", "INTEGER")
+
         # roles
         if has_table("roles"):
             add_col("roles", "lora_path", "TEXT DEFAULT ''")

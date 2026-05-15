@@ -13,6 +13,9 @@ import AutoFixOverlapModal from './AutoFixOverlapModal'
 import BulkTTSProgress from './BulkTTSProgress'
 import ChapterSelector from './ChapterSelector'
 import ChaptersModal from './ChaptersModal'
+import ChapterFilterDropdown from './ChapterFilterDropdown'
+import CharacterFilterDropdown from './CharacterFilterDropdown'
+import SwapCharacterModal from './SwapCharacterModal'
 
 interface Props { projectId: number; onBack: () => void; onTranslate: () => void }
 
@@ -32,9 +35,9 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   const [filterNoChar, setFilterNoChar] = useState(false)
   const [filterNoTTS, setFilterNoTTS] = useState(false)
   const [filterOverlap, setFilterOverlap] = useState(false)
-  const [filterCharId, setFilterCharId]   = useState<number | null>(null)
-  const [swapFrom, setSwapFrom]           = useState<number | null>(null)
-  const [swapTo, setSwapTo]               = useState<number | null>(null)
+  const [filterCharIds, setFilterCharIds] = useState<number[]>([])   // Lọc theo nhiều NV (rỗng = tất cả)
+  const [filterChapterIds, setFilterChapterIds] = useState<number[]>([])  // Lọc theo nhiều chapter (rỗng = tất cả)
+  const [showSwapModal, setShowSwapModal] = useState(false)
   const [swapping, setSwapping]           = useState(false)
   const [showAutoFix, setShowAutoFix] = useState(false)
   const [showChapters, setShowChapters] = useState(false)
@@ -337,17 +340,17 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [subtitles, activeSubId, characters, insertSubAtPlayhead])
 
-  const swapCharacter = async () => {
-    if (!swapFrom || !swapTo || swapFrom === swapTo) return
+  const swapCharacter = async (fromId: number, toId: number) => {
+    if (!fromId || !toId || fromId === toId) return
     setSwapping(true)
     try {
-      const ids = subtitles.filter(s => s.character_id === swapFrom).map(s => s.id)
-      if (!ids.length) { alert('Không có phụ đề nào của nhân vật này'); return }
-      const charTo = characters.find(c => c.id === swapTo)
-      await api.post('/subtitles/bulk-assign', { subtitle_ids: ids, character_id: swapTo })
-      ids.forEach(id => updateSubtitle(id, { character_id: swapTo, character: charTo }))
+      const ids = subtitles.filter(s => s.character_id === fromId).map(s => s.id)
+      if (!ids.length) return
+      const charTo = characters.find(c => c.id === toId)
+      await api.post('/subtitles/bulk-assign', { subtitle_ids: ids, character_id: toId })
+      ids.forEach(id => updateSubtitle(id, { character_id: toId, character: charTo }))
       triggerAutoTTS(ids)
-      setSwapFrom(null); setSwapTo(null)
+      setShowSwapModal(false)
     } finally { setSwapping(false) }
   }
 
@@ -454,11 +457,11 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
       if (filterNoChar && s.character_id) continue
       if (filterNoTTS && s.tts_done) continue
       if (filterOverlap && !overlapSubIds.has(s.id)) continue
-      if (filterCharId !== null && s.character_id !== filterCharId) continue
+      if (filterCharIds.length > 0 && (!s.character_id || !filterCharIds.includes(s.character_id))) continue
       n++
     }
     return n
-  }, [subtitles, filter, filterNoChar, filterNoTTS, filterOverlap, overlapSubIds, filterCharId])
+  }, [subtitles, filter, filterNoChar, filterNoTTS, filterOverlap, overlapSubIds, filterCharIds])
 
   // PERF: memo done count
   const done = useMemo(() => {
@@ -614,6 +617,13 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
             <ChapterSelector projectId={projectId} onOpenManage={() => setShowChapters(true)} />
 
+            <ChapterFilterDropdown
+              projectId={projectId}
+              chapters={chapters}
+              selectedIds={filterChapterIds}
+              onChange={setFilterChapterIds}
+            />
+
             {/* Nút tạo sub tại playhead */}
             <button
               onClick={insertSubAtPlayhead}
@@ -720,7 +730,7 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
                   if (filterNoChar && s.character_id) return false
                   if (filterNoTTS && s.tts_done) return false
                   if (filterOverlap && !overlapSubIds.has(s.id)) return false
-                  if (filterCharId !== null && s.character_id !== filterCharId) return false
+                  if (filterCharIds.length > 0 && (!s.character_id || !filterCharIds.includes(s.character_id))) return false
                   return true
                 }).map(s => s.id)
                 const { selectedIds } = useStore.getState()
@@ -739,79 +749,55 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
             <span className="text-[12px] text-zinc-400 tabular-nums flex-shrink-0 min-w-[24px] text-right">{visibleCount}</span>
           </div>
 
-          {/* Character strip */}
+          {/* Character strip — Filter NV + Đổi NV (1 hàng, gọn) */}
           {characters.length > 0 && (
-            <div className="flex flex-col border-b border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/40 flex-shrink-0">
-              {/* Row 1: Gán nhanh + Filter theo nhân vật */}
-              <div className="flex items-center gap-1.5 px-3 py-1.5 overflow-x-auto">
-                <span className="text-[11px] text-zinc-400 flex-shrink-0">Gán:</span>
-                {characters.map(c => (
-                  <button key={c.id}
-                    onClick={() => {
-                      const { selectedIds, updateSubtitle: upd } = useStore.getState()
-                      if (!selectedIds.size) return
-                      const ids = Array.from(selectedIds)
-                      ids.forEach(id => { api.patch(`/subtitles/${id}`, { character_id: c.id }); upd(id, { character_id: c.id, character: c }) })
-                      triggerAutoTTS(ids)
-                    }}
-                    title={c.shortcut_key ? `Phím tắt: ${formatShortcut(c.shortcut_key)}` : 'Chưa đặt phím tắt'}
-                    className="flex-shrink-0 px-2.5 py-0.5 rounded-full text-[12px] font-medium border transition-all hover:opacity-90 active:scale-95 inline-flex items-center gap-1"
-                    style={{ background: c.color + '18', color: c.color, borderColor: c.color + '40' }}>
-                    {c.shortcut_key && (
-                      <span className="text-[10px] font-mono opacity-70">{formatShortcut(c.shortcut_key)}</span>
-                    )}
-                    {c.name}
-                  </button>
-                ))}
-                <div className="w-px h-4 bg-zinc-200 dark:bg-zinc-700 flex-shrink-0 mx-1" />
-                {/* Filter theo nhân vật */}
-                <span className="text-[11px] text-zinc-400 flex-shrink-0">Lọc:</span>
-                <button onClick={() => setFilterCharId(null)}
-                  className={`flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium border transition-all ${filterCharId === null ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200 border-zinc-300' : 'btn'}`}>
-                  Tất cả
+            <div className="flex items-center gap-2 px-3 py-1.5 border-b border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/40 flex-shrink-0">
+              <CharacterFilterDropdown
+                characters={characters}
+                subtitles={subtitles}
+                selectedIds={filterCharIds}
+                onChange={setFilterCharIds}
+              />
+
+              <button
+                onClick={() => setShowSwapModal(true)}
+                disabled={swapping}
+                title="Đổi nhân vật hàng loạt (A → B)"
+                className="px-2.5 py-1 text-[12px] rounded-lg border border-indigo-300 dark:border-indigo-700 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-950/60 font-medium flex items-center gap-1.5 disabled:opacity-40"
+              >
+                🔄 <span>Đổi NV</span>
+              </button>
+
+              {/* Hiện thông báo nhỏ khi đang lọc */}
+              {filterCharIds.length > 0 && (
+                <button
+                  onClick={() => setFilterCharIds([])}
+                  className="ml-auto text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 px-2 py-0.5 rounded hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                >
+                  Xóa lọc NV ✕
                 </button>
-                {characters.map(c => (
-                  <button key={c.id} onClick={() => setFilterCharId(filterCharId === c.id ? null : c.id)}
-                    className="flex-shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium border transition-all"
-                    style={{
-                      background: filterCharId === c.id ? c.color : c.color + '12',
-                      color: filterCharId === c.id ? '#fff' : c.color,
-                      borderColor: c.color + '60',
-                    }}>
-                    {c.name}
-                  </button>
-                ))}
-              </div>
-              {/* Row 2: Đổi nhân vật hàng loạt */}
-              <div className="flex items-center gap-1.5 px-3 py-1 overflow-x-auto">
-                <span className="text-[11px] text-zinc-400 flex-shrink-0">Đổi:</span>
-                <select value={swapFrom ?? ''} onChange={e => setSwapFrom(e.target.value ? parseInt(e.target.value) : null)}
-                  className="input text-[11px] py-0.5 px-2 h-6">
-                  <option value="">-- Từ nhân vật --</option>
-                  {characters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-                <span className="text-[11px] text-zinc-400">→</span>
-                <select value={swapTo ?? ''} onChange={e => setSwapTo(e.target.value ? parseInt(e.target.value) : null)}
-                  className="input text-[11px] py-0.5 px-2 h-6">
-                  <option value="">-- Sang nhân vật --</option>
-                  {characters.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-                <button onClick={swapCharacter} disabled={!swapFrom || !swapTo || swapFrom === swapTo || swapping}
-                  className="flex-shrink-0 px-2.5 py-0.5 rounded-lg text-[11px] font-medium bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40 transition-colors">
-                  {swapping ? '...' : 'Đổi'}
-                </button>
-              </div>
+              )}
             </div>
           )}
+
+          {/* Modal đổi NV (A → B) */}
+          <SwapCharacterModal
+            open={showSwapModal}
+            characters={characters}
+            subtitles={subtitles}
+            onCancel={() => setShowSwapModal(false)}
+            onConfirm={swapCharacter}
+          />
 
           <SubtitleList
             filter={filter}
             filterNoChar={filterNoChar}
             filterNoTTS={filterNoTTS}
             overlapSubIds={filterOverlap ? overlapSubIds : undefined}
-            filterCharId={filterCharId}
+            filterCharIds={filterCharIds}
             chapters={chapters}
             onToggleChapter={handleToggleChapter}
+            filterChapterIds={filterChapterIds}
           />
         </div>
 

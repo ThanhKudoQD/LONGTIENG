@@ -18,6 +18,30 @@ def list_chapters(project_id: int, db: Session = Depends(get_db)):
     return db.query(Chapter).filter(Chapter.project_id == project_id).order_by(Chapter.sort_order).all()
 
 
+@router.post("/project/{project_id}/sync-from-arcs")
+def sync_chapters_from_arcs(project_id: int, db: Session = Depends(get_db)):
+    """Đồng bộ StoryArc → Chapter.
+
+    Xóa các Chapter có source='auto_from_arc' và tạo lại từ arcs hiện tại.
+    Giữ nguyên Chapter có source='user' (user tạo tay).
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(404, "Project không tồn tại")
+
+    from dubeditor.translate_service import sync_arcs_to_chapters
+    try:
+        created = sync_arcs_to_chapters(db, project_id)
+        return {
+            "ok": True,
+            "created": created,
+            "message": f"Đã sync {created} chapters từ arcs"
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Sync failed: {e}")
+
+
 @router.get("/project/{project_id}/stats")
 def chapters_stats(project_id: int, db: Session = Depends(get_db)):
     """
