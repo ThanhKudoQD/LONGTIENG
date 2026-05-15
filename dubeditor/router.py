@@ -2,8 +2,11 @@ from fastapi import APIRouter
 from dubeditor.routers import projects, subtitles, characters, tts, export, ws, presets
 from dubeditor.routers import auto_assign, auto_fix, chapters
 from dubeditor.routers import translate
+from dubeditor.routers import license as license_router
 
 router = APIRouter()
+# License — đặt TRƯỚC các router khác để middleware không chặn nhầm
+router.include_router(license_router.router,  prefix="/api/license",   tags=["dub-license"])
 router.include_router(projects.router,     prefix="/api/projects",   tags=["dub-projects"])
 router.include_router(subtitles.router,    prefix="/api/subtitles",  tags=["dub-subtitles"])
 router.include_router(characters.router,   prefix="/api/characters", tags=["dub-characters"])

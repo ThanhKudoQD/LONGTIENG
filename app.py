@@ -396,6 +396,102 @@ app = FastAPI(title="VoiceCast + VoxCPM2", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# ━━━ License middleware (khóa hoàn toàn nếu invalid/expired) ━━━
+from dubeditor import license_service as _license_service
+
+# Các path KHÔNG cần check license:
+# - /dub/api/license/*  — endpoints để activate/check status license
+# - /app                — frontend dubeditor (SPA này có LicenseGate riêng)
+# - /dub/projects, /dub/videos, /dub/exports — static files (audio/video preview)
+# - /uploads, /static   — assets chung
+# - /health, /healthz   — healthcheck
+#
+# Các path SẼ BỊ CHẶN khi license invalid:
+# - /                   — index.html (VoiceCast main page)
+# - /admin              — admin page
+# - /admin/login        — admin login page
+# - /api/admin/*        — admin APIs
+# - /dub/api/*          — dubeditor APIs (trừ /dub/api/license/*)
+_LICENSE_WHITELIST_PREFIXES = (
+    "/dub/api/license/",
+    "/app",
+    "/dub/projects/",
+    "/dub/videos/",
+    "/dub/exports/",
+    "/static/",
+    "/uploads/",
+)
+_LICENSE_WHITELIST_EXACT = {"/health", "/healthz"}
+
+
+def _license_invalid_html_page() -> str:
+    """Trang HTML đẹp hiển thị khi license invalid (cho user truy cập /, /admin)."""
+    return """<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>License Required</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+  body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0f172a,#1e293b);color:#fff;padding:20px}
+  .card{background:rgba(255,255,255,0.05);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:40px;max-width:480px;width:100%;text-align:center}
+  .icon{font-size:64px;margin-bottom:16px}
+  h1{font-size:28px;font-weight:700;margin-bottom:8px}
+  .subtitle{color:#94a3b8;margin-bottom:24px;font-size:14px}
+  .alert{background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;border-radius:12px;padding:14px;margin-bottom:20px;font-size:13px}
+  .btn{display:inline-block;background:#3b82f6;color:#fff;padding:12px 28px;border-radius:10px;text-decoration:none;font-weight:600;transition:all 0.2s}
+  .btn:hover{background:#2563eb;transform:translateY(-1px)}
+  .info{margin-top:20px;font-size:12px;color:#64748b}
+  .info code{background:rgba(255,255,255,0.06);padding:2px 8px;border-radius:6px;color:#cbd5e1;font-family:monospace}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🔒</div>
+    <h1>License Required</h1>
+    <p class="subtitle">Phần mềm chưa được kích hoạt hoặc license đã hết hạn</p>
+    <div class="alert">
+      ⚠ Bạn cần kích hoạt phần mềm trước khi sử dụng tính năng này.
+    </div>
+    <a href="/app/" class="btn">→ Đến trang kích hoạt</a>
+    <div class="info">
+      Liên hệ admin để nhận license key.<br>
+      <code>📱 Telegram: @your_admin</code>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+@app.middleware("http")
+async def license_middleware(request, call_next):
+    from fastapi.responses import JSONResponse, HTMLResponse
+    path = request.url.path
+
+    # Whitelist các path không cần license
+    if path in _LICENSE_WHITELIST_EXACT:
+        return await call_next(request)
+    if any(path.startswith(p) for p in _LICENSE_WHITELIST_PREFIXES):
+        return await call_next(request)
+    # WebSocket sẽ tự handle trong handler
+    if request.headers.get("upgrade", "").lower() == "websocket":
+        return await call_next(request)
+
+    if not _license_service.is_valid():
+        # API request → trả JSON 403
+        if (path.startswith("/api/")
+            or path.startswith("/dub/api/")
+            or "application/json" in request.headers.get("accept", "")):
+            return JSONResponse(
+                {"error": "LICENSE_INVALID", "detail": "License hết hạn hoặc không hợp lệ"},
+                status_code=403,
+            )
+        # Page request (/, /admin, /admin/login) → trả HTML page
+        return HTMLResponse(_license_invalid_html_page(), status_code=403)
+
+    return await call_next(request)
+# ━━━ END License middleware ━━━
+
 # ── DubEditor ────────────────────────────────────────────────────────────────
 from dubeditor.router import router as dub_router
 from pathlib import Path as _Path

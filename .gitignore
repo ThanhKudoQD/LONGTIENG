@@ -75,3 +75,30 @@ TEST.zip
 public
 dubeditor_frontend/node_modules/
 data
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LICENSE SYSTEM — PHẢI BẢO MẬT!
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Private RSA key — CHỈ giữ ở máy bạn, KHÔNG commit lên Git
+# Nếu lộ → bất kỳ ai cũng có thể tạo key
+private_key.pem
+*_private_key.pem
+*.private.pem
+
+# Public key — CÓ THỂ commit (đã embed vào source code), nhưng để file gốc ra ngoài Git cho gọn
+public_key.pem
+
+# License file của máy user — không commit (data riêng từng máy)
+data/license.dat
+license.dat
+
+# Build PyInstaller
+*.spec
+build/
+dist/
+__pycache__/
+
+# Backup files
+*.bak
+*.backup

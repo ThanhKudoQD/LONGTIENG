@@ -16,6 +16,7 @@ import ChaptersModal from './ChaptersModal'
 import ChapterFilterDropdown from './ChapterFilterDropdown'
 import CharacterFilterDropdown from './CharacterFilterDropdown'
 import SwapCharacterModal from './SwapCharacterModal'
+import { LicenseChip, LicenseStatus } from './LicenseGate'
 
 interface Props { projectId: number; onBack: () => void; onTranslate: () => void }
 
@@ -41,6 +42,20 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   const [swapping, setSwapping]           = useState(false)
   const [showAutoFix, setShowAutoFix] = useState(false)
   const [showChapters, setShowChapters] = useState(false)
+
+  // License chip — fetch status
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null)
+  const fetchLicenseStatus = useCallback(async () => {
+    try {
+      const r = await api.get('/license/status')
+      setLicenseStatus(r.data)
+    } catch {}
+  }, [])
+  useEffect(() => { fetchLicenseStatus() }, [fetchLicenseStatus])
+  // Re-fetch sau khi deactivate (LicenseChip emit event)
+  const handleLicenseChange = useCallback(() => {
+    window.location.reload()
+  }, [])
 
   // Chapters local state — dùng để render trong SubtitleList với collapse + statistics
   // Auto TTS — gom các sub vừa gán vào microtask batch, gọi 1 request enqueue
@@ -591,6 +606,11 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           </svg>
           🌐 Dịch
         </button>
+
+        {/* License chip — hiện số ngày còn lại */}
+        {licenseStatus && (
+          <LicenseChip status={licenseStatus} onChange={handleLicenseChange} />
+        )}
 
       </header>
 
