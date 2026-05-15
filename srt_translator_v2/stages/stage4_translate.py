@@ -4,13 +4,15 @@ Stage 4 — Translate (v3 refactored, Option A).
 Thay đổi so với cũ:
 - BỎ duration_sec khỏi prompt → không bóp câu vì CPS
 - BỎ rule "match duration"
-- BỎ pre-filter regex noise → AI TỰ QUYẾT noise (theo 8 nguyên tắc trong prompt)
+- BỎ pre-filter regex noise → noise đã được Stage 0 xử lý
 - THÊM arc.summary vào context
-- v1 = 8 nguyên tắc (đọc cụm sub, ưu tiên nghĩa, xưng hô, thành ngữ, văn phong, mượt, đa nghĩa, bỏ qua marker)
+- v1 = 9 nguyên tắc (đọc cụm sub, ưu tiên nghĩa, xưng hô, thành ngữ, văn phong,
+  mượt, đa nghĩa, dịch 1-1 không rỗng, tự loại từ rác lẻ còn sót)
 - v2 = AI tự do
 
-AI bỏ qua dòng noise bằng cách trả text_v1 = "" (rỗng).
-Backend nhận text_v1 = "" → tự set is_noise=True.
+Stage 0 đã làm sạch SRT (set text="" cho dòng noise).
+Stage 4 SKIP các dòng có text="" khi gửi AI để tiết kiệm token,
+và YÊU CẦU AI dịch đầy đủ mọi dòng nhận được (không trả rỗng).
 """
 from __future__ import annotations
 import asyncio
@@ -130,12 +132,17 @@ def format_dialogue_input(
 ) -> str:
     """Format thoại CẦN DỊCH với speaker (KHÔNG duration).
 
-    Gửi tất cả dòng trong chunk — AI sẽ tự đánh dấu noise bằng text_v1="".
+    Bỏ qua dòng đã bị Stage 0 đánh dấu noise (entry.text rỗng) —
+    KHÔNG gửi lên AI để tiết kiệm token và tránh confuse AI.
+    Index gốc vẫn giữ nguyên (skip line_index trong output là điều bình thường).
     """
     lines = []
     for i in range(chunk.r[0], chunk.r[1] + 1):
         e = entries_by_idx.get(i)
         if not e:
+            continue
+        # Skip dòng noise (Stage 0 đã set text="")
+        if not (e.text or "").strip():
             continue
         speaker_info = speaker_map.get(i, {})
         speaker_zh = speaker_info.get("speaker_zh") or "?"
@@ -149,7 +156,10 @@ def format_context_window(
     start_line: int,
     end_line: int,
 ) -> str:
-    """Format context trước/sau (sliding window). Chỉ text TQ + speaker."""
+    """Format context trước/sau (sliding window). Chỉ text TQ + speaker.
+
+    Cũng bỏ qua dòng noise như format_dialogue_input.
+    """
     if start_line > end_line:
         return "(Không có)"
 
@@ -157,6 +167,9 @@ def format_context_window(
     for i in range(start_line, end_line + 1):
         e = entries_by_idx.get(i)
         if not e:
+            continue
+        # Skip dòng noise (Stage 0 đã set text="")
+        if not (e.text or "").strip():
             continue
         speaker_info = speaker_map.get(i, {})
         speaker_zh = speaker_info.get("speaker_zh") or "?"

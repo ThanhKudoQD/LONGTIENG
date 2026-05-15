@@ -43,15 +43,26 @@ text_v1 — DỊCH CHUẨN (8 NGUYÊN TẮC)
 
 7. Nếu chỗ đa nghĩa → chọn cách hiểu HỢP LÝ NHẤT theo ngữ cảnh (đọc context trước/sau + scene + emotion).
 
-8. TỰ ĐỘNG BỎ KHÔNG DỊCH:
-   - Logo / watermark embed trong sub (vd: "腾讯视频", "@导演名")
-   - Marker phụ đề: [音乐], [BGM], (笑), (画外音), *sigh*, *whisper*, ♪...♪, 【...】
-   - Filler không có nghĩa thực: 那个那个那个, 嗯嗯嗯, 啊—————, 哈哈哈哈
-   - Câu lặp y hệt dòng trước (echo subtitle ≥ 80% giống)
-   - Từ lạ / rời rạc / không liên quan ngữ cảnh
-   - Lyric OST / BGM hiển thị trong sub (không phải thoại nhân vật)
+8. LUÔN DỊCH 1-1 — KHÔNG bỏ dòng, KHÔNG gộp dòng, KHÔNG tách dòng.
+   - Mỗi line_index zh nhận được → PHẢI có text_v1 tiếng Việt tương ứng (KHÔNG được trả rỗng)
+   - KHÔNG gộp 2 dòng thành 1 (giữ ranh giới sub gốc)
+   - KHÔNG tách 1 dòng thành 2 entry trong JSON output
 
-   → Khi bỏ qua: trả text_v1 = "" (rỗng), text_v2 = null, emotion = "neutral", intensity = 1
+9. TỰ LOẠI TỪ RÁC LẺ CÒN SÓT TRONG CÂU (safety net):
+   Phụ đề đầu vào đã được làm sạch ở Stage 0, nhưng nếu BẠN PHÁT HIỆN
+   từ rác lẻ chen trong câu thì TỰ BỎ khi dịch, GIỮ phần chính:
+
+   - Watermark/logo lẻ còn sót: "腾讯视频 我爱你" → dịch "Em yêu anh"
+   - Chữ rời rạc không liên quan: "继续给我找 我与周家" → dịch "Tiếp tục tìm cho tôi"
+     (bỏ "我与周家" vì không liên quan ngữ cảnh)
+   - Marker lọt qua: "[音乐] 你好" → dịch "Xin chào"
+   - Filler thừa cuối câu: "我们走吧 那个那个" → dịch "Chúng ta đi thôi"
+
+   QUY TẮC:
+   - Đọc CONTEXT để biết câu chính nói gì → phần nào không khớp ngữ cảnh = RÁC
+   - CHỈ bỏ phần rác, VẪN PHẢI dịch phần chính
+   - Nếu CẢ DÒNG là rác → vẫn cố gắng dịch theo nghĩa gần nhất (KHÔNG trả rỗng)
+   - Nghi ngờ chữ nào đó có thuộc câu chính không → GIỮ và dịch (đừng bỏ mù)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 text_v2 — DỊCH TỰ DO (BẠN QUYẾT)
@@ -68,7 +79,6 @@ BẠN THẤY HAY NHẤT cho cảnh này.
 
 KHI NÀO text_v2 = null:
 - Khi bạn thấy cách dịch hay nhất TRÙNG với v1
-- Khi v1 đã bỏ qua (text_v1 = "")
 - KHÔNG cố tạo bản v2 khác chỉ để có
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -103,19 +113,13 @@ JSON THUẦN:
       "text_v2": null,
       "emotion": "cold",
       "intensity": 7
-    },
-    {
-      "line_index": 3,
-      "speaker_vi": "",
-      "text_v1": "",
-      "text_v2": null,
-      "emotion": "neutral",
-      "intensity": 1
     }
   ]
 }
 
-(Dòng 3 = ví dụ AI bỏ qua: marker phụ đề / filler / watermark)
+LƯU Ý: text_v1 PHẢI có nội dung tiếng Việt cho MỌI line_index nhận được.
+KHÔNG được trả text_v1 = "". Nếu line_index trong input không xuất hiện
+trong output → coi như thiếu (LỖI).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PHẦN BIẾN — CONTEXT CHUNK
@@ -161,15 +165,16 @@ CHECKLIST CUỐI
 □ Xưng hô đúng quan hệ + giới tính + emotion scene
 □ Thành ngữ / slang TQ → tương đương tiếng Việt
 □ Văn phong khớp thể loại
-□ Bỏ qua marker / filler / watermark → text_v1 = ""
+□ MỌI line_index trong input đều có text_v1 tiếng Việt (KHÔNG rỗng)
+□ Nếu có từ rác lẻ trong câu → tự bỏ phần rác, VẪN dịch phần chính
 
 🔵 v2:
 □ Đọc hiểu ngữ cảnh → dịch theo cách hay nhất
-□ v2 = null nếu trùng v1 hoặc v1 = ""
+□ v2 = null nếu trùng v1
 
 🟢 FORMAT:
 □ JSON thuần, không ```json fence
 □ Đúng schema {translations: [...]}
-□ Mọi line_index trong input đều có entry (kể cả khi bỏ qua text_v1="")
+□ Mọi line_index trong input đều có entry với text_v1 KHÔNG RỖNG
 
 CHỈ TRẢ JSON SAU KHI ĐÃ ĐI QUA CHECKLIST.
