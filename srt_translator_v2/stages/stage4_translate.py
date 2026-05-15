@@ -1,14 +1,11 @@
 """
-Stage 4 — Translate (v3 refactored, Option A).
+Stage 4 — Translate (v3.2).
 
-Thay đổi so với cũ:
-- BỎ duration_sec khỏi prompt → không bóp câu vì CPS
-- BỎ rule "match duration"
-- BỎ pre-filter regex noise → noise đã được Stage 0 xử lý
-- THÊM arc.summary vào context
-- v1 = 9 nguyên tắc (đọc cụm sub, ưu tiên nghĩa, xưng hô, thành ngữ, văn phong,
-  mượt, đa nghĩa, dịch 1-1 không rỗng, tự loại từ rác lẻ còn sót)
-- v2 = AI tự do
+Cải tiến v3.2:
+- Prompt 5 TẦNG (gộp 9 nguyên tắc cũ): đúng nghĩa / tự nhiên / tone-nhân vật / văn hóa-cảm xúc / không gộp
+- Inject GENRE PACK theo bible.world.genre_id (modern_ceo_romance/ancient_palace/...)
+- AI vẫn trả emotion + intensity (cần cho TTS chọn giọng); fallback từ scene nếu thiếu
+- Câu Việt mượt, có ví dụ ❌→✅ cho tầng 2
 
 Stage 0 đã làm sạch SRT (set text="" cho dòng noise).
 Stage 4 SKIP các dòng có text="" khi gửi AI để tiết kiệm token,
@@ -33,6 +30,88 @@ logger = logging.getLogger(__name__)
 def load_prompt(name: str, config: PipelineConfig) -> str:
     path = config.prompts_dir / f"{name}.txt"
     return path.read_text(encoding="utf-8")
+
+
+# ─────────────────────────────────────────────────────────────────
+# GENRE PACK LOADER
+# ─────────────────────────────────────────────────────────────────
+
+_GENRE_PACK_CACHE: dict[str, dict] = {}
+
+
+def load_genre_pack(genre_id: str, config: PipelineConfig) -> Optional[dict]:
+    """Load genre pack JSON theo genre_id (cached in-memory).
+
+    Returns None nếu genre_id="other" hoặc file không tồn tại.
+    """
+    if not genre_id or genre_id == "other":
+        return None
+
+    if genre_id in _GENRE_PACK_CACHE:
+        return _GENRE_PACK_CACHE[genre_id]
+
+    # Tìm file trong genre_packs/
+    pack_dir = config.prompts_dir.parent / "genre_packs"
+    pack_file = pack_dir / f"{genre_id}.json"
+
+    if not pack_file.exists():
+        logger.warning(f"[Stage 4] Genre pack file not found: {pack_file}")
+        _GENRE_PACK_CACHE[genre_id] = None
+        return None
+
+    try:
+        with open(pack_file, encoding="utf-8") as f:
+            data = json.load(f)
+        _GENRE_PACK_CACHE[genre_id] = data
+        logger.info(f"[Stage 4] Loaded genre pack: {genre_id} ({data.get('name_vi', '?')})")
+        return data
+    except Exception as e:
+        logger.warning(f"[Stage 4] Failed to load genre pack {genre_id}: {e}")
+        _GENRE_PACK_CACHE[genre_id] = None
+        return None
+
+
+def format_genre_pack_for_prompt(pack: Optional[dict]) -> str:
+    """Format genre pack thành chuỗi gọn để inject vào prompt.
+
+    Trả về '(Không có genre pack cho phim này)' nếu pack=None.
+    """
+    if not pack:
+        return "(Không có genre pack — dùng quy tắc xưng hô mặc định)"
+
+    out = []
+    out.append(f"Thể loại: {pack.get('name_vi', pack.get('id', '?'))}")
+
+    tone = pack.get("tone_signature")
+    if tone:
+        out.append(f"Tone đặc trưng: {tone}")
+
+    # Xưng hô đặc thù thể loại
+    pronouns = pack.get("typical_pronouns") or {}
+    if pronouns:
+        out.append("\nXưng hô đặc thù thể loại:")
+        for k, v in pronouns.items():
+            out.append(f"- {k}: {v}")
+
+    # Cách gọi / thuật ngữ
+    terms = pack.get("common_terms") or []
+    if terms:
+        out.append("\nCụm điển hình / chức vụ:")
+        for t in terms[:25]:  # giới hạn 25 term tránh quá dài
+            zh = t.get("zh", "")
+            vi = t.get("vi", "")
+            note = t.get("notes") or ""
+            note_str = f" — {note}" if note else ""
+            out.append(f"- {zh} → {vi}{note_str}")
+
+    # Banned modern (cấm dùng trong thể loại)
+    banned = pack.get("banned_modern") or pack.get("banned") or []
+    if banned:
+        out.append("\nCẤM dùng trong thể loại này:")
+        for b in banned:
+            out.append(f"✗ {b}")
+
+    return "\n".join(out)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -222,12 +301,17 @@ async def process_one_chunk(
         arc_tone = arc.tone if arc else "neutral"
         arc_summary = (arc.summary if arc and arc.summary else "(không có tóm tắt)")
 
+        # Load + format Genre Pack theo genre_id từ Bible.world
+        genre_pack = load_genre_pack(bible.world.genre_id, config)
+        genre_pack_str = format_genre_pack_for_prompt(genre_pack)
+
         # Build prompt
         prompt = (prompt_template
                   .replace("{CHUNK_TITLE}", chunk.t)
                   .replace("{ARC_TITLE}", arc_title)
                   .replace("{ARC_TONE}", arc_tone)
                   .replace("{ARC_SUMMARY}", arc_summary)
+                  .replace("{GENRE_PACK}", genre_pack_str)
                   .replace("{CHARACTERS_IN_CHUNK}", characters_in_chunk)
                   .replace("{RELATIONSHIPS}", relationships)
                   .replace("{GLOSSARY_CHUNK}", glossary_chunk)
@@ -285,15 +369,27 @@ async def process_one_chunk(
                 text_v2_raw = t.get("text_v2")
                 text_v2 = (text_v2_raw or "").strip() or None
 
-                # KHÔNG tự đánh dấu noise nữa. Stage 0 là người duy nhất
-                # quyết định cái gì cần dịch (bằng cách set original_text="").
-                # Stage 4 chỉ lưu text AI trả về, kể cả rỗng.
+                # AI trả emotion + intensity trong output (cho TTS chọn giọng đọc).
+                # Nếu AI không trả (thiếu field) → fallback từ scene Stage 2 đã gán.
+                ai_emotion = t.get("emotion")
+                ai_intensity = t.get("intensity")
+
+                if ai_emotion is None or ai_intensity is None:
+                    # Fallback từ scene
+                    for sc in chunk.scenes:
+                        if sc.r[0] <= line_idx <= sc.r[1]:
+                            if ai_emotion is None:
+                                ai_emotion = sc.e
+                            if ai_intensity is None:
+                                ai_intensity = sc.intensity
+                            break
+
                 result[line_idx] = {
                     "speaker_vi": (t.get("speaker_vi") or "").strip(),
                     "text_v1": text_v1,
                     "text_v2": text_v2,
-                    "emotion": normalize_emotion(t.get("emotion")),
-                    "intensity": _clamp_intensity(t.get("intensity")),
+                    "emotion": normalize_emotion(ai_emotion),
+                    "intensity": _clamp_intensity(ai_intensity),
                     "is_noise": False,
                 }
             except Exception as e:
@@ -374,7 +470,7 @@ async def run_stage4_translate(
 ) -> dict[int, dict]:
     """Stage 4 — dịch toàn phim. AI tự quyết noise."""
     logger.info("=" * 60)
-    logger.info("STAGE 4 — TRANSLATE (no CPS, AI-driven noise filter, v2 free, +arc summary)")
+    logger.info("STAGE 4 — TRANSLATE (5 tầng + Genre Pack)")
     logger.info("=" * 60)
 
     if not chunk_map.chunks:
