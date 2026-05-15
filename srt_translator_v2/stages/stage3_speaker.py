@@ -82,9 +82,8 @@ def format_scenes_info(chunk: Chunk) -> str:
     lines = []
     for i, sc in enumerate(chunk.scenes):
         chars_str = ", ".join(sc.ch)
-        loc_str = f"@ {sc.loc}" if sc.loc else ""
         tag_str = f" [{sc.tag}]" if sc.tag else ""
-        lines.append(f"Scene {i+1} ({sc.r[0]}-{sc.r[1]}): [{chars_str}] {loc_str}, {sc.e}{tag_str}")
+        lines.append(f"Scene {i+1} ({sc.r[0]}-{sc.r[1]}): [{chars_str}], {sc.e}{tag_str}")
     return "\n".join(lines)
 
 

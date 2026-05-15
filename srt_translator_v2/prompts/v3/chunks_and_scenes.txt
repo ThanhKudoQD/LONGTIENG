@@ -45,6 +45,13 @@ EMOTION (chọn 1 cho mỗi scene):
 neutral / happy / sad / angry / cold / tense / intimate /
 fearful / sarcastic / shocked / determined / regretful / humorous / threatening
 
+INTENSITY (1-10): mức độ của emotion trong scene
+- 1-3: nhẹ, bình thường (small talk, work routine)
+- 4-6: trung bình (căng nhẹ, thân mật bình thường, vui đùa)
+- 7-8: mạnh (giận, sốc, lãng mạn sâu, cao trào hội thoại)
+- 9-10: cực mạnh (cãi nhau dữ, khóc lóc, tỏ tình, biến cố lớn)
+- Dùng cho rule shift xưng hô ở Stage 4 (vd ≥8 + angry → "tôi-cô" / "tao-mày")
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT (COMPACT)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -57,25 +64,25 @@ Trả về JSON THUẦN, dùng array compact cho scenes để tiết kiệm toke
       "r": [1, 250],
       "t": "Lần đầu gặp gỡ",
       "scenes": [
-        [1, 35, ["顾沉舟", "苏念"], "tense", "office"],
-        [36, 80, ["苏念", "李华"], "sad", "hospital"],
-        [81, 250, ["顾沉舟", "苏念"], "intimate", "bedroom", "PEAK"]
+        [1, 35, ["顾沉舟", "苏念"], "tense", 6],
+        [36, 80, ["苏念", "李华"], "sad", 7],
+        [81, 250, ["顾沉舟", "苏念"], "intimate", 8, "PEAK"]
       ]
     },
     {
       "r": [251, 500],
       "t": "Ký hợp đồng",
       "scenes": [
-        [251, 500, ["顾沉舟", "苏念"], "tense", "office"]
+        [251, 500, ["顾沉舟", "苏念"], "tense", 5]
       ]
     }
   ]
 }
 
 Mỗi scene = array với thứ tự cố định:
-  [start_line, end_line, [characters_zh], emotion, location]
+  [start_line, end_line, [characters_zh], emotion, intensity]
   hoặc
-  [start_line, end_line, [characters_zh], emotion, location, "HOOK"|"PEAK"]
+  [start_line, end_line, [characters_zh], emotion, intensity, "HOOK"|"PEAK"]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CHECKLIST
@@ -90,6 +97,7 @@ CHECKLIST
 □ Scenes trong chunk liền nhau
 □ characters dùng tên TRUNG (zh), không phải tên Việt
 □ emotion thuộc danh sách hợp lệ
+□ intensity là số nguyên 1-10
 □ tag chỉ "HOOK" hoặc "PEAK", optional
 □ Output là JSON thuần
 

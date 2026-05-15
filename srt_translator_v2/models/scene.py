@@ -59,7 +59,7 @@ class Scene(BaseModel):
     r: tuple[int, int]                                # [start_line, end_line]
     ch: list[str] = Field(default_factory=list)       # characters_present (zh names)
     e: str = "neutral"                                # emotion_primary
-    loc: str = ""                                     # location
+    i: int = 5                                        # intensity 1-10 (mức độ emotion)
     tag: Optional[str] = None                         # "HOOK" / "PEAK" / None
 
     # Suy ra từ tag
@@ -82,6 +82,14 @@ class Scene(BaseModel):
     @property
     def emotion_primary(self) -> str:
         return normalize_emotion(self.e)
+
+    @property
+    def intensity(self) -> int:
+        """Intensity 1-10, clamp về range hợp lệ."""
+        try:
+            return max(1, min(10, int(self.i)))
+        except (TypeError, ValueError):
+            return 5
 
 
 # ─────────────────────────────────────────────────────────────────

@@ -26,7 +26,6 @@ class Character(BaseModel):
     age: Optional[str] = None                 # teen/20s/30s/40s/50s/trung niên/già
     char: str = ""                            # Tính cách + kiểu nói 1 câu ngắn
     rel: dict[str, str] = Field(default_factory=dict)  # Map zh_name → quan hệ
-    catchphrase: Optional[str] = None         # Câu cửa miệng (optional)
 
 
 class Cast(BaseModel):
@@ -68,6 +67,7 @@ class StoryArc(BaseModel):
 class World(BaseModel):
     """Bối cảnh phim."""
     genre: list[str] = Field(default_factory=list)  # ["đô thị", "tổng tài", "ngôn tình"]
+    genre_id: str = "other"                   # ID chuẩn để load genre_pack: modern_ceo_romance/ancient_palace/reborn_revenge/mafia_lord/war_god_return/other
     era: str = "hiện đại"                     # hiện đại/cổ đại/dân quốc/tương lai
     tone: str = ""                            # Tone tổng thể (1 câu)
     plot: str = ""                            # Tóm tắt plot (3-5 câu)

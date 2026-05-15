@@ -123,7 +123,6 @@ async def stage1a_cast_and_glossary(
                 age=ch_data.get("age"),
                 char=ch_data.get("char", "") or "",
                 rel=ch_data.get("rel", {}) or {},
-                catchphrase=ch_data.get("catchphrase"),
             )
             characters.append(ch)
         except Exception as e:
@@ -243,25 +242,71 @@ async def stage1b_world(
         ))
 
     # Sanity check arcs liền nhau
-    arcs = _normalize_arcs(arcs, total_lines=len(entries))
+    arcs = _normalize_arcs(arcs, total_lines=len(entries), max_arcs=config.chunk.max_arcs)
+
+    # Parse genre_id + validate (chỉ chấp nhận giá trị hợp lệ để load genre_pack)
+    VALID_GENRE_IDS = {
+        "modern_ceo_romance",
+        "ancient_palace",
+        "reborn_revenge",
+        "mafia_lord",
+        "war_god_return",
+        "other",
+    }
+    raw_genre_id = (data.get("genre_id") or "other").strip()
+    if raw_genre_id not in VALID_GENRE_IDS:
+        logger.warning(f"[Stage 1B] Invalid genre_id '{raw_genre_id}', fallback to 'other'")
+        raw_genre_id = "other"
 
     world = World(
         genre=data.get("genre", []) or [],
+        genre_id=raw_genre_id,
         era=data.get("era", "hiện đại") or "hiện đại",
         tone=data.get("tone", "") or "",
         plot=data.get("plot", "") or "",
         arcs=arcs,
     )
-    logger.info(f"[Stage 1B] Genre: {world.genre}, {len(arcs)} arcs with summaries")
+    logger.info(f"[Stage 1B] Genre: {world.genre} (id={world.genre_id}), {len(arcs)} arcs with summaries")
     return world
 
 
-def _normalize_arcs(arcs: list[StoryArc], total_lines: int) -> list[StoryArc]:
-    """Sửa arcs nếu chia sai (lấn / hở / sai range)."""
+def _normalize_arcs(arcs: list[StoryArc], total_lines: int, max_arcs: int = 8) -> list[StoryArc]:
+    """Sửa arcs nếu chia sai (lấn / hở / sai range).
+
+    Nếu AI trả về > max_arcs → gộp các arc nhỏ liền nhau lại để giảm xuống max_arcs.
+    """
     if not arcs:
         return [StoryArc(index=0, r=(1, total_lines), t="Toàn phim", summary="", tone="neutral")]
 
     arcs = sorted(arcs, key=lambda a: a.r[0])
+
+    # ━━━ HARD CAP max_arcs: gộp arcs nhỏ liền nhau ━━━
+    if len(arcs) > max_arcs:
+        logger.warning(
+            f"[Stage 1B] AI returned {len(arcs)} arcs, exceeds max_arcs={max_arcs}. "
+            f"Merging smallest adjacent arcs."
+        )
+        # Lặp gộp cho đến khi <= max_arcs
+        while len(arcs) > max_arcs:
+            # Tìm cặp liền nhau có tổng dòng nhỏ nhất → gộp
+            min_pair_size = float('inf')
+            min_pair_idx = 0
+            for i in range(len(arcs) - 1):
+                size = (arcs[i].r[1] - arcs[i].r[0]) + (arcs[i+1].r[1] - arcs[i+1].r[0])
+                if size < min_pair_size:
+                    min_pair_size = size
+                    min_pair_idx = i
+            # Gộp arcs[min_pair_idx] + arcs[min_pair_idx+1]
+            a1 = arcs[min_pair_idx]
+            a2 = arcs[min_pair_idx + 1]
+            merged = StoryArc(
+                index=a1.index,
+                r=(a1.r[0], a2.r[1]),
+                t=f"{a1.t} & {a2.t}" if a1.t and a2.t else (a1.t or a2.t or "Merged arc"),
+                summary=f"{a1.summary} {a2.summary}".strip(),
+                tone=a1.tone or a2.tone or "neutral",
+            )
+            arcs = arcs[:min_pair_idx] + [merged] + arcs[min_pair_idx + 2:]
 
     fixed = []
     for i, arc in enumerate(arcs):

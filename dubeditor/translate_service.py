@@ -248,7 +248,7 @@ def save_chunks_to_db(db: Session, project_id: int,
                 scene_index=scene_index_counter,
                 start_line=sc.r[0],
                 end_line=sc.r[1],
-                location=sc.loc,
+                location="",  # Bỏ field loc khỏi Scene model (Stage 2 không trả về nữa) — giữ DB column rỗng
                 characters_present=json.dumps(sc.ch, ensure_ascii=False),
                 emotion_primary=sc.e,
                 story_arc_id=arc_id_by_index.get(chunk.arc_index),
@@ -350,7 +350,7 @@ def load_chunks_from_db(db: Session, project_id: int) -> V3ChunkMap:
                 r=(sc.start_line, sc.end_line),
                 ch=chars,
                 e=sc.emotion_primary or "neutral",
-                loc=sc.location or "",
+                i=5,  # DB cũ không có intensity → fallback 5; lần chạy mới sẽ có
                 tag=tag,
             ))
 

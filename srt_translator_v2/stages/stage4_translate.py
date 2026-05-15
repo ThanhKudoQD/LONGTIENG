@@ -53,10 +53,9 @@ def format_characters_in_chunk(chunk: Chunk, bible: Bible) -> str:
         if ch.zh not in chars_in_chunk:
             continue
         age_str = f", {ch.age}" if ch.age else ""
-        catch_str = f" Câu cửa miệng: \"{ch.catchphrase}\"." if ch.catchphrase else ""
         lines.append(
             f"- {ch.vi} ({ch.zh}): {ch.g}, {ch.role}{age_str}\n"
-            f"    {ch.char}.{catch_str}"
+            f"    {ch.char}."
         )
     return "\n".join(lines) if lines else "(Không xác định)"
 
@@ -109,18 +108,17 @@ def format_glossary_chunk(chunk: Chunk, entries_by_idx: dict[int, SrtEntry],
 
 
 def format_scenes_in_chunk(chunk: Chunk) -> str:
-    """Format scenes của chunk cho prompt."""
+    """Format scenes của chunk cho prompt (có intensity để Stage 4 shift xưng hô)."""
     if not chunk.scenes:
         return f"(Chunk này không chia scenes, là 1 mạch liền: dòng {chunk.r[0]}-{chunk.r[1]})"
 
     lines = []
     for i, sc in enumerate(chunk.scenes):
         chars_str = ", ".join(sc.ch)
-        loc_str = f" @ {sc.loc}" if sc.loc else ""
         tag_str = f" [{sc.tag}]" if sc.tag else ""
         lines.append(
             f"Scene {i+1} (dòng {sc.r[0]}-{sc.r[1]}): "
-            f"[{chars_str}]{loc_str}, emotion={sc.e}{tag_str}"
+            f"[{chars_str}], emotion={sc.e}, intensity={sc.intensity}{tag_str}"
         )
     return "\n".join(lines)
 

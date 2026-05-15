@@ -29,7 +29,6 @@ Mỗi nhân vật có:
 - age: "teen"/"20s"/"30s"/"40s"/"50s"/"trung niên"/"già"
 - char: 1 CÂU NGẮN tính cách + kiểu nói (vd: "Lạnh lùng, độc đoán, ít nói")
 - rel: dict ánh xạ zh-name khác → quan hệ CỤ THỂ
-- catchphrase: (optional) câu cửa miệng
 
 QUY TẮC HÁN VIỆT:
 - 顾 → Cố · 沉 → Trầm · 舟 → Châu · 苏 → Tô · 念 → Niệm
@@ -88,8 +87,7 @@ Trả về JSON THUẦN:
       "alias": ["Cố tổng"],
       "g": "nam", "role": "nam_chinh", "age": "30s",
       "char": "Lạnh lùng, độc đoán, doanh nhân thành đạt",
-      "rel": {"苏念": "vợ hợp đồng", "李华": "đối thủ"},
-      "catchphrase": null
+      "rel": {"苏念": "vợ hợp đồng", "李华": "đối thủ"}
     }
   ],
   "terms": [

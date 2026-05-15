@@ -100,6 +100,7 @@ class ChunkConfig:
     max_lines: int = 500                      # Chunk vượt này → AI buộc chia nhỏ
     overlap_lines: int = 30                   # Sliding window overlap cho Bước 4
     max_chunks_per_arc: int = 8               # Max chunks/arc
+    max_arcs: int = 8                         # Hard cap số arcs (Stage 1B) — tránh AI tạo quá nhiều arc nhỏ
     parallel: bool = False                    # True = chạy song song (nhanh, tốn token)
                                               # False = tuần tự (chậm hơn ~30%, cache hit Bible giảm 50-90% input cost)
 

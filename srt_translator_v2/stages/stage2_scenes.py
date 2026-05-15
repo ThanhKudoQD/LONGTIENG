@@ -89,7 +89,21 @@ def build_bible_reference(bible: Bible) -> str:
 # ─────────────────────────────────────────────────────────────────
 
 def parse_scene_array(arr) -> Optional[Scene]:
-    """Parse 1 scene từ array [start, end, [chars], emotion, location, "HOOK"?]."""
+    """Parse 1 scene từ array [start, end, [chars], emotion, intensity, "HOOK"?].
+
+    Schema mới:
+    - Position 4 = intensity (int 1-10), KHÔNG còn location
+    - Backward compat: nếu position 4 là string → coi như cũ (loc), set intensity=5
+
+    Dict format vẫn support cả 2 (key "i" / "intensity" cho intensity, "loc"/"location"
+    sẽ bị ignore).
+    """
+    def _clamp_intensity(val) -> int:
+        try:
+            return max(1, min(10, int(float(val))))
+        except (TypeError, ValueError):
+            return 5
+
     try:
         if isinstance(arr, dict):
             r = arr.get("r") or [arr.get("start_line", 1), arr.get("end_line", 1)]
@@ -97,7 +111,7 @@ def parse_scene_array(arr) -> Optional[Scene]:
                 r=(int(r[0]), int(r[1])),
                 ch=arr.get("ch") or arr.get("characters_present", []),
                 e=normalize_emotion(arr.get("e") or arr.get("emotion_primary", "neutral")),
-                loc=arr.get("loc") or arr.get("location", ""),
+                i=_clamp_intensity(arr.get("i") or arr.get("intensity", 5)),
                 tag=arr.get("tag") or None,
             )
 
@@ -108,14 +122,20 @@ def parse_scene_array(arr) -> Optional[Scene]:
         end = int(arr[1])
         chars = list(arr[2]) if isinstance(arr[2], (list, tuple)) else []
         emotion = normalize_emotion(str(arr[3]))
-        location = str(arr[4]) if arr[4] else ""
+        # Position 4: intensity (mới) hoặc location (cũ — backward compat)
+        pos4 = arr[4]
+        if isinstance(pos4, (int, float)) or (isinstance(pos4, str) and pos4.isdigit()):
+            intensity = _clamp_intensity(pos4)
+        else:
+            # Old format (string location) → fallback intensity=5
+            intensity = 5
         tag = arr[5] if len(arr) > 5 and arr[5] in ("HOOK", "PEAK") else None
 
         return Scene(
             r=(start, end),
             ch=chars,
             e=emotion,
-            loc=location,
+            i=intensity,
             tag=tag,
         )
     except Exception as e:
@@ -312,7 +332,7 @@ def _normalize_scenes(scenes: list[Scene], chunk_start: int, chunk_end: int) -> 
             r=(start, end),
             ch=sc.ch,
             e=sc.e,
-            loc=sc.loc,
+            i=sc.i,
             tag=sc.tag,
         ))
 
