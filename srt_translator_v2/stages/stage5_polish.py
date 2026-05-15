@@ -1,8 +1,14 @@
 """
-Stage 5 — Polish/Retry (v3).
+Stage 5 — Polish/Retry (v3.2).
 
-Đã đơn giản hóa: chỉ retry dòng còn tiếng Trung / rỗng / placeholder.
-KHÔNG quét consistency / glossary / CPS condense bằng AI nữa.
+Cải tiến v3.2:
+- Thêm CONTEXT trước/sau cho mỗi dòng retry (AI hiểu mạch)
+- Inject GENRE PACK (giữ chất thể loại)
+- Inject RELATIONSHIPS (AI biết xưng hô)
+- Prompt rút gọn 5 tầng cho retry
+
+Chỉ retry dòng còn tiếng Trung / rỗng / placeholder.
+KHÔNG quét consistency / glossary / CPS condense bằng AI.
 """
 from __future__ import annotations
 import asyncio
@@ -19,6 +25,8 @@ from core.srt_parser import calculate_cps
 from models import (
     Bible, SubtitleLine, ReviewIssue, PolishReport, normalize_emotion,
 )
+# Reuse helpers từ Stage 4
+from stages.stage4_translate import load_genre_pack, format_genre_pack_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +84,7 @@ def format_bible_summary(bible: Bible) -> str:
     """Tóm tắt Bible compact cho retry prompt."""
     cast_short = []
     for c in bible.cast.characters[:15]:
-        cast_short.append(f"- {c.zh} → {c.vi} ({c.g}, {c.role})")
+        cast_short.append(f"- {c.zh} → {c.vi} ({c.g}, {c.role}): {c.char}")
     cast_str = "\n".join(cast_short)
     return (
         f"Thể loại: {', '.join(bible.world.genre)}\n"
@@ -86,40 +94,131 @@ def format_bible_summary(bible: Bible) -> str:
     )
 
 
-def format_glossary_block(bible: Bible) -> str:
-    """Format glossary cho retry prompt."""
+def format_relationships_full(bible: Bible) -> str:
+    """Format toàn bộ quan hệ nhân vật (bilateral, dedup)."""
     lines = []
-    for term in bible.glossary.terms[:50]:  # cap 50 terms
-        lines.append(f"- {term.zh} → \"{term.vi}\"")
+    seen_pairs = set()
+    for ch in bible.cast.characters:
+        for other_zh, rel in ch.rel.items():
+            pair = tuple(sorted([ch.zh, other_zh]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            other_ch = bible.cast.get_by_zh(other_zh)
+            ch_vi = ch.vi or ch.zh
+            other_vi = (other_ch.vi if other_ch else None) or other_zh
+            lines.append(f"- {ch_vi} ({ch.zh}) ↔ {other_vi} ({other_zh}): {rel}")
     return "\n".join(lines) if lines else "(Không có)"
+
+
+def format_glossary_block(bible: Bible) -> str:
+    """Format toàn bộ glossary cho retry prompt (đã filter ở Stage 1)."""
+    lines = []
+    for term in bible.glossary.terms:
+        note = f" — {term.note}" if term.note else ""
+        lines.append(f"- {term.zh} → \"{term.vi}\"{note}")
+    return "\n".join(lines) if lines else "(Không có)"
+
+
+def format_line_context(
+    lines: list[SubtitleLine],
+    target_idx: int,
+    context_window: int = 3,
+) -> tuple[str, str]:
+    """Lấy N dòng trước/sau dòng target (đã dịch xong, để AI hiểu mạch).
+
+    Returns (context_before, context_after) — chỉ lấy dòng KHÔNG còn vấn đề.
+    """
+    line_by_idx = {l.index: l for l in lines}
+    all_indices = sorted(line_by_idx.keys())
+
+    def _format_line(idx):
+        line = line_by_idx.get(idx)
+        if not line:
+            return None
+        text = (line.text_v1 or "").strip()
+        if not text:
+            return None
+        # Skip dòng còn TQ hoặc placeholder
+        if _CHINESE_RE.search(text) or text.startswith("[CHƯA DỊCH"):
+            return None
+        speaker = line.speaker_vi or "?"
+        return f"{idx} | {speaker} | {text}"
+
+    # Trước
+    before = []
+    for i in range(target_idx - 1, max(0, target_idx - context_window - 5), -1):
+        if i not in line_by_idx:
+            continue
+        formatted = _format_line(i)
+        if formatted:
+            before.insert(0, formatted)
+            if len(before) >= context_window:
+                break
+
+    # Sau
+    after = []
+    for i in range(target_idx + 1, target_idx + context_window + 5):
+        if i not in line_by_idx:
+            continue
+        formatted = _format_line(i)
+        if formatted:
+            after.append(formatted)
+            if len(after) >= context_window:
+                break
+
+    return (
+        "\n".join(before) if before else "(không có)",
+        "\n".join(after) if after else "(không có)",
+    )
 
 
 async def retry_batch(
     batch: list[SubtitleLine],
+    all_lines: list[SubtitleLine],
     bible: Bible,
     config: PipelineConfig,
     tracker: CostTracker,
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
 ) -> dict[int, dict]:
-    """Retry dịch 1 batch dòng. Return map line_idx → translation."""
+    """Retry dịch 1 batch dòng. Return map line_idx → translation.
+
+    Thêm context trước/sau từng dòng + Genre Pack + Relationships
+    để AI dịch chính xác hơn.
+    """
     async with semaphore:
         bible_summary = format_bible_summary(bible)
         glossary = format_glossary_block(bible)
+        relationships = format_relationships_full(bible)
 
-        lines_str = []
+        # Genre Pack
+        genre_pack = load_genre_pack(bible.world.genre_id, config)
+        genre_pack_str = format_genre_pack_for_prompt(genre_pack)
+
+        # Build dòng cần retry + context per dòng
+        lines_blocks = []
         for line in batch:
             duration = line.duration
-            lines_str.append(
-                f"{line.index} | {line.speaker_vi or '?'} | "
-                f"{line.emotion or 'neutral'} | "
-                f"{line.text_zh} | {duration:.1f}s"
+            ctx_before, ctx_after = format_line_context(
+                all_lines, line.index, context_window=3
             )
-        lines_input = "\n".join(lines_str)
+            block = (
+                f"━━━ DÒNG {line.index} ━━━\n"
+                f"Context trước:\n{ctx_before}\n\n"
+                f"DỊCH LẠI: {line.index} | {line.speaker_vi or '?'} | "
+                f"emotion={line.emotion or 'neutral'} | "
+                f"text_zh={line.text_zh} | duration={duration:.1f}s\n\n"
+                f"Context sau:\n{ctx_after}"
+            )
+            lines_blocks.append(block)
+        lines_input = "\n\n".join(lines_blocks)
 
         prompt_template = load_prompt("retry", config)
         prompt = (prompt_template
                   .replace("{BIBLE_SUMMARY}", bible_summary)
+                  .replace("{GENRE_PACK}", genre_pack_str)
+                  .replace("{RELATIONSHIPS}", relationships)
                   .replace("{GLOSSARY}", glossary)
                   .replace("{LINES_TO_RETRY}", lines_input))
 
@@ -220,7 +319,7 @@ async def run_stage5_polish(
 
         async with httpx.AsyncClient() as client:
             tasks = [
-                retry_batch(batch, bible, config, tracker, client, semaphore)
+                retry_batch(batch, lines, bible, config, tracker, client, semaphore)
                 for batch in batches
             ]
             for coro in asyncio.as_completed(tasks):
