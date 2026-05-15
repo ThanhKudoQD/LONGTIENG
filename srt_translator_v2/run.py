@@ -102,7 +102,7 @@ def build_config_from_args(args) -> PipelineConfig:
     # Concurrency
     if args.concurrency:
         config.concurrency.translate = args.concurrency
-        config.concurrency.speaker = args.concurrency
+        config.concurrency.speaker_arcs = args.concurrency
         config.concurrency.polish = args.concurrency
 
     return config

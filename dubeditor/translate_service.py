@@ -543,7 +543,7 @@ def build_pipeline_config(req) -> PipelineConfig:
         config.cps.max = req.cps_max
 
     config.concurrency.translate = req.concurrency
-    config.concurrency.speaker = req.concurrency
+    config.concurrency.speaker_arcs = req.concurrency
     config.concurrency.polish = req.concurrency
 
     # v3 fields
@@ -553,10 +553,14 @@ def build_pipeline_config(req) -> PipelineConfig:
         config.chunk.overlap_lines = req.chunk_overlap
     if hasattr(req, "chunks_parallel"):
         config.chunk.parallel = bool(req.chunks_parallel)
-    if hasattr(req, "speaker_parallel"):
-        config.speaker.parallel = bool(req.speaker_parallel)
+    # speaker_parallel cũ → đã bỏ (Stage 3 v3.1 luôn chạy theo arc: arcs song song, chunks tuần tự)
+    # speaker_arcs có thể nhận từ req.concurrency hoặc req nếu có field riêng:
+    if hasattr(req, "speaker_arcs") and getattr(req, "speaker_arcs", None) is not None:
+        config.concurrency.speaker_arcs = int(req.speaker_arcs)
     if hasattr(req, "speaker_context_window") and req.speaker_context_window is not None:
         config.speaker.context_window = int(req.speaker_context_window)
+    if hasattr(req, "speaker_carry_over_lines") and getattr(req, "speaker_carry_over_lines", None) is not None:
+        config.speaker.carry_over_lines = int(req.speaker_carry_over_lines)
     # v3.2: Stage 0 normalize
     if hasattr(req, "stage0_enabled"):
         config.stage0.enabled = bool(req.stage0_enabled)

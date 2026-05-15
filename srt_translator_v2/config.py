@@ -109,8 +109,8 @@ class ChunkConfig:
 class SpeakerConfig:
     """Cấu hình Bước 3 gán speaker."""
     context_window: int = 20                  # Số dòng context trước/sau chunk (read-only)
-    parallel: bool = True                     # True = song song (nhanh, mỗi chunk cache độc lập)
-                                              # False = tuần tự (chậm, cache Bible+rules giữa chunks)
+    carry_over_lines: int = 15                # Số dòng cuối chunk trước (đã gán speaker) gửi kèm chunk hiện tại
+                                              # (chỉ hiệu quả khi chunks trong arc chạy tuần tự)
 
 
 @dataclass
@@ -165,7 +165,7 @@ class ConcurrencyConfig:
     """Số call API song song tối đa."""
     bible: int = 3                  # Bible 3 sub-calls song song
     chunks: int = 5                 # Bước 2: 5 arcs song song
-    speaker: int = 5                # Bước 3: 5 chunks song song
+    speaker_arcs: int = 5           # Bước 3: số ARC chạy song song (chunks trong arc tuần tự để hit cache + carry over speaker)
     translate: int = 5              # Bước 4: 5 chunks song song
     polish: int = 5                 # Bước 5: retry
     retry_max: int = 3
@@ -283,7 +283,7 @@ class PipelineConfig:
             self.chunk.overlap_lines = 50
             # Tăng concurrency để chạy nhanh hơn
             self.concurrency.translate = 7
-            self.concurrency.speaker = 7
+            self.concurrency.speaker_arcs = 7
         return self
 
 
