@@ -480,7 +480,8 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
         </div>
       )}
 
-      <header className="flex items-center gap-2 px-3 h-12 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 flex-shrink-0 z-10">
+      <header className="flex items-center gap-2 px-3 h-12 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 flex-shrink-0 z-10 overflow-x-auto"
+        style={{ scrollbarWidth: 'thin' }}>
         <button onClick={() => setSidebarVisible(v => !v)} title="Ẩn/hiện sidebar"
           className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${sidebarVisible ? 'bg-blue-50 text-blue-600 dark:bg-blue-950 dark:text-blue-400' : 'text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'}`}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -529,6 +530,19 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           {(modelStatus==='unloaded'||modelStatus==='unknown') && <><span className="w-1.5 h-1.5 rounded-full bg-zinc-400"/>Model OFF</>}
         </button>
 
+        {/* ━━━ Filter group: Đoạn / Lọc đoạn (chỉ chapter — NV ở character strip dưới) ━━━ */}
+        <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-700 flex-shrink-0" />
+
+        <ChapterSelector projectId={projectId} onOpenManage={() => setShowChapters(true)} />
+        <ChapterFilterDropdown
+          projectId={projectId}
+          chapters={chapters}
+          selectedIds={filterChapterIds}
+          onChange={setFilterChapterIds}
+        />
+
+        <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-700 flex-shrink-0" />
+
         {/* Emotion Voice toggle — v3 (3 mode: BT / Buồn / Giận)
             OFF → tất cả TTS dùng mode "Bình thường"
             ON  → TTS dùng mode theo cảm xúc của mỗi dòng (qua emotion_to_mode) */}
@@ -545,6 +559,27 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
             }`}>
           <span>🎭</span>
           {emotionVoiceOn ? 'Mode cảm xúc ON' : 'Mode cảm xúc OFF'}
+        </button>
+
+        {/* Auto Fix Overlap button */}
+        <button onClick={() => setShowAutoFix(true)}
+          disabled={overlapGroups.length === 0}
+          title={overlapGroups.length > 0 ? `Tự động fix ${overlapGroups.length} chuỗi đè` : 'Không có chuỗi đè'}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-950 disabled:opacity-40 disabled:cursor-not-allowed">
+          <span>⚡</span>
+          Auto fix{overlapGroups.length > 0 ? ` (${overlapGroups.length})` : ''}
+        </button>
+
+        {/* Auto TTS toggle */}
+        <button onClick={() => setAutoTTS(!autoTTS)}
+          title={autoTTS ? 'Auto TTS đang BẬT — gán nhân vật xong tự tạo TTS' : 'Auto TTS đang TẮT — bấm để bật'}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0
+            ${autoTTS
+              ? 'border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 shadow-sm'
+              : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100'
+            }`}>
+          <span>{autoTTS ? '🟢' : '⚪'}</span>
+          <span>Auto TTS {autoTTS ? 'ON' : 'OFF'}</span>
         </button>
 
         <button onClick={onTranslate}
@@ -615,15 +650,6 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
         {/* Col 3: Subtitle list */}
         <div className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-zinc-900 min-w-0">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-100 dark:border-zinc-800 flex-shrink-0">
-            <ChapterSelector projectId={projectId} onOpenManage={() => setShowChapters(true)} />
-
-            <ChapterFilterDropdown
-              projectId={projectId}
-              chapters={chapters}
-              selectedIds={filterChapterIds}
-              onChange={setFilterChapterIds}
-            />
-
             {/* Nút tạo sub tại playhead */}
             <button
               onClick={insertSubAtPlayhead}
@@ -662,25 +688,6 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
                 ⚠{overlapGroups.length > 0 ? ` ${overlapGroups.length}` : ''}
               </button>
 
-              {/* Auto Fix Overlap button */}
-              <button onClick={() => setShowAutoFix(true)}
-                disabled={overlapGroups.length === 0}
-                title={overlapGroups.length > 0 ? `Tự động fix ${overlapGroups.length} chuỗi đè` : 'Không có chuỗi đè'}
-                className="px-2.5 py-1.5 text-[12px] rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-950 transition-all font-medium disabled:opacity-40 disabled:cursor-not-allowed">
-                ⚡ Auto fix
-              </button>
-
-              {/* Auto TTS toggle */}
-              <button onClick={() => setAutoTTS(!autoTTS)}
-                title={autoTTS ? 'Auto TTS đang BẬT — gán nhân vật xong tự tạo TTS' : 'Auto TTS đang TẮT — bấm để bật'}
-                className={`px-2.5 py-1.5 text-[12px] rounded-lg border font-medium transition-all flex items-center gap-1 ${
-                  autoTTS
-                    ? 'border-emerald-400 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 shadow-sm'
-                    : 'border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100'
-                }`}>
-                <span>{autoTTS ? '🟢' : '⚪'}</span>
-                <span>Auto TTS</span>
-              </button>
               {filterOverlap && (
                 <>
                   {/* Min count input */}
@@ -749,7 +756,7 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
             <span className="text-[12px] text-zinc-400 tabular-nums flex-shrink-0 min-w-[24px] text-right">{visibleCount}</span>
           </div>
 
-          {/* Character strip — Filter NV + Đổi NV (1 hàng, gọn) */}
+          {/* Character strip — Filter NV + Đổi NV */}
           {characters.length > 0 && (
             <div className="flex items-center gap-2 px-3 py-1.5 border-b border-zinc-100 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-800/40 flex-shrink-0">
               <CharacterFilterDropdown
@@ -768,7 +775,6 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
                 🔄 <span>Đổi NV</span>
               </button>
 
-              {/* Hiện thông báo nhỏ khi đang lọc */}
               {filterCharIds.length > 0 && (
                 <button
                   onClick={() => setFilterCharIds([])}
