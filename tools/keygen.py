@@ -45,12 +45,18 @@ def create_key(machine_id: str, days: int, note: str, private_key_path: str) -> 
         print("   Sinh key bằng: openssl genrsa -out private_key.pem 2048")
         sys.exit(1)
 
+    # Sanitize note — loại bỏ ký tự không phải UTF-8 hợp lệ
+    # (terminal đôi khi trả về surrogate khi gõ tiếng Việt)
+    safe_note = (note or "").encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+    # Tránh surrogate chars
+    safe_note = "".join(c for c in safe_note if not (0xD800 <= ord(c) <= 0xDFFF))
+
     payload = {
         "m": machine_id.strip(),
         "e": int(time.time()) + days * 86400,
-        "n": note.strip() or "",
+        "n": safe_note.strip(),
     }
-    payload_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    payload_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
 
     priv = serialization.load_pem_private_key(priv_path.read_bytes(), password=None)
     sig = priv.sign(payload_bytes, padding.PKCS1v15(), hashes.SHA256())
