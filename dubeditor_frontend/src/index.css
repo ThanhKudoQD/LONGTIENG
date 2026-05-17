@@ -52,6 +52,22 @@
   .panel-label {
     @apply text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-widest mb-2;
   }
+  /* v3.6.5: Hover hiệu ứng cho action buttons trong subtitle row.
+     Override inline style bằng filter (không override được bg/color) +
+     translateY + box-shadow. Áp cho tất cả nút trong Col 4 actions
+     và nút "Dịch lại". */
+  .sub-action-btn {
+    @apply transition-all duration-150;
+  }
+  .sub-action-btn:hover:not(:disabled) {
+    filter: brightness(1.12) saturate(1.15);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  }
+  .sub-action-btn:active:not(:disabled) {
+    transform: translateY(0) scale(0.96);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+  }
   .kbd {
     @apply inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono
            bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400

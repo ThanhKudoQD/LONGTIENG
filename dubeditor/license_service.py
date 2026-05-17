@@ -8,13 +8,21 @@ Cơ chế:
 - Verify chữ ký + bind machine + check expire
 
 File license lưu tại data/license.dat (plain text key).
+
+v3.7 (2026-05): get_machine_id() chuyển sang Hybrid stable ID
+- Primary: /etc/machine-id (Linux/WSL) hoặc registry MachineGuid (Windows native)
+- Fallback: persistent UUID lưu data/.machine_id
+- BỎ uuid.getnode() vì không ổn định trên WSL2 (MAC eth0 đổi theo session)
+- BỎ platform.processor() vì hay trả rỗng trên Linux
 """
 from __future__ import annotations
 import base64
 import hashlib
 import json
 import logging
+import os
 import platform
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -28,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 LICENSE_FILE = BASE_DIR / "data" / "license.dat"
+# v3.7: persistent fallback ID (chỉ dùng khi không đọc được system ID)
+MACHINE_ID_FALLBACK_FILE = BASE_DIR / "data" / ".machine_id"
 
 # Public key của admin — nhúng vào source code
 # (Admin giữ private key riêng để tạo license)
@@ -45,23 +55,122 @@ OQIDAQAB
 -----END PUBLIC KEY-----"""
 
 # ─────────────────────────────────────────────────────────────
-# MACHINE ID
+# MACHINE ID — v3.7 stable across reboots
 # ─────────────────────────────────────────────────────────────
 
-def get_machine_id() -> str:
-    """Sinh machine ID duy nhất từ hardware info.
+def _read_linux_machine_id() -> Optional[str]:
+    """Đọc /etc/machine-id (Linux native + WSL2).
 
-    Hash của: hostname + MAC + CPU architecture + CPU model
-    → 16-char hex ID, không đổi trên cùng 1 máy.
+    File này được systemd-machine-id-setup sinh ra LẦN ĐẦU khởi động OS,
+    sau đó immutable. Trên WSL2 distro Ubuntu, file này stable across reboots,
+    chỉ đổi khi `wsl --unregister` + reinstall distro.
+
+    Format: 32 hex chars. Fallback: /var/lib/dbus/machine-id (cùng nội dung).
     """
-    parts = [
-        platform.node() or "",                 # hostname
-        str(uuid.getnode()),                   # MAC address (int)
-        platform.machine() or "",              # x86_64 / arm64
-        platform.processor() or "",            # CPU model
-    ]
-    raw = "|".join(parts)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            val = Path(path).read_text(encoding="utf-8").strip()
+            if val and len(val) >= 16:
+                return val
+        except Exception:
+            continue
+    return None
+
+
+def _read_windows_machine_guid() -> Optional[str]:
+    """Đọc HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid (Windows native).
+
+    Stable across reboots, chỉ đổi khi cài lại Windows. Chỉ dùng khi app
+    chạy trên Windows native (không phải WSL).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # type: ignore
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Cryptography",
+            0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        )
+        try:
+            val, _ = winreg.QueryValueEx(key, "MachineGuid")
+            return str(val).strip() if val else None
+        finally:
+            winreg.CloseKey(key)
+    except Exception as e:
+        logger.debug(f"[license] read MachineGuid failed: {e}")
+        return None
+
+
+def _read_or_create_fallback_id() -> str:
+    """Sinh + lưu UUID4 lần đầu, đọc lại lần sau.
+
+    Dùng khi cả /etc/machine-id lẫn MachineGuid đều không đọc được
+    (rất hiếm — máy thiếu systemd / quyền registry).
+    """
+    try:
+        if MACHINE_ID_FALLBACK_FILE.exists():
+            val = MACHINE_ID_FALLBACK_FILE.read_text(encoding="utf-8").strip()
+            if val and len(val) >= 16:
+                return val
+    except Exception:
+        pass
+
+    # Tạo mới
+    new_id = uuid.uuid4().hex
+    try:
+        MACHINE_ID_FALLBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MACHINE_ID_FALLBACK_FILE.write_text(new_id, encoding="utf-8")
+        # Best-effort hide file trên Windows
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetFileAttributesW(str(MACHINE_ID_FALLBACK_FILE), 0x02)
+            except Exception:
+                pass
+        logger.info(f"[license] generated fallback machine_id: {new_id[:8]}...")
+    except Exception as e:
+        logger.error(f"[license] failed to save fallback machine_id: {e}")
+    return new_id
+
+
+def get_machine_id() -> str:
+    """Sinh machine ID stable across reboot.
+
+    Ưu tiên:
+    1. /etc/machine-id (Linux / WSL2) — ổn định nhất
+    2. Windows MachineGuid (Windows native, không phải WSL)
+    3. Fallback UUID4 lưu data/.machine_id (chỉ khi 2 trên fail)
+
+    Hash kết quả ra 16-char hex để giữ format cũ. Vì hash function ổn định
+    nên cùng input → cùng output, key cũ vẫn dùng được NẾU machine_id
+    nguồn không đổi.
+
+    Lưu ý migration: với user đã active key bằng machine_id CŨ
+    (hash của hostname+MAC+...), key đó SẼ KHÔNG khớp với machine_id mới.
+    User cần xin key mới sau khi update.
+    """
+    # 1. Linux / WSL
+    raw = _read_linux_machine_id()
+    source = "linux"
+
+    # 2. Windows native (chỉ khi không phải Linux)
+    if not raw and sys.platform == "win32":
+        raw = _read_windows_machine_guid()
+        source = "windows"
+
+    # 3. Fallback
+    if not raw:
+        raw = _read_or_create_fallback_id()
+        source = "fallback"
+
+    # Hash để giữ format 16-char hex (giống bản cũ) + che giấu raw ID
+    # Salt cố định để hash ổn định, không phải để bảo mật.
+    salt = "NANO_license_v3.7"
+    digest = hashlib.sha256(f"{salt}|{raw}".encode("utf-8")).hexdigest()[:16]
+    logger.debug(f"[license] machine_id={digest} (source={source})")
+    return digest
 
 
 # ─────────────────────────────────────────────────────────────

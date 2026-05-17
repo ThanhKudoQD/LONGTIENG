@@ -44,6 +44,7 @@ from dubeditor.models import (
 )
 from dubeditor.schemas import (
     TranslateStartRequest, TranslateStageRequest, RetranslateRequest,
+    RetranslateBatchRequest, RetranslateBatchResponse, RetranslateBatchLineOut,
     SelectVariantRequest,
     BibleOut, SceneOut, StoryArcOut, PolishIssueOut, ChunkOut,
     TranslateStatusOut,
@@ -964,15 +965,16 @@ async def retranslate_single(pid: int, req: RetranslateRequest,
         for c in bible.cast.characters[:10]
     )
 
-    # Context 3 dòng trước/sau
+    # Context N dòng trước/sau (v3.5: configurable, default 2, cap 5)
+    ctx_n = max(1, min(5, getattr(req, "context_window", 2) or 2))
     ctx_before = db.query(Subtitle).filter(
         Subtitle.project_id == pid,
         Subtitle.index < sub.index,
-    ).order_by(Subtitle.index.desc()).limit(3).all()
+    ).order_by(Subtitle.index.desc()).limit(ctx_n).all()
     ctx_after = db.query(Subtitle).filter(
         Subtitle.project_id == pid,
         Subtitle.index > sub.index,
-    ).order_by(Subtitle.index).limit(3).all()
+    ).order_by(Subtitle.index).limit(ctx_n).all()
 
     ctx_block = "\n".join([
         *[f"  [{s.index}] {s.speaker_zh or '?'} | {s.original_text or ''} → {s.text or ''}"
@@ -984,11 +986,19 @@ async def retranslate_single(pid: int, req: RetranslateRequest,
 
     duration = max(0.01, (sub.end_time or 0) - (sub.start_time or 0))
 
-    prompt = f"""Dịch lại 1 dòng phụ đề TQ→Việt cho lồng tiếng.
+    # v3.6: Inject Genre Pack đồng bộ Stage 4
+    from stages.stage4_translate import load_genre_pack, format_genre_pack_for_prompt
+    from config import default_config as _dft_cfg
+    _dummy_cfg = _dft_cfg()
+    genre_pack = load_genre_pack(bible.world.genre_id, _dummy_cfg)
+    genre_pack_str = format_genre_pack_for_prompt(genre_pack)
+
+    prompt = f"""Dịch lại 1 dòng phụ đề TQ→Việt cho lồng tiếng C-drama.
 
 ━━━ THÔNG TIN PHIM ━━━
 Thể loại: {', '.join(bible.world.genre)}
 Tone: {bible.world.tone}
+Era: {bible.world.era}
 
 ━━━ NHÂN VẬT CHÍNH ━━━
 {cast_brief}
@@ -1002,7 +1012,10 @@ QUAN HỆ:
 ━━━ GLOSSARY ━━━
 {gloss_block}
 
-━━━ MẠCH HỘI THOẠI ━━━
+━━━ GENRE PACK ━━━
+{genre_pack_str}
+
+━━━ MẠCH HỘI THOẠI (chỉ tham khảo, KHÔNG dịch) ━━━
 {ctx_block}
 
 ━━━ DÒNG CẦN DỊCH ━━━
@@ -1014,23 +1027,40 @@ Emotion: {sub.emotion or 'neutral'}, intensity: {sub.intensity or 5}
 ━━━ YÊU CẦU NGƯỜI DÙNG ━━━
 {req.hint or "Dịch lại tốt hơn, giữ cảm xúc"}
 
+━━━ NGUYÊN TẮC DỊCH ━━━
+
+1. ĐÚNG NGHĨA + HIỂU CỤM SUB:
+   - Phụ đề TQ thường bị cắt theo nhịp hơi thở, 1 câu dài có thể bị cắt 2-4 sub
+   - Cấu trúc TQ và VN NGƯỢC NHAU (TQ: bổ ngữ TRƯỚC danh từ; VN: bổ ngữ SAU)
+   - Đọc context trước/sau để hiểu trọn ý câu gốc, KHÔNG ép thành câu trọn riêng
+     nếu nó là mảnh của câu dài
+   - Nếu dòng này thuộc cụm, ĐỀ XUẤT user dùng "Dịch lại cả cụm" để chuẩn hơn
+
+2. TỰ NHIÊN — câu Việt mượt, không "mùi dịch"
+
+3. ĐÚNG TONE + NHÂN VẬT — xưng hô theo quan hệ + emotion + Genre Pack
+   CẤM TUYỆT ĐỐI:
+   ✗ "con-mẹ/bố" nếu KHÔNG có huyết thống trong quan hệ
+   ✗ "anh-em" cho 2 nữ (trừ chị em ruột → "chị-em")
+   ✗ "anh-em" cho 2 nam (dùng "tôi-cậu" / cổ trang "huynh-đệ")
+   ✗ Xưng hô cổ trang trong phim hiện đại (không "tại hạ", "thiếp")
+   ✗ "ngài" cho người thân (vợ chồng, anh chị em)
+
+4. ĐÚNG VĂN HÓA — thành ngữ TQ → tương đương VN, văn phong khớp era
+
+5. LỒNG TIẾNG: câu tròn, đủ chủ ngữ (cho TTS), KHÔNG cụt cộc 1-2 từ
+
 ━━━ NHIỆM VỤ ━━━
 Trả 2 BẢN DỊCH KHÁC NHAU:
 - text_v1: SÁT NGHĨA — dịch sát từng phần ý, giữ cấu trúc TQ, phù hợp subtitle
-- text_v2: THOÁT Ý — dịch theo cách người Việt nói tự nhiên trong tình huống đó, phù hợp lồng tiếng
-
-QUY TẮC:
-- Câu tròn, đủ chủ ngữ (cho TTS)
-- KHÔNG cụt cộc 1-2 từ
-- Đúng xưng hô theo quan hệ + emotion
-- Đúng glossary
+- text_v2: THOÁT Ý — dịch theo cách người Việt nói tự nhiên, phù hợp lồng tiếng
 
 OUTPUT JSON THUẦN:
 {{
   "text_v1": "...",
   "text_v2": "...",
-  "emotion": "neutral|happy|sad|...",
-  "intensity": 5
+  "emotion": "neutral|happy|sad|angry|cold|tense|intimate|fearful|sarcastic|shocked|determined|regretful|humorous|threatening",
+  "intensity": 1-10
 }}"""
 
     llm_req = LLMRequest(
@@ -1065,6 +1095,255 @@ OUTPUT JSON THUẦN:
         "tokens_in": resp.tokens_in,
         "tokens_out": resp.tokens_out,
     }
+
+
+# ─── v3.6: Retranslate BATCH (1-5 dòng) ──────────────────────────────────────
+
+@router.post("/projects/{pid}/translate/retranslate-batch",
+             response_model=RetranslateBatchResponse)
+async def retranslate_batch(pid: int, req: RetranslateBatchRequest,
+                             db: Session = Depends(get_db)):
+    """Dịch lại 1-5 dòng cùng lúc.
+
+    Dùng khi user muốn sửa cả cụm sub liền mạch (tránh 1 dòng đơn ra rác nghĩa).
+    Prompt đồng bộ Stage 4: cụm sub liền mạch + Genre Pack + CẤM xưng hô.
+    """
+    _get_project(db, pid)
+
+    # Validate ids
+    if not req.subtitle_ids:
+        raise HTTPException(400, "subtitle_ids rỗng")
+    if len(req.subtitle_ids) > 5:
+        raise HTTPException(400, "Tối đa 5 dòng/lần (cap để tránh prompt quá dài)")
+
+    subs = db.query(Subtitle).filter(
+        Subtitle.id.in_(req.subtitle_ids),
+        Subtitle.project_id == pid,
+    ).order_by(Subtitle.index).all()
+    if not subs:
+        raise HTTPException(404, "Không tìm thấy subtitle nào")
+
+    bible = load_active_bible_from_db(db, pid)
+    if not bible:
+        raise HTTPException(400, "Project chưa có Bible. Chạy Stage 1 trước.")
+
+    from core.llm_client import LLMRequest, call_llm, parse_json_response
+    from stages.stage4_translate import load_genre_pack, format_genre_pack_for_prompt
+    import httpx
+
+    # Genre Pack (đồng bộ Stage 4)
+    genre_pack = load_genre_pack(bible.world.genre_id, _build_dummy_config_for_genre_pack())
+    genre_pack_str = format_genre_pack_for_prompt(genre_pack)
+
+    # Bible compact
+    cast_brief = "\n".join(
+        f"- {c.vi} ({c.zh}): {c.g}, {c.role}, {c.char}"
+        for c in bible.cast.characters[:15]
+    )
+
+    # Relationships (giữa các speaker trong dòng cần dịch)
+    speakers_zh = set(s.speaker_zh for s in subs if s.speaker_zh)
+    rel_lines = []
+    seen_pairs = set()
+    for ch in bible.cast.characters:
+        if ch.zh not in speakers_zh:
+            continue
+        for other_zh, rel in (ch.rel or {}).items():
+            pair = tuple(sorted([ch.zh, other_zh]))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            other_ch = bible.cast.get_by_zh(other_zh)
+            other_vi = other_ch.vi if other_ch else other_zh
+            rel_lines.append(f"- {ch.vi} ↔ {other_vi}: {rel}")
+    rel_block = "\n".join(rel_lines) if rel_lines else "(Không có quan hệ rõ)"
+
+    # Glossary — gộp từ tất cả dòng cần dịch
+    all_text = " ".join(s.original_text or "" for s in subs)
+    relevant_terms = bible.glossary.find_in_text(all_text)
+    gloss_block = "\n".join(
+        f"- {t.zh} → \"{t.vi}\"" for t in relevant_terms
+    ) or "(Không có)"
+
+    # Context window (cap 5, default 2)
+    ctx_n = max(1, min(5, req.context_window or 2))
+    min_idx = min(s.index for s in subs)
+    max_idx = max(s.index for s in subs)
+
+    ctx_before_subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.index < min_idx,
+    ).order_by(Subtitle.index.desc()).limit(ctx_n).all()
+    ctx_after_subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid,
+        Subtitle.index > max_idx,
+    ).order_by(Subtitle.index).limit(ctx_n).all()
+
+    def _ctx_line(s):
+        vi = (s.text or '').replace('\n', ' ')
+        zh = (s.original_text or '').replace('\n', ' ')
+        return f"  [{s.index}] {s.speaker_zh or '?'} | {zh} → {vi}"
+
+    ctx_before_str = "\n".join(_ctx_line(s) for s in reversed(ctx_before_subs)) or "(không có)"
+    ctx_after_str = "\n".join(_ctx_line(s) for s in ctx_after_subs) or "(không có)"
+
+    # Lines cần dịch — format: [index] speaker_zh | text_zh | emotion | intensity
+    target_lines_str = "\n".join(
+        f"[{s.index}] {s.speaker_zh or '?'} | {s.original_text or ''} "
+        f"| {s.emotion or 'neutral'} | {s.intensity or 5}"
+        for s in subs
+    )
+
+    # Prompt — đồng bộ Stage 4 (cụm sub liền mạch + Genre Pack + CẤM xưng hô)
+    prompt = f"""Dịch lại {len(subs)} dòng phụ đề TQ→Việt cho lồng tiếng C-drama.
+
+━━━ THÔNG TIN PHIM ━━━
+Thể loại: {', '.join(bible.world.genre)}
+Tone: {bible.world.tone}
+Era: {bible.world.era}
+
+━━━ NHÂN VẬT ━━━
+{cast_brief}
+
+━━━ QUAN HỆ ━━━
+{rel_block}
+
+━━━ GLOSSARY ━━━
+{gloss_block}
+
+━━━ GENRE PACK ━━━
+{genre_pack_str}
+
+━━━ CONTEXT TRƯỚC (chỉ tham khảo, KHÔNG dịch) ━━━
+{ctx_before_str}
+
+━━━ DÒNG CẦN DỊCH LẠI ({len(subs)} dòng) ━━━
+Format: [line_index] speaker_zh | text_zh | emotion | intensity
+
+{target_lines_str}
+
+━━━ CONTEXT SAU (chỉ tham khảo, KHÔNG dịch) ━━━
+{ctx_after_str}
+
+━━━ NGUYÊN TẮC DỊCH ━━━
+
+1. ĐÚNG NGHĨA + HIỂU CỤM SUB:
+   - Phụ đề TQ cắt theo nhịp hơi thở, 1 câu dài thường bị cắt 2-4 sub liên tiếp
+   - Cấu trúc TQ và VN NGƯỢC NHAU (TQ: bổ ngữ TRƯỚC danh từ; VN: bổ ngữ SAU)
+   - Đọc CẢ CỤM, hiểu trọn ý, phân bổ chữ Việt giữa các sub cho mượt
+   - KHÔNG ép mỗi sub thành câu trọn riêng nếu nó là mảnh của 1 câu dài
+   Vd: "我要让你成为全世界 / 最幸福的女人"
+   ✅ "Anh muốn biến em thành / người phụ nữ hạnh phúc nhất trên thế gian này"
+   ❌ "Anh muốn em trở thành cả thế giới / hạnh phúc nhất"
+
+2. TỰ NHIÊN — câu Việt mượt, không "mùi dịch", đảo cấu trúc khi cần
+
+3. ĐÚNG TONE + NHÂN VẬT — xưng hô theo quan hệ + emotion + Genre Pack
+   CẤM TUYỆT ĐỐI:
+   ✗ "con-mẹ/bố" nếu KHÔNG có huyết thống trong quan hệ
+   ✗ "anh-em" cho 2 nữ (trừ chị em ruột → "chị-em")
+   ✗ "anh-em" cho 2 nam (dùng "tôi-cậu" / cổ trang "huynh-đệ")
+   ✗ Xưng hô cổ trang trong phim hiện đại (không "tại hạ", "thiếp")
+   ✗ "ngài" cho người thân (vợ chồng, anh chị em)
+
+4. ĐÚNG VĂN HÓA — thành ngữ TQ → tương đương VN, văn phong khớp era
+
+5. GIỮ SỐ DÒNG — output PHẢI có ĐÚNG {len(subs)} entry, mỗi line_index input
+   có đúng 1 entry. KHÔNG bỏ, KHÔNG gộp, KHÔNG tách. Được phân bổ chữ giữa
+   các sub liền kề cho mượt — text_v1 mỗi dòng KHÔNG được rỗng.
+
+━━━ YÊU CẦU NGƯỜI DÙNG ━━━
+{req.hint or "(không có yêu cầu đặc biệt — dịch tốt hơn bản hiện tại)"}
+
+━━━ NHIỆM VỤ ━━━
+Mỗi dòng trả 2 BẢN DỊCH KHÁC NHAU:
+- text_v1: SÁT NGHĨA — sát cấu trúc TQ, phù hợp subtitle
+- text_v2: THOÁT Ý — người Việt nói tự nhiên, phù hợp lồng tiếng (null nếu trùng v1)
+
+OUTPUT JSON THUẦN:
+{{
+  "translations": [
+    {{
+      "line_index": <index>,
+      "text_v1": "...",
+      "text_v2": "..." | null,
+      "emotion": "neutral|happy|sad|angry|cold|tense|intimate|fearful|sarcastic|shocked|determined|regretful|humorous|threatening",
+      "intensity": 1-10
+    }}
+  ]
+}}
+
+CHỈ TRẢ JSON, KHÔNG markdown fence."""
+
+    # Cap output theo số dòng (tránh model trả thiếu)
+    max_output = min(8000, 1000 + 800 * len(subs))
+
+    llm_req = LLMRequest(
+        prompt=prompt, model=req.model, api_key=req.api_key,
+        temperature=0.5, max_output=max_output, json_mode=True,
+        thinking=req.thinking,
+    )
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await call_llm(llm_req, client=client, stage_tag="retranslate_batch")
+    except Exception as e:
+        raise HTTPException(500, f"LLM call failed: {e}")
+
+    data = parse_json_response(resp.text, default={"translations": []})
+    translations = data.get("translations", []) or []
+
+    # Map line_index → result
+    result_by_idx = {}
+    for t in translations:
+        try:
+            line_idx = int(t.get("line_index", -1))
+            if line_idx < 1:
+                continue
+            result_by_idx[line_idx] = t
+        except (TypeError, ValueError):
+            continue
+
+    # Build response — đảm bảo đủ dòng (nếu AI bỏ sót → trả text_v1 = current)
+    out_lines: list[RetranslateBatchLineOut] = []
+    for s in subs:
+        t = result_by_idx.get(s.index, {})
+        text_v1_raw = (t.get("text_v1") or "").strip()
+        text_v2_raw = (t.get("text_v2") or "").strip() or None
+        # Đảm bảo v2 != v1
+        if text_v2_raw and text_v2_raw == text_v1_raw:
+            text_v2_raw = None
+
+        out_lines.append(RetranslateBatchLineOut(
+            line_index=s.index,
+            subtitle_id=s.id,
+            text_v1=text_v1_raw or (s.text_v1 or s.text or ""),
+            text_v2=text_v2_raw,
+            emotion=t.get("emotion") or s.emotion,
+            intensity=_safe_int(t.get("intensity"), s.intensity or 5),
+            current_text_v1=s.text_v1,
+            current_text_v2=s.text_v2,
+        ))
+
+    return RetranslateBatchResponse(
+        ok=True,
+        lines=out_lines,
+        tokens_in=resp.tokens_in or 0,
+        tokens_out=resp.tokens_out or 0,
+    )
+
+
+def _safe_int(v, default: int) -> int:
+    try:
+        return max(1, min(10, int(float(v))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_dummy_config_for_genre_pack():
+    """Build tối thiểu PipelineConfig chỉ để load_genre_pack đọc được prompts_dir."""
+    from config import default_config
+    return default_config()
 
 
 # ─── Chunks (v3 — 3 tầng arc/chunk/scene) ────────────────────────────────────

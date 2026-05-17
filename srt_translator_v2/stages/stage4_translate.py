@@ -336,12 +336,12 @@ async def process_one_chunk(
         req = LLMRequest(
             prompt=prompt,
             cached_prefix=cached_prefix,
-            model=config.models.heavy,
+            model=config.models.get_model_for("stage4"),
             api_key=config.api_key,
             temperature=0.4,
             max_output=16000,
             json_mode=True,
-            thinking=config.models.translate_thinking,
+            thinking=config.models.get_thinking_for("stage4"),
             max_retries=config.concurrency.retry_max,
         )
 

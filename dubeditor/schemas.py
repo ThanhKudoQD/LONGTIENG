@@ -245,12 +245,6 @@ class BulkSetSpeedRequest(BaseModel):
 class CharacterSetSpeedRequest(BaseModel):
     tts_speed:     float
     apply_to_subs: bool = True
-    # v3.4: nếu truyền → chỉ áp speed mới + reset override cho subs trong list này
-    # (frontend dùng để giới hạn trong đoạn đang lọc). Khi truyền subtitle_ids,
-    # tốc độ character (Character.tts_speed) sẽ KHÔNG bị thay đổi — chỉ override
-    # tốc độ riêng cho từng sub trong list. Không truyền → behavior cũ: đổi
-    # character.tts_speed + reset mọi override của character đó.
-    subtitle_ids:  Optional[list[int]] = None
 
 class TTSEnqueueRequest(BaseModel):
     subtitle_ids: list[int]
@@ -267,6 +261,7 @@ class TranslateConfig(BaseModel):
     """Cấu hình 1 lần chạy pipeline."""
     api_key:       str
     provider:      Literal["gemini", "openai", "deepseek"] = "gemini"
+    # ── Legacy tier (vẫn nhận để backward compat — frontend cũ vẫn dùng) ──
     model_heavy:   str = "gemini-2.5-pro"      # Bible, Translate
     model_medium:  str = "gemini-2.5-flash"    # Scene, Speaker
     model_light:   str = "gemini-2.5-flash"    # Retry
@@ -277,6 +272,26 @@ class TranslateConfig(BaseModel):
     medium_thinking:    Optional[bool] = None   # Stage 1B World, Stage 2, Stage 3
     light_thinking:     Optional[bool] = None   # Stage 0, Stage 5
     translate_thinking: Optional[bool] = None   # Stage 4 Translate (task chính)
+
+    # ── v3.5: Per-stage model + thinking ────────────────────────────────
+    # Frontend ConfigPanel mới gửi các field này, mỗi stage 1 model độc lập.
+    # Empty string / None → fallback về tier cũ (heavy/medium/light) tương ứng.
+    model_stage0:      Optional[str] = None    # Stage 0 Chuẩn hóa
+    model_stage1:      Optional[str] = None    # Stage 1 Bible (Cast+Glossary+World+Arcs)
+    model_stage2:      Optional[str] = None    # Stage 2 Chunks + Scenes
+    model_stage3:      Optional[str] = None    # Stage 3 Speaker
+    model_stage4:      Optional[str] = None    # Stage 4 Translate ⭐
+    model_stage5:      Optional[str] = None    # Stage 5 Retry
+    model_retranslate: Optional[str] = None    # Retranslate trong editor
+
+    thinking_stage0:      Optional[bool] = None
+    thinking_stage1:      Optional[bool] = None
+    thinking_stage2:      Optional[bool] = None
+    thinking_stage3:      Optional[bool] = None
+    thinking_stage4:      Optional[bool] = None
+    thinking_stage5:      Optional[bool] = None
+    thinking_retranslate: Optional[bool] = None
+
     project_type:  str = "short_drama"
     cps_max:       Optional[float] = None      # None = dùng preset của project_type
     concurrency:   int = 5
@@ -296,7 +311,7 @@ class TranslateConfig(BaseModel):
     speaker_context_window: int = 20           # Số dòng context trước/sau chunk (read-only)
     # v3.2: Stage 0 — chuẩn hóa phụ đề
     stage0_enabled: bool = True                # Bật/tắt Stage 0 normalize
-    stage0_model: Optional[str] = None         # Model cho Stage 0 (None = dùng model_light)
+    stage0_model: Optional[str] = None         # (legacy) Model cho Stage 0 — nhường chỗ cho model_stage0
     stage0_context_window: int = 10            # Số dòng context xung quanh cluster (mỗi bên)
 
 
@@ -311,7 +326,7 @@ class TranslateStageRequest(TranslateConfig):
 
 
 class RetranslateRequest(BaseModel):
-    """Dịch lại 1 dòng cụ thể, trả 2 bản v1+v2."""
+    """Dịch lại 1 dòng cụ thể, trả 2 bản v1+v2. (Legacy — vẫn giữ.)"""
     subtitle_id:   int
     hint:          str = ""
     api_key:       str
@@ -321,6 +336,44 @@ class RetranslateRequest(BaseModel):
     return_variants: bool = True
     # v3.3: toggle thinking (None=default model / False=tắt nhanh+rẻ / True=bật chất lượng)
     thinking:      Optional[bool] = False
+    # v3.5: số dòng context trước/sau gửi cho AI (default 2, cap 5)
+    context_window: int = 2
+
+
+# ─── v3.6: Retranslate BATCH — dịch lại 1-5 dòng cùng lúc ────────────────────
+class RetranslateBatchRequest(BaseModel):
+    """Dịch lại nhiều dòng cùng lúc (1-5).
+
+    Dùng khi cụm sub liền mạch — VD cụm 3 sub cùng 1 câu TQ bị cắt nhỏ,
+    sửa 1 dòng đơn lẻ thường ra rác nghĩa nên cho user chọn cả cụm.
+    """
+    subtitle_ids:  list[int]                     # 1-5 dòng — frontend cap
+    hint:          str = ""
+    api_key:       str
+    provider:      Literal["gemini", "openai", "deepseek"] = "gemini"
+    model:         str = "gemini-2.5-flash"
+    thinking:      Optional[bool] = False
+    # Số dòng context trước/sau (1-5, default 2). Tổng = N+context*2.
+    context_window: int = 2
+
+
+class RetranslateBatchLineOut(BaseModel):
+    """1 dòng trong response của batch retranslate."""
+    line_index:    int      # subtitle.index (không phải subtitle.id)
+    subtitle_id:   int
+    text_v1:       str
+    text_v2:       Optional[str] = None
+    emotion:       Optional[str] = None
+    intensity:     Optional[int] = None
+    current_text_v1: Optional[str] = None
+    current_text_v2: Optional[str] = None
+
+
+class RetranslateBatchResponse(BaseModel):
+    ok:            bool
+    lines:         list[RetranslateBatchLineOut]
+    tokens_in:     int = 0
+    tokens_out:    int = 0
 
 
 class SelectVariantRequest(BaseModel):

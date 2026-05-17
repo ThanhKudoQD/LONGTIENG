@@ -39,7 +39,7 @@ const MODELS: Record<'gemini' | 'openai' | 'deepseek', ModelOption[]> = {
   gemini: [
     { id: 'gemini-3.1-pro',          label: 'Gemini 3.1 Pro (mới nhất)',     priceIn: 2.00, priceOut: 12.00, desc: 'Mạnh nhất, hiểu context dài', tier: 'top' },
     { id: 'gemini-3.1-flash-lite',   label: 'Gemini 3.1 Flash-Lite',         priceIn: 0.50, priceOut: 3.00,  desc: 'Nhanh + thông minh',          tier: 'balanced' },
-    { id: 'gemini-2.5-pro',          label: 'Gemini 2.5 Pro',                priceIn: 1.25, priceOut: 10.00, desc: 'Cân bằng — khuyến nghị Heavy',tier: 'top' },
+    { id: 'gemini-2.5-pro',          label: 'Gemini 2.5 Pro',                priceIn: 1.25, priceOut: 10.00, desc: 'Cân bằng — khuyến nghị task khó',tier: 'top' },
     { id: 'gemini-2.5-flash',        label: 'Gemini 2.5 Flash',              priceIn: 0.30, priceOut: 2.50,  desc: 'Nhanh, rẻ',                   tier: 'balanced' },
     { id: 'gemini-2.5-flash-lite',   label: 'Gemini 2.5 Flash-Lite',         priceIn: 0.10, priceOut: 0.40,  desc: 'Rẻ nhất của Gemini',          tier: 'fast' },
   ],
@@ -60,46 +60,90 @@ const MODELS: Record<'gemini' | 'openai' | 'deepseek', ModelOption[]> = {
   ],
 }
 
-// ─── Preset profile ──────────────────────────────────────────────────────────
+// ─── Stage definitions (v3.5 — gộp theo Stage thay vì tier) ──────────────────
+// Mỗi entry = 1 card trong UI. UI render 1 ModelSelector per stage độc lập.
 
-interface Preset {
-  id: string
-  label: string
-  desc: string
-  models: {
-    gemini: [string, string, string]
-    openai: [string, string, string]
-    deepseek: [string, string, string]
+interface StageDef {
+  key: 'stage0' | 'stage1' | 'stage2' | 'stage3' | 'stage4' | 'stage5' | 'retranslate'
+  title: string             // Tiêu đề lớn — STAGE 1, STAGE 2…
+  desc: string              // Mô tả ngắn nhiệm vụ của stage
+  badgeColor: string        // Tailwind class cho badge
+  isMain?: boolean          // Đánh dấu Stage 4 — Task chính
+  defaultModel: {           // Default model khi provider thay đổi
+    gemini: string; openai: string; deepseek: string
   }
+  defaultThinking: boolean
+  thinkingHint: string
+  allowEmpty?: boolean
+  emptyLabel?: string
 }
 
-const PRESETS: Preset[] = [
+const STAGES: StageDef[] = [
   {
-    id: 'budget', label: '💸 Tiết kiệm',
-    desc: 'Tất cả model rẻ. Giảm 80% chi phí, chất lượng hơi giảm',
-    models: {
-      gemini:   ['gemini-2.5-flash',     'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
-      openai:   ['gpt-5-mini',           'gpt-5-nano',            'gpt-5-nano'],
-      deepseek: ['deepseek-v4-flash',    'deepseek-v4-flash',     'deepseek-v4-flash'],
-    },
+    key: 'stage0',
+    title: 'STAGE 0 · Chuẩn hóa phụ đề',
+    desc: 'AI quét phụ đề, dọn watermark/filler/dòng nhiễu trước khi dịch.',
+    badgeColor: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
+    defaultModel: { gemini: 'gemini-2.5-flash-lite', openai: 'gpt-5-nano', deepseek: 'deepseek-v4-flash' },
+    defaultThinking: false,
+    thinkingHint: 'Task đơn giản — tắt là đủ',
+    allowEmpty: true,
+    emptyLabel: '↪ Dùng model rẻ nhất (mặc định)',
   },
   {
-    id: 'balanced', label: '⚖ Cân bằng (khuyến nghị)',
-    desc: 'Pro cho Bible+Dịch, Flash-Lite cho Scene/Speaker/Retry',
-    models: {
-      gemini:   ['gemini-2.5-pro',       'gemini-2.5-flash-lite', 'gemini-2.5-flash-lite'],
-      openai:   ['gpt-5',                'gpt-5-mini',            'gpt-5-nano'],
-      deepseek: ['deepseek-v4-pro',      'deepseek-v4-flash',     'deepseek-v4-flash'],
-    },
+    key: 'stage1',
+    title: 'STAGE 1 · Bible',
+    desc: 'Trích nhân vật + thuật ngữ + bối cảnh + story arcs. Gộp 1A Cast+Glossary và 1B World+Arcs.',
+    badgeColor: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+    defaultModel: { gemini: 'gemini-2.5-pro', openai: 'gpt-5', deepseek: 'deepseek-v4-pro' },
+    defaultThinking: true,
+    thinkingHint: 'Trích nhân vật + Hán Việt — bật thinking giúp Bible chuẩn hơn',
   },
   {
-    id: 'quality', label: '💎 Chất lượng cao',
-    desc: 'Pro cho cả 3 tier — đắt nhất, chất lượng tốt nhất',
-    models: {
-      gemini:   ['gemini-2.5-pro',       'gemini-2.5-pro',        'gemini-2.5-flash'],
-      openai:   ['gpt-5',                'gpt-5',                 'gpt-5-mini'],
-      deepseek: ['deepseek-v4-pro',      'deepseek-v4-pro',       'deepseek-v4-flash'],
-    },
+    key: 'stage2',
+    title: 'STAGE 2 · Chunks + Scenes',
+    desc: 'Chia phim thành chunks (~300 dòng) và scenes con. 1 call/arc.',
+    badgeColor: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+    defaultModel: { gemini: 'gemini-2.5-flash', openai: 'gpt-5-mini', deepseek: 'deepseek-v4-flash' },
+    defaultThinking: false,
+    thinkingHint: 'Extract structure đơn giản — tắt là đủ',
+  },
+  {
+    key: 'stage3',
+    title: 'STAGE 3 · Speaker',
+    desc: 'Đoán ai nói câu nào dựa trên thoại + quan hệ + cảnh.',
+    badgeColor: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/40 dark:text-cyan-300',
+    defaultModel: { gemini: 'gemini-2.5-flash', openai: 'gpt-5-mini', deepseek: 'deepseek-v4-flash' },
+    defaultThinking: false,
+    thinkingHint: 'Gán speaker — tắt là đủ',
+  },
+  {
+    key: 'stage4',
+    title: 'STAGE 4 · Translate ⭐',
+    desc: 'Dịch theo chunk với 2 bản v1/v2. ĐÂY LÀ TASK CHÍNH — chất lượng dịch phụ thuộc vào stage này.',
+    badgeColor: 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300',
+    isMain: true,
+    defaultModel: { gemini: 'gemini-2.5-pro', openai: 'gpt-5', deepseek: 'deepseek-v4-pro' },
+    defaultThinking: true,
+    thinkingHint: '⭐ TASK CHÍNH — bật để dịch chất lượng cao hơn (recommended)',
+  },
+  {
+    key: 'stage5',
+    title: 'STAGE 5 · Retry',
+    desc: 'Retry các dòng còn tiếng Trung / rỗng. Chạy sau Stage 4.',
+    badgeColor: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+    defaultModel: { gemini: 'gemini-2.5-flash-lite', openai: 'gpt-5-nano', deepseek: 'deepseek-v4-flash' },
+    defaultThinking: false,
+    thinkingHint: 'Retry đơn giản — tắt là đủ',
+  },
+  {
+    key: 'retranslate',
+    title: 'DỊCH LẠI (trong Editor)',
+    desc: 'Khi user bấm "Dịch lại" cho 1 dòng cụ thể trong editor.',
+    badgeColor: 'bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/40 dark:text-fuchsia-300',
+    defaultModel: { gemini: 'gemini-2.5-pro', openai: 'gpt-5', deepseek: 'deepseek-v4-pro' },
+    defaultThinking: false,
+    thinkingHint: 'Bật nếu muốn chất lượng cao hơn cho lần dịch lại',
   },
 ]
 
@@ -110,14 +154,29 @@ interface StoredConfig {
     deepseek: string
   }
   provider: 'gemini' | 'openai' | 'deepseek'
+  // ── Legacy tier (giữ để backward compat khi backend chưa cập nhật) ─
   model_heavy: string
   model_medium: string
   model_light: string
-  // v3.3: thinking toggles per stage
   heavy_thinking: boolean
   medium_thinking: boolean
   light_thinking: boolean
   translate_thinking: boolean
+  // ── v3.5: per-stage model + thinking (UI mới) ───────────────────────
+  model_stage0: string
+  model_stage1: string
+  model_stage2: string
+  model_stage3: string
+  model_stage4: string
+  model_stage5: string
+  model_retranslate: string
+  thinking_stage0: boolean
+  thinking_stage1: boolean
+  thinking_stage2: boolean
+  thinking_stage3: boolean
+  thinking_stage4: boolean
+  thinking_stage5: boolean
+  thinking_retranslate: boolean
   concurrency: number
   variant_mode: VariantMode
   chunk_overlap: number
@@ -126,8 +185,10 @@ interface StoredConfig {
   speaker_parallel: boolean
   speaker_context_window: number
   stage0_enabled: boolean
-  stage0_model: string                  // "" = dùng model_light
+  stage0_model: string                  // (legacy) deprecated — nhường chỗ cho model_stage0
   stage0_context_window: number
+  // v3.6: số dòng context trước/sau gửi cho AI khi retranslate (1-5, default 2)
+  retranslate_context_window: number
 }
 
 function loadStored(): StoredConfig {
@@ -144,6 +205,28 @@ function loadStored(): StoredConfig {
         }
         delete parsed.api_key
       }
+      // v3.5 migration: nếu chưa có model_stage1 → migrate từ tier cũ
+      //   stage1, stage4, retranslate ← heavy
+      //   stage2, stage3              ← medium
+      //   stage0, stage5              ← light
+      if (parsed.model_heavy && !parsed.model_stage1) {
+        parsed.model_stage1      = parsed.model_heavy
+        parsed.model_stage4      = parsed.model_heavy
+        parsed.model_retranslate = parsed.model_heavy
+        parsed.model_stage2      = parsed.model_medium || parsed.model_heavy
+        parsed.model_stage3      = parsed.model_medium || parsed.model_heavy
+        parsed.model_stage0      = parsed.stage0_model || parsed.model_light || ''
+        parsed.model_stage5      = parsed.model_light || parsed.model_medium || ''
+      }
+      if (typeof parsed.heavy_thinking === 'boolean' && parsed.thinking_stage1 === undefined) {
+        parsed.thinking_stage1      = parsed.heavy_thinking
+        parsed.thinking_stage4      = parsed.translate_thinking ?? parsed.heavy_thinking
+        parsed.thinking_retranslate = false
+        parsed.thinking_stage2      = parsed.medium_thinking ?? false
+        parsed.thinking_stage3      = parsed.medium_thinking ?? false
+        parsed.thinking_stage0      = parsed.light_thinking ?? false
+        parsed.thinking_stage5      = parsed.light_thinking ?? false
+      }
       return { ...defaultStored(), ...parsed }
     }
   } catch {}
@@ -151,17 +234,36 @@ function loadStored(): StoredConfig {
 }
 
 function defaultStored(): StoredConfig {
+  // Mặc định lấy từ STAGES.defaultModel để consistent
+  const get = (key: StageDef['key'], provider: 'gemini' | 'openai' | 'deepseek') => {
+    const st = STAGES.find(s => s.key === key)
+    return st ? st.defaultModel[provider] : ''
+  }
   return {
     api_keys: { gemini: '', openai: '', deepseek: '' },
     provider: 'gemini',
     model_heavy: 'gemini-2.5-pro',
     model_medium: 'gemini-2.5-flash',
     model_light: 'gemini-2.5-flash',
-    // v3.3: thinking defaults — heavy & translate bật (task khó), medium/light tắt (parse JSON đơn giản)
     heavy_thinking: true,
     medium_thinking: false,
     light_thinking: false,
     translate_thinking: true,
+    // v3.5: per-stage defaults
+    model_stage0:      get('stage0', 'gemini'),
+    model_stage1:      get('stage1', 'gemini'),
+    model_stage2:      get('stage2', 'gemini'),
+    model_stage3:      get('stage3', 'gemini'),
+    model_stage4:      get('stage4', 'gemini'),
+    model_stage5:      get('stage5', 'gemini'),
+    model_retranslate: get('retranslate', 'gemini'),
+    thinking_stage0:      STAGES.find(s => s.key === 'stage0')!.defaultThinking,
+    thinking_stage1:      STAGES.find(s => s.key === 'stage1')!.defaultThinking,
+    thinking_stage2:      STAGES.find(s => s.key === 'stage2')!.defaultThinking,
+    thinking_stage3:      STAGES.find(s => s.key === 'stage3')!.defaultThinking,
+    thinking_stage4:      STAGES.find(s => s.key === 'stage4')!.defaultThinking,
+    thinking_stage5:      STAGES.find(s => s.key === 'stage5')!.defaultThinking,
+    thinking_retranslate: STAGES.find(s => s.key === 'retranslate')!.defaultThinking,
     concurrency: 5,
     variant_mode: 'important_only',
     chunk_overlap: 30,
@@ -170,8 +272,9 @@ function defaultStored(): StoredConfig {
     speaker_parallel: true,
     speaker_context_window: 20,
     stage0_enabled: true,
-    stage0_model: '',                   // empty = dùng model_light
+    stage0_model: '',                   // deprecated
     stage0_context_window: 2,
+    retranslate_context_window: 2,
   }
 }
 
@@ -189,14 +292,39 @@ export default function ConfigPanel({
   const [provider, setProvider] = useState(stored.provider)
   const [apiKeys, setApiKeys] = useState<{gemini: string; openai: string; deepseek: string}>(stored.api_keys)
   const [showKey, setShowKey] = useState(false)
+  // Legacy tier state — vẫn lưu để gửi xuống backend backward compat
   const [modelHeavy, setModelHeavy] = useState(stored.model_heavy)
   const [modelMedium, setModelMedium] = useState(stored.model_medium)
   const [modelLight, setModelLight] = useState(stored.model_light)
-  // v3.3: thinking flags
   const [heavyThinking, setHeavyThinking] = useState(stored.heavy_thinking)
   const [mediumThinking, setMediumThinking] = useState(stored.medium_thinking)
   const [lightThinking, setLightThinking] = useState(stored.light_thinking)
   const [translateThinking, setTranslateThinking] = useState(stored.translate_thinking)
+
+  // ── v3.5: per-stage state ──────────────────────────────────────────
+  const [stageModels, setStageModels] = useState<Record<StageDef['key'], string>>({
+    stage0:      stored.model_stage0,
+    stage1:      stored.model_stage1,
+    stage2:      stored.model_stage2,
+    stage3:      stored.model_stage3,
+    stage4:      stored.model_stage4,
+    stage5:      stored.model_stage5,
+    retranslate: stored.model_retranslate,
+  })
+  const [stageThinking, setStageThinking] = useState<Record<StageDef['key'], boolean>>({
+    stage0:      stored.thinking_stage0,
+    stage1:      stored.thinking_stage1,
+    stage2:      stored.thinking_stage2,
+    stage3:      stored.thinking_stage3,
+    stage4:      stored.thinking_stage4,
+    stage5:      stored.thinking_stage5,
+    retranslate: stored.thinking_retranslate,
+  })
+  const setStageModel = (key: StageDef['key'], v: string) =>
+    setStageModels(prev => ({ ...prev, [key]: v }))
+  const setStageThinkingFor = (key: StageDef['key'], v: boolean) =>
+    setStageThinking(prev => ({ ...prev, [key]: v }))
+
   const [concurrency, setConcurrency] = useState(stored.concurrency)
 
   const [projectType, setProjectType] = useState<'short_drama' | 'drama_series' | 'movie'>(
@@ -214,6 +342,8 @@ export default function ConfigPanel({
   const [stage0Enabled, setStage0Enabled] = useState<boolean>(stored.stage0_enabled)
   const [stage0Model, setStage0Model] = useState<string>(stored.stage0_model)
   const [stage0ContextWindow, setStage0ContextWindow] = useState<number>(stored.stage0_context_window)
+  // v3.6: số dòng context cho retranslate (1-5, default 2)
+  const [retranslateContextWindow, setRetranslateContextWindow] = useState<number>(stored.retranslate_context_window)
 
   // Save state — báo "đã lưu" sau khi user bấm
   const [savedTick, setSavedTick] = useState(0)
@@ -233,6 +363,21 @@ export default function ConfigPanel({
       medium_thinking: mediumThinking,
       light_thinking: lightThinking,
       translate_thinking: translateThinking,
+      // v3.5
+      model_stage0:      stageModels.stage0,
+      model_stage1:      stageModels.stage1,
+      model_stage2:      stageModels.stage2,
+      model_stage3:      stageModels.stage3,
+      model_stage4:      stageModels.stage4,
+      model_stage5:      stageModels.stage5,
+      model_retranslate: stageModels.retranslate,
+      thinking_stage0:      stageThinking.stage0,
+      thinking_stage1:      stageThinking.stage1,
+      thinking_stage2:      stageThinking.stage2,
+      thinking_stage3:      stageThinking.stage3,
+      thinking_stage4:      stageThinking.stage4,
+      thinking_stage5:      stageThinking.stage5,
+      thinking_retranslate: stageThinking.retranslate,
       concurrency,
       variant_mode: variantMode,
       chunk_overlap: chunkOverlap,
@@ -243,6 +388,7 @@ export default function ConfigPanel({
       stage0_enabled: stage0Enabled,
       stage0_model: stage0Model,
       stage0_context_window: stage0ContextWindow,
+      retranslate_context_window: retranslateContextWindow,
     }
   }
 
@@ -254,8 +400,10 @@ export default function ConfigPanel({
     return () => clearTimeout(handle)
   }, [apiKeys, provider, modelHeavy, modelMedium, modelLight, concurrency,
       heavyThinking, mediumThinking, lightThinking, translateThinking,
+      stageModels, stageThinking,
       variantMode, chunkOverlap, cacheEnabled, chunksParallel, speakerParallel,
-      speakerContextWindow, stage0Enabled, stage0Model, stage0ContextWindow])
+      speakerContextWindow, stage0Enabled, stage0Model, stage0ContextWindow,
+      retranslateContextWindow])
 
   // Manual save — báo cho user biết
   function handleSave() {
@@ -282,6 +430,23 @@ export default function ConfigPanel({
       if (!modelLight.startsWith('deepseek')) setModelLight('deepseek-v4-flash')
       if (stage0Model && !stage0Model.startsWith('deepseek')) setStage0Model('')
     }
+    // v3.5: per-stage cũng switch theo provider mới
+    const prefix = provider === 'gemini' ? 'gemini' : provider === 'openai' ? 'gpt' : 'deepseek'
+    setStageModels(prev => {
+      const next = { ...prev }
+      for (const st of STAGES) {
+        const cur = prev[st.key] || ''
+        if (cur && !cur.startsWith(prefix)) {
+          // Rỗng được phép với stage0 (allowEmpty) → giữ rỗng
+          next[st.key] = st.allowEmpty && !cur ? '' : st.defaultModel[provider]
+        }
+        // Nếu trống và không allowEmpty → set default
+        if (!cur && !st.allowEmpty) {
+          next[st.key] = st.defaultModel[provider]
+        }
+      }
+      return next
+    })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider])
 
@@ -289,6 +454,7 @@ export default function ConfigPanel({
     return {
       api_key: apiKey.trim(),
       provider,
+      // Legacy tier (backend backward compat)
       model_heavy: modelHeavy.trim(),
       model_medium: modelMedium.trim(),
       model_light: modelLight.trim(),
@@ -296,6 +462,21 @@ export default function ConfigPanel({
       medium_thinking: mediumThinking,
       light_thinking: lightThinking,
       translate_thinking: translateThinking,
+      // v3.5: per-stage
+      model_stage0:      stageModels.stage0.trim() || null,
+      model_stage1:      stageModels.stage1.trim() || null,
+      model_stage2:      stageModels.stage2.trim() || null,
+      model_stage3:      stageModels.stage3.trim() || null,
+      model_stage4:      stageModels.stage4.trim() || null,
+      model_stage5:      stageModels.stage5.trim() || null,
+      model_retranslate: stageModels.retranslate.trim() || null,
+      thinking_stage0:      stageThinking.stage0,
+      thinking_stage1:      stageThinking.stage1,
+      thinking_stage2:      stageThinking.stage2,
+      thinking_stage3:      stageThinking.stage3,
+      thinking_stage4:      stageThinking.stage4,
+      thinking_stage5:      stageThinking.stage5,
+      thinking_retranslate: stageThinking.retranslate,
       project_type: projectType,
       cps_max: cpsMax ? parseFloat(cpsMax) : null,
       concurrency,
@@ -411,62 +592,44 @@ export default function ConfigPanel({
             </div>
           </section>
 
-          {/* Models */}
+          {/* Models — v3.5: gom theo từng Stage, mỗi stage 1 model độc lập */}
           <section>
-            <SectionLabel>2. Models — chọn cho từng giai đoạn</SectionLabel>
-
-            <div className="mb-3">
-              <div className="text-[11px] text-zinc-500 mb-1.5">Preset nhanh:</div>
-              <div className="grid grid-cols-3 gap-2">
-                {PRESETS.map(p => {
-                  const tuple = p.models[provider]
-                  const isActive = modelHeavy === tuple[0] &&
-                                   modelMedium === tuple[1] &&
-                                   modelLight === tuple[2]
-                  return (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => {
-                        setModelHeavy(tuple[0])
-                        setModelMedium(tuple[1])
-                        setModelLight(tuple[2])
-                      }}
-                      className={`px-3 py-2 rounded-lg border text-left transition-all ${
-                        isActive
-                          ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30'
-                          : 'border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800'
-                      }`}
-                    >
-                      <div className="text-[12px] font-medium text-zinc-800 dark:text-zinc-100">{p.label}</div>
-                      <div className="text-[10px] text-zinc-500 mt-0.5 leading-snug">{p.desc}</div>
-                    </button>
-                  )
-                })}
-              </div>
+            <SectionLabel>2. Models — chọn cho từng Stage</SectionLabel>
+            <div className="text-[11px] text-zinc-500 mb-3 leading-snug">
+              Mỗi Stage chọn model độc lập. Stage 4 Translate là task chính,
+              các stage khác có thể dùng model rẻ hơn để tiết kiệm chi phí.
             </div>
-
-            <div className="text-[11px] text-zinc-500 mb-1.5">Hoặc chỉnh tay:</div>
-            <div className="space-y-2">
-              <ModelSelector tier="Heavy" stages="Stage 1A Bible Cast+Glossary"
-                provider={provider} value={modelHeavy} onChange={setModelHeavy}
-                thinking={heavyThinking} onThinkingChange={setHeavyThinking}
-                thinkingHint="Trích nhân vật + Hán Việt — bật thinking giúp Bible chuẩn hơn" />
-              <ModelSelector tier="Translate" stages="Stage 4 Translate (dùng model Heavy)"
-                provider={provider} value={modelHeavy} onChange={setModelHeavy}
-                thinking={translateThinking} onThinkingChange={setTranslateThinking}
-                thinkingHint="⭐ TASK CHÍNH — bật để dịch chất lượng cao hơn (recommended)" />
-              <ModelSelector tier="Medium" stages="Stage 1B World · Stage 2 Chunks · Stage 3 Speaker"
-                provider={provider} value={modelMedium} onChange={setModelMedium}
-                thinking={mediumThinking} onThinkingChange={setMediumThinking}
-                thinkingHint="Extract structure — tắt là đủ" />
-              <ModelSelector tier="Light" stages="Stage 5 Retry dòng thiếu"
-                provider={provider} value={modelLight} onChange={setModelLight}
-                thinking={lightThinking} onThinkingChange={setLightThinking}
-                thinkingHint="Retry đơn giản — tắt là đủ" />
-              <ModelSelector tier="Stage 0" stages="Chuẩn hóa phụ đề (phân tích noise)"
-                provider={provider} value={stage0Model} onChange={setStage0Model}
-                allowEmpty emptyLabel={`↪ Dùng Light (${modelLight || 'mặc định'})`} />
+            <div className="space-y-2.5">
+              {STAGES.map(st => (
+                <StageModelCard
+                  key={st.key}
+                  stage={st}
+                  provider={provider}
+                  value={stageModels[st.key]}
+                  onChange={v => setStageModel(st.key, v)}
+                  thinking={stageThinking[st.key]}
+                  onThinkingChange={v => setStageThinkingFor(st.key, v)}
+                  extra={st.key === 'retranslate' ? (
+                    <div className="flex items-center gap-3">
+                      <label className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
+                        Số dòng context trước/sau:
+                      </label>
+                      <select
+                        value={retranslateContextWindow}
+                        onChange={e => setRetranslateContextWindow(parseInt(e.target.value))}
+                        className="input text-[12px] py-0.5 px-2"
+                      >
+                        {[1, 2, 3, 4, 5].map(n => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
+                      <span className="text-[10px] text-zinc-500 leading-snug flex-1">
+                        Tổng {retranslateContextWindow * 2 + 1} dòng gửi cho AI (mặc định 2)
+                      </span>
+                    </div>
+                  ) : undefined}
+                />
+              ))}
             </div>
           </section>
 
@@ -764,6 +927,138 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   )
 }
 
+// ─── StageModelCard — UI v3.5 ─────────────────────────────────────────────
+// 1 card per Stage. Title TO + ĐẬM ở trên, mô tả nhỏ ở dưới, dropdown rộng,
+// thinking toggle. Card Stage 4 có viền nổi bật vì là task chính.
+
+function StageModelCard({
+  stage, provider, value, onChange, thinking, onThinkingChange, extra,
+}: {
+  stage: StageDef
+  provider: 'gemini' | 'openai' | 'deepseek'
+  value: string
+  onChange: (v: string) => void
+  thinking: boolean
+  onThinkingChange: (v: boolean) => void
+  /** v3.6: nội dung bổ sung hiển thị cuối card (vd retranslate context_window) */
+  extra?: React.ReactNode
+}) {
+  const options = MODELS[provider] || []
+  const known = options.find(m => m.id === value)
+  const [customMode, setCustomMode] = React.useState(!known && !!value)
+
+  React.useEffect(() => {
+    if (options.find(m => m.id === value)) setCustomMode(false)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, provider])
+
+  // Thinking chỉ hỗ trợ Gemini 2.5+/3.x hoặc GPT-5/o-series
+  const thinkingSupported =
+    value.startsWith('gemini-2.5') ||
+    value.startsWith('gemini-3') ||
+    value.startsWith('o1') || value.startsWith('o3') || value.startsWith('o4') ||
+    value.startsWith('gpt-5')
+
+  // Card viền nổi bật cho Stage 4 (task chính)
+  const containerClass = stage.isMain
+    ? 'border-2 border-rose-300 dark:border-rose-700 rounded-xl p-3 bg-rose-50/50 dark:bg-rose-950/20 shadow-sm'
+    : 'border border-zinc-200 dark:border-zinc-700 rounded-xl p-3 bg-white dark:bg-zinc-900/40'
+
+  return (
+    <div className={containerClass}>
+      {/* Header: badge + title to + desc */}
+      <div className="flex items-start gap-2 mb-2">
+        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide whitespace-nowrap mt-0.5 ${stage.badgeColor}`}>
+          {stage.key === 'retranslate' ? 'Editor' : stage.key.replace('stage', 'S')}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className={`text-[14px] font-bold text-zinc-900 dark:text-zinc-100 leading-tight ${stage.isMain ? 'text-rose-700 dark:text-rose-300' : ''}`}>
+            {stage.title}
+          </div>
+          <div className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-snug mt-0.5">
+            {stage.desc}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setCustomMode(c => !c)}
+          className="text-[10px] text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 underline whitespace-nowrap"
+        >
+          {customMode ? '← Dropdown' : '✎ Gõ tay'}
+        </button>
+      </div>
+
+      {/* Model selector */}
+      {customMode ? (
+        <input
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={stage.allowEmpty ? "(trống = dùng mặc định)" : "Tên model (vd: gemini-2.5-pro)"}
+          className="input w-full text-[12px] font-mono"
+        />
+      ) : (
+        <>
+          <select
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            className="input w-full text-[12px]"
+          >
+            {stage.allowEmpty && (
+              <option value="">{stage.emptyLabel || '↪ Dùng mặc định'}</option>
+            )}
+            {options.map(m => (
+              <option key={m.id} value={m.id}>
+                {m.label}  ·  ${m.priceIn}/${m.priceOut} per 1M
+              </option>
+            ))}
+          </select>
+          {known && (
+            <div className="text-[10px] text-zinc-500 mt-1 leading-snug">
+              {known.desc}
+            </div>
+          )}
+          {!known && !value && stage.allowEmpty && (
+            <div className="text-[10px] text-zinc-500 mt-1 leading-snug">
+              Đang dùng model mặc định. Tiết kiệm, đủ cho task này.
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Thinking toggle */}
+      <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-700 flex items-center gap-2">
+        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={thinking}
+            onChange={e => onThinkingChange(e.target.checked)}
+            disabled={!thinkingSupported}
+            className="w-3.5 h-3.5"
+          />
+          <span className={`text-[11px] font-medium ${
+            thinkingSupported ? 'text-zinc-700 dark:text-zinc-300' : 'text-zinc-400'
+          }`}>
+            🧠 Thinking {thinking ? 'BẬT' : 'TẮT'}
+          </span>
+        </label>
+        <span className="text-[10px] text-zinc-500 leading-snug flex-1">
+          {!thinkingSupported
+            ? '(không hỗ trợ với model này)'
+            : stage.thinkingHint}
+        </span>
+      </div>
+
+      {extra && (
+        <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-700">
+          {extra}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── ModelSelector (legacy) — giữ để các nơi khác (nếu có) vẫn import được ────
+
 function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, emptyLabel,
                         thinking, onThinkingChange, thinkingHint }: {
   tier: string
@@ -773,7 +1068,6 @@ function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, em
   onChange: (v: string) => void
   allowEmpty?: boolean
   emptyLabel?: string
-  // v3.3: thinking toggle (undefined = không hiển thị)
   thinking?: boolean
   onThinkingChange?: (v: boolean) => void
   thinkingHint?: string
@@ -794,9 +1088,8 @@ function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, em
     : tier === 'Translate' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300'
     : tier === 'Medium' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
     : tier === 'Light' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
-    : 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'  // Stage 0
+    : 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'
 
-  // Thinking chỉ hợp lệ với Gemini 2.5+ hoặc OpenAI o-series / gpt-5
   const thinkingSupported = thinking !== undefined && (
     value.startsWith('gemini-2.5') ||
     value.startsWith('gemini-3') ||
@@ -856,7 +1149,6 @@ function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, em
         </>
       )}
 
-      {/* v3.3: Thinking toggle ngay dưới model selector */}
       {thinking !== undefined && onThinkingChange && (
         <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-700 flex items-center gap-2">
           <label className="flex items-center gap-1.5 cursor-pointer select-none">

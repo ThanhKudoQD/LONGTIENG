@@ -339,15 +339,30 @@ export type VariantMode = 'off' | 'important_only' | 'always'
 export interface TranslateConfig {
   api_key: string
   provider: 'gemini' | 'openai' | 'deepseek'
+  // ── Legacy tier (vẫn gửi để backward compat) ────────────────────────
   model_heavy: string
   model_medium: string
   model_light: string
-  // v3.3: thinking toggles per stage (chỉ Gemini 2.5+ / OpenAI o-series)
-  // null = giữ default backend (heavy/translate = bật, medium/light = tắt)
   heavy_thinking: boolean | null
   medium_thinking: boolean | null
   light_thinking: boolean | null
   translate_thinking: boolean | null
+  // ── v3.5: Per-stage model + thinking ────────────────────────────────
+  // Mỗi stage có model riêng. Empty/null → backend fallback về tier cũ.
+  model_stage0?: string | null
+  model_stage1?: string | null
+  model_stage2?: string | null
+  model_stage3?: string | null
+  model_stage4?: string | null
+  model_stage5?: string | null
+  model_retranslate?: string | null
+  thinking_stage0?: boolean | null
+  thinking_stage1?: boolean | null
+  thinking_stage2?: boolean | null
+  thinking_stage3?: boolean | null
+  thinking_stage4?: boolean | null
+  thinking_stage5?: boolean | null
+  thinking_retranslate?: boolean | null
   project_type: 'short_drama' | 'drama_series' | 'movie'
   cps_max: number | null
   concurrency: number
@@ -361,7 +376,7 @@ export interface TranslateConfig {
   speaker_context_window: number  // Bước 3: số dòng context trước/sau (mặc định 20)
   // v3.2: Stage 0 normalize
   stage0_enabled: boolean   // Bước 0: bật/tắt chuẩn hóa phụ đề
-  stage0_model: string | null  // Model cho Stage 0 (null = dùng model_light)
+  stage0_model: string | null  // (legacy) Model cho Stage 0 — nhường chỗ cho model_stage0
   stage0_context_window: number  // Số dòng context xung quanh cluster (mặc định 10)
 }
 

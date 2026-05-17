@@ -99,8 +99,35 @@ export const translateApi = {
     provider?: 'gemini' | 'openai' | 'deepseek'
     model?: string
     thinking?: boolean | null     // v3.3: toggle thinking (mặc định false ở BE)
+    context_window?: number       // v3.6: số dòng context trước/sau (1-5, default 2)
   }) =>
     api.post<RetranslateResult>(`/projects/${pid}/translate/retranslate`, payload).then(r => r.data),
+
+  // v3.6: Retranslate BATCH — dịch lại 1-5 dòng cùng lúc
+  retranslateBatch: (pid: number, payload: {
+    subtitle_ids: number[]
+    hint: string
+    api_key: string
+    provider?: 'gemini' | 'openai' | 'deepseek'
+    model?: string
+    thinking?: boolean | null
+    context_window?: number       // số dòng context trước/sau (1-5, default 2)
+  }) =>
+    api.post<{
+      ok: boolean
+      lines: Array<{
+        line_index: number
+        subtitle_id: number
+        text_v1: string
+        text_v2: string | null
+        emotion: string | null
+        intensity: number | null
+        current_text_v1: string | null
+        current_text_v2: string | null
+      }>
+      tokens_in: number
+      tokens_out: number
+    }>(`/projects/${pid}/translate/retranslate-batch`, payload).then(r => r.data),
 
   // v3: chọn variant cho 1 dòng
   selectVariant: (pid: number, subtitleId: number, variant: 1 | 2) =>

@@ -224,12 +224,12 @@ async def retry_batch(
 
         req = LLMRequest(
             prompt=prompt,
-            model=config.models.light,
+            model=config.models.get_model_for("stage5"),
             api_key=config.api_key,
             temperature=0.3,
             max_output=8000,
             json_mode=True,
-            thinking=config.models.light_thinking,
+            thinking=config.models.get_thinking_for("stage5"),
             max_retries=config.concurrency.retry_max,
         )
 

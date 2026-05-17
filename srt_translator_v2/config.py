@@ -52,28 +52,84 @@ ModelTier = Literal["heavy", "medium", "light"]
 class ModelConfig:
     """Phân tầng model + toggle thinking cho từng stage.
 
+    v3.5: Thêm fields per-stage để frontend chọn model độc lập từng stage.
+    Backward compat: nếu field per-stage rỗng → fallback về heavy/medium/light cũ.
+
     Mỗi stage có 1 cặp (model, thinking):
       thinking=False (mặc định): tắt thinking → nhanh + rẻ, hợp task JSON đơn giản
       thinking=True            : bật thinking dynamic → chậm + tốn hơn nhưng chất lượng cao
-                                  (chủ yếu hữu ích cho Stage 4 Translate — task suy luận)
 
     Default: chỉ Stage 4 Translate bật thinking (đây là task khó nhất).
     Các stage còn lại tắt vì chỉ là extract/parse JSON.
     """
-    # Stage 1A Cast + Glossary (heavy)
+    # ── Legacy tier (vẫn giữ để run.py CLI + backward compat) ──────────
     heavy: str = "gemini-2.5-pro"
-    heavy_thinking: bool = True       # Bible Cast cần suy luận về quan hệ + Hán Việt
+    heavy_thinking: bool = True
 
-    # Stage 1B World, Stage 2 Chunks, Stage 3 Speaker (medium)
     medium: str = "gemini-2.5-flash"
-    medium_thinking: bool = False     # Extract structure đơn giản
+    medium_thinking: bool = False
 
-    # Stage 0 Normalize, Stage 5 Polish/Retry (light)
     light: str = "gemini-2.5-flash"
-    light_thinking: bool = False      # Clean noise, retry — không cần suy luận
+    light_thinking: bool = False
 
-    # Stage 4 Translate dùng heavy nhưng có toggle riêng vì đây là task quan trọng nhất
-    translate_thinking: bool = True   # MẶC ĐỊNH BẬT — đây là task chính, quality > cost
+    translate_thinking: bool = True
+
+    # ── v3.5: Per-stage model — frontend ConfigPanel set ──────────────
+    # Nếu rỗng ("") → resolve về tier tương ứng bên trên (heavy/medium/light)
+    # Helpers `get_model_for(stage)` + `get_thinking_for(stage)` bên dưới
+    # sẽ tự fallback nên các stage runner không cần biết về fields này.
+    model_stage0:      str = ""   # Chuẩn hóa phụ đề        (fallback: light)
+    model_stage1:      str = ""   # Bible Cast+Glossary+World (fallback: heavy)
+    model_stage2:      str = ""   # Chunks + Scenes          (fallback: medium)
+    model_stage3:      str = ""   # Speaker                  (fallback: medium)
+    model_stage4:      str = ""   # Translate (task chính)   (fallback: heavy)
+    model_stage5:      str = ""   # Retry dòng thiếu         (fallback: light)
+    model_retranslate: str = ""   # Retranslate trong editor (fallback: heavy)
+
+    # Thinking per-stage — None = dùng default tier
+    thinking_stage0:      Optional[bool] = None
+    thinking_stage1:      Optional[bool] = None
+    thinking_stage2:      Optional[bool] = None
+    thinking_stage3:      Optional[bool] = None
+    thinking_stage4:      Optional[bool] = None
+    thinking_stage5:      Optional[bool] = None
+    thinking_retranslate: Optional[bool] = None
+
+    # ── Resolvers ─────────────────────────────────────────────────────
+    def get_model_for(self, stage: str) -> str:
+        """Trả model cho stage: 'stage0'..'stage5'|'retranslate'.
+
+        Per-stage field rỗng → fallback tier mặc định.
+        """
+        per_stage = {
+            "stage0":      (self.model_stage0,      self.light),
+            "stage1":      (self.model_stage1,      self.heavy),
+            "stage2":      (self.model_stage2,      self.medium),
+            "stage3":      (self.model_stage3,      self.medium),
+            "stage4":      (self.model_stage4,      self.heavy),
+            "stage5":      (self.model_stage5,      self.light),
+            "retranslate": (self.model_retranslate, self.heavy),
+        }
+        if stage not in per_stage:
+            return self.heavy  # safety
+        v, fallback = per_stage[stage]
+        return v.strip() if v and v.strip() else fallback
+
+    def get_thinking_for(self, stage: str) -> bool:
+        """Trả thinking flag cho stage. None → fallback tier mặc định."""
+        per_stage = {
+            "stage0":      (self.thinking_stage0,      self.light_thinking),
+            "stage1":      (self.thinking_stage1,      self.heavy_thinking),
+            "stage2":      (self.thinking_stage2,      self.medium_thinking),
+            "stage3":      (self.thinking_stage3,      self.medium_thinking),
+            "stage4":      (self.thinking_stage4,      self.translate_thinking),
+            "stage5":      (self.thinking_stage5,      self.light_thinking),
+            "retranslate": (self.thinking_retranslate, self.translate_thinking),
+        }
+        if stage not in per_stage:
+            return self.translate_thinking
+        v, fallback = per_stage[stage]
+        return bool(fallback) if v is None else bool(v)
 
 
 # ─────────────────────────────────────────────────────────────────

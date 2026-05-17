@@ -269,12 +269,12 @@ async def _process_chunk_inner(
     req = LLMRequest(
         prompt=variable if cached_prefix else prompt,
         cached_prefix=cached_prefix if cached_prefix else None,
-        model=config.models.medium,
+        model=config.models.get_model_for("stage3"),
         api_key=config.api_key,
         temperature=0.2,
         max_output=12000,
         json_mode=True,
-        thinking=config.models.medium_thinking,
+        thinking=config.models.get_thinking_for("stage3"),
         max_retries=config.concurrency.retry_max,
     )
 

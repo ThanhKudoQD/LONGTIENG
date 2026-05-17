@@ -257,7 +257,9 @@ async def run_stage0_normalize(
     prompt_template = load_prompt("normalize", config)
     prompt = prompt_template.replace("{DATA_LINES}", data_text)
 
-    model = config.stage0.model or config.models.light
+    # v3.5: priority — stage0.model (Stage0Config) → models.get_model_for("stage0")
+    # Stage0Config.model giữ để backward compat (cũ); per-stage model là cách mới.
+    model = config.stage0.model or config.models.get_model_for("stage0")
 
     req = LLMRequest(
         prompt=prompt,
@@ -266,7 +268,7 @@ async def run_stage0_normalize(
         temperature=0.2,
         max_output=8000,
         json_mode=True,
-        thinking=config.models.light_thinking,
+        thinking=config.models.get_thinking_for("stage0"),
         max_retries=config.concurrency.retry_max,
     )
 

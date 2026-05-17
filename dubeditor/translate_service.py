@@ -572,11 +572,13 @@ def build_pipeline_config(req) -> PipelineConfig:
     config = default_config()
     config.api_key = req.api_key
     config.provider = req.provider
+
+    # ── Legacy tier (backward compat) ─────────────────────────────────
     config.models.heavy = req.model_heavy
     config.models.medium = req.model_medium
     config.models.light = req.model_light
 
-    # v3.3: thinking toggles per stage (chỉ apply cho Gemini 2.5+ / model có thinking)
+    # v3.3: thinking toggles per tier (chỉ apply cho Gemini 2.5+ / model có thinking)
     if hasattr(req, "heavy_thinking") and req.heavy_thinking is not None:
         config.models.heavy_thinking = bool(req.heavy_thinking)
     if hasattr(req, "medium_thinking") and req.medium_thinking is not None:
@@ -585,6 +587,21 @@ def build_pipeline_config(req) -> PipelineConfig:
         config.models.light_thinking = bool(req.light_thinking)
     if hasattr(req, "translate_thinking") and req.translate_thinking is not None:
         config.models.translate_thinking = bool(req.translate_thinking)
+
+    # ── v3.5: Per-stage model + thinking ──────────────────────────────
+    # Ưu tiên hơn tier cũ. Stage runner gọi config.models.get_model_for("stageN")
+    # tự fallback về tier nếu per-stage field rỗng.
+    for stage_key in ("stage0", "stage1", "stage2", "stage3", "stage4", "stage5", "retranslate"):
+        model_attr = f"model_{stage_key}"
+        think_attr = f"thinking_{stage_key}"
+        if hasattr(req, model_attr):
+            val = getattr(req, model_attr, None)
+            if val:
+                setattr(config.models, model_attr, val.strip())
+        if hasattr(req, think_attr):
+            val = getattr(req, think_attr, None)
+            if val is not None:
+                setattr(config.models, think_attr, bool(val))
 
     config.project_type = req.project_type
     config.apply_project_type()

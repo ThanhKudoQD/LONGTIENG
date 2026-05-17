@@ -5,7 +5,7 @@ import api from '../api'
 import { playSubAudio, stopGlobalAudio, subscribePlayingId } from '../audio'
 import { findDuplicateStarts } from '../utils/perf'
 import type { Subtitle, Chapter } from '../types'
-import { loadConfig, getApiKey } from './ConfigModal'
+import { loadConfig, getApiKey, getRetranslateModel, getRetranslateThinking, getRetranslateContextWindow } from './ConfigModal'
 import { getEffectiveSpeed } from '../types'
 
 interface Props {
@@ -207,15 +207,16 @@ const Row = React.memo(function Row({
       {/* Col 3: main content */}
       <div className="flex-1 min-w-0 flex flex-col justify-center py-1.5 px-2.5" style={{ gap: 2 }}>
 
-        {/* Row 1: time + character badge */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span style={{ fontSize: 10, fontFamily: 'monospace', fontWeight: 700, color: isActive ? '#BFDBFE' : '#6B7280', whiteSpace: 'nowrap' }}>
-            {fmt(s.start_time)}
-          </span>
-          <span style={{ fontSize: 9, color: isActive ? 'rgba(255,255,255,0.3)' : '#D1D5DB' }}>→</span>
-          <span style={{ fontSize: 10, fontFamily: 'monospace', color: isActive ? 'rgba(255,255,255,0.4)' : '#9CA3AF', whiteSpace: 'nowrap' }}>
-            {fmt(s.end_time)}
-          </span>
+        {/* Row 1: time (xếp dọc) + character badge — KHÔNG wrap, truncate nếu chật */}
+        <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+          <div className="flex flex-col items-start leading-tight" style={{ fontFamily: 'monospace' }}>
+            <span style={{ fontSize: 9, fontWeight: 700, color: isActive ? '#BFDBFE' : '#6B7280', whiteSpace: 'nowrap' }}>
+              {fmt(s.start_time)}
+            </span>
+            <span style={{ fontSize: 9, color: isActive ? 'rgba(255,255,255,0.4)' : '#9CA3AF', whiteSpace: 'nowrap' }}>
+              {fmt(s.end_time)}
+            </span>
+          </div>
           {char ? (
             <span style={{
               fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4,
@@ -255,19 +256,8 @@ const Row = React.memo(function Row({
               v{s.variant_selected || 1}
             </span>
           )}
-          {/* Nút Dịch lại — chỉ hiện khi active + có original_text + không phải SRT Việt thuần */}
-          {s.original_text && isActive && !isViOnly && (
-            <button
-              onClick={e => { e.stopPropagation(); onRetranslate(s) }}
-              style={{
-                fontSize: 10, fontWeight: 600, padding: '1px 7px', borderRadius: 4,
-                border: '1px solid rgba(255,255,255,0.25)',
-                background: 'rgba(255,255,255,0.12)',
-                color: 'rgba(255,255,255,0.85)', cursor: 'pointer', whiteSpace: 'nowrap',
-              }}>
-              ✨ Dịch lại
-            </button>
-          )}
+          {/* Nút Dịch lại đã được move sang Col 4 (cùng cột action buttons)
+              để tránh wrap khi sidebar hẹp */}
         </div>
 
         {/* Row 2: original text (tiếng Trung) — ẩn nếu là SRT Việt thuần */}
@@ -302,13 +292,28 @@ const Row = React.memo(function Row({
         </span>
       </div>
 
-      {/* Col 4: action buttons — 2x2 grid */}
+      {/* Col 4: action buttons — 2x2 grid + nút Dịch lại */}
       <div className="sub-actions flex flex-col gap-1 px-1.5 py-1.5 flex-shrink-0"
         style={{ opacity: isActive ? 1 : 0, transition: 'opacity .12s' }}>
+        {/* Row 0: Dịch lại — full width 2 cột (chỉ hiện khi active + có TQ + không phải SRT Việt thuần) */}
+        {s.original_text && isActive && !isViOnly && (
+          <button
+            onClick={e => { e.stopPropagation(); onRetranslate(s) }}
+            className="sub-action-btn flex items-center justify-center gap-1 h-6 rounded text-[11px] font-semibold flex-shrink-0"
+            style={{
+              width: 140, // 68*2 + gap 4
+              background: 'rgba(255,255,255,0.15)',
+              border: '1px solid rgba(255,255,255,0.25)',
+              color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap',
+            }}
+            title="Dịch lại dòng này">
+            ✨ Dịch lại
+          </button>
+        )}
         {/* Row 1: TTS BT + Xóa audio */}
         <div className="flex items-center gap-1">
           <button onClick={e => onTTS(e, s, 'normal')} disabled={isTTSLoading}
-            className="flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-40 flex-shrink-0 w-[68px]"
+            className="sub-action-btn flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold active:scale-95 disabled:opacity-40 flex-shrink-0 w-[68px]"
             style={{
               background: isActive ? 'rgba(255,255,255,0.15)' : '#EFF6FF',
               border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : '#BFDBFE'}`,
@@ -322,7 +327,7 @@ const Row = React.memo(function Row({
             <span>BT</span>
           </button>
           <button onClick={e => onDeleteAudio(e, s)} disabled={!s.audio_path}
-            className="flex items-center justify-center h-6 rounded transition-all active:scale-95 disabled:opacity-25 flex-shrink-0 w-[68px]"
+            className="sub-action-btn flex items-center justify-center h-6 rounded active:scale-95 disabled:opacity-25 flex-shrink-0 w-[68px]"
             style={{
               background: isActive ? 'rgba(255,255,255,0.1)' : '#fff',
               border: `1px solid ${isActive ? 'rgba(255,255,255,0.2)' : s.tts_done ? '#FCA5A5' : '#E5E7EB'}`,
@@ -343,7 +348,7 @@ const Row = React.memo(function Row({
             const hasSad = availableModes.includes('sad')
             return (
               <button onClick={e => onTTS(e, s, 'sad')} disabled={isTTSLoading || !hasSad}
-                className="flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-25 disabled:cursor-not-allowed flex-shrink-0 w-[68px]"
+                className="sub-action-btn flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold active:scale-95 disabled:opacity-25 disabled:cursor-not-allowed flex-shrink-0 w-[68px]"
                 style={{
                   background: isActive ? 'rgba(37,99,235,0.25)' : (hasSad ? '#EFF6FF' : '#F3F4F6'),
                   border: `1px solid ${isActive ? 'rgba(147,197,253,0.5)' : (hasSad ? '#93C5FD' : '#D1D5DB')}`,
@@ -359,7 +364,7 @@ const Row = React.memo(function Row({
             const hasAngry = availableModes.includes('angry')
             return (
               <button onClick={e => onTTS(e, s, 'angry')} disabled={isTTSLoading || !hasAngry}
-                className="flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold transition-all active:scale-95 disabled:opacity-25 disabled:cursor-not-allowed flex-shrink-0 w-[68px]"
+                className="sub-action-btn flex items-center justify-center gap-1 px-2 h-6 rounded text-[11px] font-semibold active:scale-95 disabled:opacity-25 disabled:cursor-not-allowed flex-shrink-0 w-[68px]"
                 style={{
                   background: isActive ? 'rgba(220,38,38,0.25)' : (hasAngry ? '#FEF2F2' : '#F3F4F6'),
                   border: `1px solid ${isActive ? 'rgba(252,165,165,0.5)' : (hasAngry ? '#FCA5A5' : '#D1D5DB')}`,
@@ -406,46 +411,212 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const parentRef = useRef<HTMLDivElement>(null)
   const [ttsLoadingId, setTtsLoadingId] = useState<number | null>(null)
   const [playingId, setPlayingId] = useState<number | null>(null)
+
+  // v3.6: state retranslate hỗ trợ batch, mở 1-click → gọi AI luôn với
+  // context_window từ ConfigPanel. Mỗi dòng có 2 checkbox v1/v2 độc lập
+  // (tick = apply bản đó; cả 2 off = bỏ qua dòng). Cùng 1 dòng chỉ tick
+  // được 1 trong 2 checkbox tại 1 thời điểm.
+  type RTLine = {
+    line_index: number
+    subtitle_id: number
+    original_text: string
+    speaker_zh: string | null
+    current_text: string
+    text_v1: string
+    text_v2: string | null
+    emotion: string | null
+    intensity: number | null
+    /** null = không apply; 1 = apply v1; 2 = apply v2 */
+    selected_variant: 1 | 2 | null
+  }
   const [inlineRT, setInlineRT] = useState<{
-    sub: Subtitle
+    anchorSub: Subtitle           // dòng user bấm "Dịch lại"
     loading: boolean
-    alts: Array<{ text: string; note?: string; variant?: 1 | 2 }>
-    selected: number | null
     error: string
+    results: RTLine[]             // sau khi AI trả về
   } | null>(null)
 
+  // v3.6.2: ref + state cho scroll panel retranslate (wheel chậm + mũi tên).
+  // PHẢI đặt SAU useState<inlineRT> vì useEffect dùng inlineRT làm dep.
+  const rtBodyRef = useRef<HTMLDivElement>(null)
+  const [rtScrollPos, setRtScrollPos] = useState({ top: 0, max: 0 })
+
+  // Wheel chậm trong panel retranslate (0.4x default).
+  // Dùng non-passive listener để preventDefault hoạt động.
+  useEffect(() => {
+    const el = rtBodyRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent) => {
+      // Chỉ xử lý wheel dọc; ctrl+wheel (zoom) thả qua native
+      if (e.ctrlKey) return
+      e.preventDefault()
+      el.scrollTop += e.deltaY * 0.4
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [inlineRT?.results.length])  // re-attach khi list kết quả đổi
+
+  // Track scroll position để disable mũi tên ở đầu/cuối
+  useEffect(() => {
+    const el = rtBodyRef.current
+    if (!el) return
+    const update = () => setRtScrollPos({
+      top: el.scrollTop,
+      max: el.scrollHeight - el.clientHeight,
+    })
+    update()
+    el.addEventListener('scroll', update, { passive: true })
+    return () => el.removeEventListener('scroll', update)
+  }, [inlineRT?.results.length])
+
+  const rtScrollBy = useCallback((delta: number) => {
+    const el = rtBodyRef.current
+    if (!el) return
+    el.scrollBy({ top: delta, behavior: 'smooth' })
+  }, [])
+
+  /**
+   * 1-click flow: bấm "Dịch lại" → gọi AI ngay với context_window từ config.
+   * Default scope = "cụm context" (anchor ± context_window).
+   */
   const handleRetranslate = useCallback(async (s: Subtitle) => {
     const config = loadConfig()
     const apiKey = getApiKey(config)
     if (!apiKey) {
-      setInlineRT({ sub: s, loading: false, alts: [], selected: null,
-        error: 'Chưa có API key. Vào trang Translate → Cấu hình.' })
+      setInlineRT({
+        anchorSub: s, loading: false, results: [],
+        error: 'Chưa có API key. Vào trang Translate → Cấu hình.',
+      })
       return
     }
-    setInlineRT({ sub: s, loading: true, alts: [], selected: null, error: '' })
+
+    // Build scope: anchor ± ctxN (cap 5 lines total)
+    const ctxN = getRetranslateContextWindow(config)
+    const subs = useStore.getState().subtitles
+    const anchorIdx = s.index
+    let pool = subs.filter(x => x.index >= anchorIdx - ctxN && x.index <= anchorIdx + ctxN)
+    if (pool.length > 5) {
+      const anchorPos = pool.findIndex(x => x.id === s.id)
+      const lo = Math.max(0, anchorPos - 2)
+      const hi = Math.min(pool.length, lo + 5)
+      pool = pool.slice(lo, hi)
+    }
+    if (!pool.length) pool = [s]
+
+    setInlineRT({ anchorSub: s, loading: true, error: '', results: [] })
+
     try {
-      // v3 API: trả new_text_v1 + new_text_v2
       const { translateApi } = await import('../api')
-      const res = await translateApi.retranslate(s.project_id, {
-        subtitle_id: s.id,
-        hint:        '',
-        api_key:     apiKey,
-        provider:    config.provider,
-        model:       config.model_medium,
-      })
-      // Map v1/v2 thành alts array để giữ UI cũ
-      const alts: Array<{ text: string; note?: string; variant?: 1 | 2 }> = []
-      if (res.new_text_v1) {
-        alts.push({ text: res.new_text_v1, note: 'v1 · sát nghĩa', variant: 1 })
+      if (pool.length === 1) {
+        const res = await translateApi.retranslate(s.project_id, {
+          subtitle_id: s.id,
+          hint:        '',
+          api_key:     apiKey,
+          provider:    config.provider,
+          model:       getRetranslateModel(config),
+          thinking:    getRetranslateThinking(config),
+          context_window: ctxN,
+        })
+        const line: RTLine = {
+          line_index: s.index,
+          subtitle_id: s.id,
+          original_text: s.original_text || '',
+          speaker_zh: s.speaker_zh || null,
+          current_text: s.text || '',
+          text_v1: res.new_text_v1 || '',
+          text_v2: (res.new_text_v2 && res.new_text_v2 !== res.new_text_v1) ? res.new_text_v2 : null,
+          emotion: (res as any).emotion || null,
+          intensity: (res as any).intensity || null,
+          selected_variant: null,
+        }
+        setInlineRT(r => r ? { ...r, loading: false, results: [line] } : null)
+      } else {
+        const res = await translateApi.retranslateBatch(s.project_id, {
+          subtitle_ids: pool.map(t => t.id),
+          hint:         '',
+          api_key:      apiKey,
+          provider:     config.provider,
+          model:        getRetranslateModel(config),
+          thinking:     getRetranslateThinking(config),
+          context_window: ctxN,
+        })
+        const lines: RTLine[] = res.lines.map(l => {
+          const original = pool.find(t => t.id === l.subtitle_id)
+          return {
+            line_index: l.line_index,
+            subtitle_id: l.subtitle_id,
+            original_text: original?.original_text || '',
+            speaker_zh: original?.speaker_zh || null,
+            current_text: original?.text || '',
+            text_v1: l.text_v1,
+            text_v2: l.text_v2,
+            emotion: l.emotion,
+            intensity: l.intensity,
+            selected_variant: null,
+          }
+        })
+        setInlineRT(r => r ? { ...r, loading: false, results: lines } : null)
       }
-      if (res.new_text_v2 && res.new_text_v2 !== res.new_text_v1) {
-        alts.push({ text: res.new_text_v2, note: 'v2 · thoát ý', variant: 2 })
-      }
-      setInlineRT(r => r ? { ...r, loading: false, alts, selected: alts.length > 0 ? 0 : null } : null)
     } catch (err: any) {
-      setInlineRT(r => r ? { ...r, loading: false, error: err?.response?.data?.detail || err?.message || 'Lỗi' } : null)
+      setInlineRT(r => r ? {
+        ...r, loading: false,
+        error: err?.response?.data?.detail || err?.message || 'Lỗi',
+      } : null)
     }
   }, [])
+
+  /**
+   * Apply: chỉ áp dụng các dòng có selected_variant !== null.
+   */
+  const applyRetranslate = useCallback(async () => {
+    if (!inlineRT || !inlineRT.results.length) return
+    const toApply = inlineRT.results.filter(l => l.selected_variant !== null)
+    if (!toApply.length) return
+
+    try {
+      for (const line of toApply) {
+        const patch: any = {
+          text_v1: line.text_v1,
+          text_v2: line.text_v2,
+          variant_selected: line.selected_variant,
+        }
+        const updated = await api.patch(`/subtitles/${line.subtitle_id}`, patch).then(r => r.data)
+        updateSubtitle(line.subtitle_id, {
+          text: updated.text,
+          text_v1: updated.text_v1,
+          text_v2: updated.text_v2,
+          variant_selected: updated.variant_selected,
+          cps_value: updated.cps_value,
+        })
+      }
+      setInlineRT(null)
+    } catch (err: any) {
+      setInlineRT(r => r ? {
+        ...r, error: err?.response?.data?.detail || err?.message || 'Lỗi khi áp dụng',
+      } : null)
+    }
+  }, [inlineRT, updateSubtitle])
+
+  /**
+   * Toggle 1 checkbox v1/v2 cho 1 dòng.
+   * Quy tắc: cùng 1 dòng chỉ tick 1 trong 2; tick lại cái đã active = bỏ chọn.
+   */
+  const toggleLineVariant = useCallback((subtitleId: number, variant: 1 | 2) => {
+    setInlineRT(r => r ? {
+      ...r,
+      results: r.results.map(l => {
+        if (l.subtitle_id !== subtitleId) return l
+        // Tick cùng cái đang active → bỏ tích. Khác → đổi sang cái mới.
+        return { ...l, selected_variant: l.selected_variant === variant ? null : variant }
+      }),
+    } : null)
+  }, [])
+
+  /** Gọi AI lại với cùng config (retry khi kết quả tệ). */
+  const retryRetranslate = useCallback(() => {
+    if (!inlineRT) return
+    handleRetranslate(inlineRT.anchorSub)
+  }, [inlineRT, handleRetranslate])
 
   // PERF: pub/sub thay setInterval(150ms)
   useEffect(() => subscribePlayingId(setPlayingId), [])
@@ -539,7 +710,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   }, [visible, chapters, filterChapterIds])
 
   const HEADER_H = 44
-  const SUB_H    = 68
+  const SUB_H    = 88
 
   const virt = useVirtualizer({
     count: items.length,
@@ -739,108 +910,157 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
         })}
       </div>
     </div>
-      {/* Inline retranslate panel — hiện phía dưới list khi đang dịch lại */}
-      {inlineRT && (
-        <div className="border-t border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 flex-shrink-0">
-          {/* Header */}
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-blue-100 dark:border-blue-900/50">
+      {/* v3.6: Retranslate panel — 1-click, 2 checkbox v1/v2 độc lập */}
+      {inlineRT && (() => {
+        const tickedCount = inlineRT.results.filter(l => l.selected_variant !== null).length
+        return (
+        <div className="border-t border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/20 flex-shrink-0 max-h-[300px] flex flex-col">
+          {/* Header — sticky */}
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-blue-100 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/20">
             <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400">
-              ✨ Dịch lại #{inlineRT.sub.index}
+              ✨ Dịch lại #{inlineRT.anchorSub.index}
             </span>
-            {inlineRT.sub.original_text && (
+            {inlineRT.anchorSub.original_text && (
               <span className="text-[10px] font-mono text-blue-400 dark:text-blue-500 truncate flex-1">
-                {inlineRT.sub.original_text}
+                {inlineRT.anchorSub.original_text}
               </span>
+            )}
+            {/* v3.6.2: mũi tên ▲ scroll lên 1 card */}
+            {inlineRT.results.length > 1 && (
+              <button
+                onClick={() => rtScrollBy(-120)}
+                disabled={rtScrollPos.top <= 0}
+                title="Cuộn lên"
+                className="text-blue-500 hover:text-blue-700 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:cursor-not-allowed text-[14px] leading-none px-1.5 py-0.5 rounded hover:bg-blue-100 dark:hover:bg-blue-900/30 disabled:hover:bg-transparent">
+                ▲
+              </button>
             )}
             <button onClick={() => setInlineRT(null)}
               className="text-blue-400 hover:text-blue-600 text-[14px] leading-none px-1">×</button>
           </div>
 
-          {/* Body */}
-          <div className="px-3 py-2 flex flex-col gap-2">
-            {/* Current */}
-            <div className="text-[11px] text-blue-500 dark:text-blue-400">
-              Hiện tại: <span className="text-zinc-600 dark:text-zinc-300 font-medium">{inlineRT.sub.text}</span>
-            </div>
-
+          {/* Body — scroll vùng kết quả (wheel speed 0.4x) */}
+          <div ref={rtBodyRef} className="overflow-y-auto flex-1 px-2.5 py-1.5">
             {/* Loading */}
             {inlineRT.loading && (
-              <div className="flex items-center gap-2 text-[11px] text-blue-500 py-1">
+              <div className="flex items-center gap-2 text-[11px] text-blue-500 py-2">
                 <div className="w-3 h-3 rounded-full border-2 border-blue-500 border-t-transparent animate-spin flex-shrink-0" />
-                Đang dịch...
+                Đang dịch lại {Math.max(1, Math.min(5, /* visual hint */ 0))}...
               </div>
             )}
 
             {/* Error */}
             {inlineRT.error && (
-              <div className="text-[11px] text-red-500">❌ {inlineRT.error}</div>
+              <div className="text-[11px] text-red-500 py-1">❌ {inlineRT.error}</div>
             )}
 
-            {/* Alternatives */}
-            {!inlineRT.loading && inlineRT.alts.length > 0 && (
+            {/* Results */}
+            {!inlineRT.loading && inlineRT.results.length > 0 && (
               <div className="flex flex-col gap-1.5">
-                {inlineRT.alts.map((alt, i) => (
-                  <div key={i}
-                    onClick={() => setInlineRT(r => r ? { ...r, selected: i } : null)}
-                    className={`flex items-start gap-2 px-2.5 py-2 rounded-lg cursor-pointer border transition-all ${
-                      inlineRT.selected === i
-                        ? 'border-blue-500 bg-blue-100 dark:bg-blue-900/40'
-                        : 'border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:border-blue-300'
-                    }`}>
-                    <div className={`w-3.5 h-3.5 rounded-full flex-shrink-0 mt-0.5 border-2 transition-all ${
-                      inlineRT.selected === i ? 'border-[4px] border-blue-500' : 'border-zinc-300 dark:border-zinc-600'
-                    }`} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[13px] font-medium text-zinc-800 dark:text-zinc-100 leading-snug">{alt.text}</div>
-                      {alt.note && <div className="text-[10px] text-zinc-400 mt-0.5">{alt.note}</div>}
+                {inlineRT.results.map(line => {
+                  const isAnchor = line.subtitle_id === inlineRT.anchorSub.id
+                  const v1Active = line.selected_variant === 1
+                  const v2Active = line.selected_variant === 2
+                  return (
+                    <div key={line.subtitle_id}
+                      className={`rounded-md border px-2 py-1.5 ${
+                        isAnchor
+                          ? 'border-blue-400 bg-blue-100/40 dark:bg-blue-900/20'
+                          : 'border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800'
+                      }`}>
+                      {/* Header per-line — 1 dòng gọn */}
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <span className={`text-[10px] font-bold ${
+                          isAnchor ? 'text-blue-600 dark:text-blue-400' : 'text-zinc-500'
+                        }`}>
+                          #{line.line_index}{isAnchor && '⭐'}
+                        </span>
+                        {line.speaker_zh && (
+                          <span className="text-[10px] text-zinc-400">{line.speaker_zh}</span>
+                        )}
+                        <span className="text-[10px] text-zinc-400 truncate flex-1">
+                          Hiện tại: {line.current_text || '(chưa có)'}
+                        </span>
+                      </div>
+                      {/* v1 + v2 checkboxes (mutually exclusive, cả 2 off cũng OK) */}
+                      <div className="flex flex-col gap-0.5">
+                        <label
+                          className={`flex items-start gap-1.5 px-1.5 py-1 rounded cursor-pointer text-[12px] transition-all ${
+                            v1Active
+                              ? 'bg-blue-100 dark:bg-blue-900/40 ring-1 ring-blue-400'
+                              : 'hover:bg-zinc-100 dark:hover:bg-zinc-700/50'
+                          }`}>
+                          <input type="checkbox"
+                            checked={v1Active}
+                            onChange={() => toggleLineVariant(line.subtitle_id, 1)}
+                            className="w-3.5 h-3.5 mt-0.5 flex-shrink-0"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <span className="text-[11px] text-zinc-400 mr-1">v1·sát</span>
+                            <span className="text-[12px] text-zinc-800 dark:text-zinc-100">
+                              {line.text_v1 || '(rỗng)'}
+                            </span>
+                          </div>
+                        </label>
+                        {line.text_v2 && (
+                          <label
+                            className={`flex items-start gap-1.5 px-1.5 py-1 rounded cursor-pointer text-[12px] transition-all ${
+                              v2Active
+                                ? 'bg-blue-100 dark:bg-blue-900/40 ring-1 ring-blue-400'
+                                : 'hover:bg-zinc-100 dark:hover:bg-zinc-700/50'
+                            }`}>
+                            <input type="checkbox"
+                              checked={v2Active}
+                              onChange={() => toggleLineVariant(line.subtitle_id, 2)}
+                              className="w-3.5 h-3.5 mt-0.5 flex-shrink-0"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-[11px] text-zinc-400 mr-1">v2·thoát</span>
+                              <span className="text-[12px] text-zinc-800 dark:text-zinc-100">
+                                {line.text_v2}
+                              </span>
+                            </div>
+                          </label>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Actions */}
-            {!inlineRT.loading && (
-              <div className="flex gap-2 pt-1">
-                <button onClick={() => setInlineRT(null)}
-                  className="btn text-[11px] px-3 py-1">Huỷ</button>
-                {inlineRT.alts.length > 0 && inlineRT.selected !== null && (
-                  <button
-                    onClick={async () => {
-                      const sel = inlineRT.alts[inlineRT.selected!]
-                      const v1 = inlineRT.alts.find(a => a.variant === 1)?.text || sel.text
-                      const v2 = inlineRT.alts.find(a => a.variant === 2)?.text || null
-                      const variantChosen = sel.variant || 1
-                      // Patch cả 2 bản + variant_selected để backend đồng bộ text active
-                      const patch: any = {
-                        text_v1: v1,
-                        text_v2: v2,
-                        variant_selected: variantChosen,
-                      }
-                      const updated = await api.patch(`/subtitles/${inlineRT.sub.id}`, patch).then(r => r.data)
-                      updateSubtitle(inlineRT.sub.id, {
-                        text: updated.text,
-                        text_v1: updated.text_v1,
-                        text_v2: updated.text_v2,
-                        variant_selected: updated.variant_selected,
-                        cps_value: updated.cps_value,
-                      })
-                      setInlineRT(null)
-                    }}
-                    className="btn-primary text-[11px] px-3 py-1">
-                    ✓ Dùng bản này
-                  </button>
-                )}
-                <button
-                  onClick={() => handleRetranslate(inlineRT.sub)}
-                  className="btn text-[11px] px-3 py-1 text-blue-500 border-blue-200 dark:border-blue-800">
-                  🔄 Thử lại
-                </button>
+                  )
+                })}
               </div>
             )}
           </div>
+
+          {/* Footer — actions */}
+          {!inlineRT.loading && inlineRT.results.length > 0 && (
+            <div className="flex gap-2 px-3 py-1.5 border-t border-blue-100 dark:border-blue-900/50 bg-blue-50 dark:bg-blue-950/20">
+              {/* v3.6.2: mũi tên ▼ scroll xuống 1 card */}
+              {inlineRT.results.length > 1 && (
+                <button
+                  onClick={() => rtScrollBy(120)}
+                  disabled={rtScrollPos.top >= rtScrollPos.max - 1}
+                  title="Cuộn xuống"
+                  className="text-blue-500 hover:text-blue-700 disabled:text-zinc-300 dark:disabled:text-zinc-600 disabled:cursor-not-allowed text-[14px] leading-none px-1.5 py-0.5 rounded hover:bg-blue-100 dark:hover:bg-blue-900/30 disabled:hover:bg-transparent">
+                  ▼
+                </button>
+              )}
+              <button onClick={() => setInlineRT(null)}
+                className="btn text-[11px] px-2.5 py-0.5">Huỷ</button>
+              <button
+                onClick={applyRetranslate}
+                disabled={tickedCount === 0}
+                className="btn-primary text-[11px] px-2.5 py-0.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                ✓ Áp dụng {tickedCount} dòng
+              </button>
+              <button
+                onClick={retryRetranslate}
+                className="btn text-[11px] px-2.5 py-0.5 text-blue-500 border-blue-200 dark:border-blue-800 ml-auto">
+                🔄 Thử lại
+              </button>
+            </div>
+          )}
         </div>
-      )}
+        )
+      })()}
     </>
   )
 }
