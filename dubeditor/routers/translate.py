@@ -1036,6 +1036,8 @@ OUTPUT JSON THUẦN:
     llm_req = LLMRequest(
         prompt=prompt, model=req.model, api_key=req.api_key,
         temperature=0.5, max_output=2000, json_mode=True,
+        # v3.3: forward thinking toggle từ FE (None = dùng default của model)
+        thinking=req.thinking,
     )
 
     try:

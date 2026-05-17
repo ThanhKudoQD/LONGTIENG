@@ -16,6 +16,7 @@ import ChaptersModal from './ChaptersModal'
 import ChapterFilterDropdown from './ChapterFilterDropdown'
 import CharacterFilterDropdown from './CharacterFilterDropdown'
 import SwapCharacterModal from './SwapCharacterModal'
+import ConfirmModal from './ConfirmModal'
 import { LicenseChip, LicenseStatus } from './LicenseGate'
 
 interface Props { projectId: number; onBack: () => void; onTranslate: () => void }
@@ -42,6 +43,15 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   const [swapping, setSwapping]           = useState(false)
   const [showAutoFix, setShowAutoFix] = useState(false)
   const [showChapters, setShowChapters] = useState(false)
+
+  // Dialog xác nhận khi user import SRT không phải tiếng Trung
+  // → hỏi có muốn import như SRT tiếng Việt (đã dịch sẵn) không
+  const [nonChineseDialog, setNonChineseDialog] = useState<null | {
+    file: File
+    cjkRatio: number
+    encoding: string
+  }>(null)
+  const [importingVi, setImportingVi] = useState(false)
 
   // License chip — fetch status
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(null)
@@ -384,35 +394,43 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
       const res = await api.post(`/projects/${projectId}/import-srt`, form)
       const data = res.data || {}
       if (data.detected_chinese) {
-        // Toast nhẹ — không alert
         console.log(`[Import] OK ${data.imported} dòng tiếng Trung (encoding: ${data.encoding})`)
       }
       await loadProject(projectId)
     } catch (err: any) {
       const detail = err?.response?.data?.detail
-      // Backend trả error có code 'DETECTED_NON_CHINESE' → hỏi user có muốn force không
+      // Backend trả error có code 'DETECTED_NON_CHINESE' → mở dialog hỏi user
+      // có muốn import như SRT tiếng Việt không
       if (detail?.code === 'DETECTED_NON_CHINESE') {
-        const ok = confirm(
-          `⚠ File này không phải SRT tiếng Trung\n\n` +
-          `Tỉ lệ ký tự Trung: ${(detail.cjk_ratio * 100).toFixed(1)}% (cần ≥ 30%)\n` +
-          `Encoding detect: ${detail.encoding}\n\n` +
-          `Pipeline v2 chỉ dịch Trung→Việt. Nếu bạn vẫn muốn import (vd: file đã dịch sẵn để chỉnh sửa thủ công), bấm OK.\n\n` +
-          `Bấm Cancel nếu upload nhầm file.`
-        )
-        if (!ok) { e.target.value = ''; return }
-        // Retry với ?force=true
-        try {
-          const form2 = new FormData(); form2.append('file', file)
-          await api.post(`/projects/${projectId}/import-srt?force=true`, form2)
-          await loadProject(projectId)
-        } catch (err2: any) {
-          alert(`Import fail: ${err2?.response?.data?.detail?.message || err2?.message || 'Unknown'}`)
-        }
+        setNonChineseDialog({
+          file,
+          cjkRatio: detail.cjk_ratio || 0,
+          encoding: detail.encoding || 'unknown',
+        })
       } else {
         alert(`Import fail: ${typeof detail === 'string' ? detail : (detail?.message || err?.message || 'Unknown')}`)
       }
     } finally {
       e.target.value = ''  // reset input để có thể chọn lại cùng file
+    }
+  }
+
+  // User xác nhận: import file đó như SRT tiếng Việt (đã dịch sẵn)
+  const confirmImportVi = async () => {
+    if (!nonChineseDialog) return
+    setImportingVi(true)
+    try {
+      const form = new FormData(); form.append('file', nonChineseDialog.file)
+      await api.post(
+        `/projects/${projectId}/import-srt?lang_override=vi`,
+        form,
+      )
+      await loadProject(projectId)
+      setNonChineseDialog(null)
+    } catch (err2: any) {
+      alert(`Import fail: ${err2?.response?.data?.detail?.message || err2?.message || 'Unknown'}`)
+    } finally {
+      setImportingVi(false)
     }
   }
 
@@ -845,6 +863,28 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           onChaptersChanged={() => window.dispatchEvent(new Event('chapters_changed'))}
         />
       )}
+
+      {/* Dialog xác nhận import SRT tiếng Việt khi detect không phải tiếng Trung */}
+      <ConfirmModal
+        open={!!nonChineseDialog}
+        variant="warning"
+        title="File này không phải SRT tiếng Trung"
+        message={
+          nonChineseDialog
+            ? `Hệ thống chỉ phát hiện ${(nonChineseDialog.cjkRatio * 100).toFixed(1)}% ký tự Trung (cần ≥ 30%).\n` +
+              `Encoding: ${nonChineseDialog.encoding}\n\n` +
+              `Bạn có muốn import như SRT tiếng Việt (phụ đề đã dịch sẵn) không?`
+            : ''
+        }
+        warnings={[
+          'Pipeline dịch Trung→Việt sẽ không khả dụng cho project này',
+          'Phụ đề được dùng trực tiếp cho TTS lồng tiếng',
+        ]}
+        confirmText={importingVi ? 'Đang import...' : 'Import như SRT Việt'}
+        cancelText="Hủy"
+        onConfirm={confirmImportVi}
+        onCancel={() => !importingVi && setNonChineseDialog(null)}
+      />
 
       {/* Sticky toast tiến trình bulk TTS */}
       <BulkTTSProgress projectId={projectId} />

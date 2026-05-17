@@ -146,6 +146,8 @@ interface RowProps {
   emotionVoiceOn: boolean
   // v3: list mode khả dụng cho character của row này (đã upload audio)
   availableModes: string[]
+  // v3.3: project là SRT Việt thuần — ẩn row TQ + ẩn nút Dịch lại
+  isViOnly: boolean
   top: number
   height: number
 }
@@ -154,7 +156,7 @@ const Row = React.memo(function Row({
   s, isActive, isSel, isDup, isOverlap, isTTSLoading, isPlaying,
   isQueued, isQueueRunning,
   onClick, onDrop, onTTS, onDeleteAudio, onDeleteSub, onRetranslate,
-  onSetVoiceMode, emotionVoiceOn, availableModes,
+  onSetVoiceMode, emotionVoiceOn, availableModes, isViOnly,
   top, height,
 }: RowProps) {
   const char = s.character
@@ -253,8 +255,8 @@ const Row = React.memo(function Row({
               v{s.variant_selected || 1}
             </span>
           )}
-          {/* Nút Dịch lại — chỉ hiện khi active + có original_text */}
-          {s.original_text && isActive && (
+          {/* Nút Dịch lại — chỉ hiện khi active + có original_text + không phải SRT Việt thuần */}
+          {s.original_text && isActive && !isViOnly && (
             <button
               onClick={e => { e.stopPropagation(); onRetranslate(s) }}
               style={{
@@ -268,8 +270,8 @@ const Row = React.memo(function Row({
           )}
         </div>
 
-        {/* Row 2: original text (tiếng Trung) — chỉ khi có */}
-        {s.original_text && (
+        {/* Row 2: original text (tiếng Trung) — ẩn nếu là SRT Việt thuần */}
+        {s.original_text && !isViOnly && (
           <span style={{
             fontSize: 11, color: isActive ? 'rgba(255,255,255,0.45)' : '#9CA3AF',
             fontFamily: 'system-ui,sans-serif', letterSpacing: '0.02em',
@@ -287,8 +289,11 @@ const Row = React.memo(function Row({
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block',
         }}>
           {(() => {
-            // Chỉ hiển thị text khi đã dịch (khác original_text TQ)
-            const t = s.text && s.text !== s.original_text ? s.text : ''
+            // SRT Việt thuần (isViOnly): text chính là nội dung Việt → hiển thị luôn.
+            // SRT Trung: chỉ hiển thị text khi đã dịch (khác original_text TQ).
+            const t = isViOnly
+              ? (s.text || '')
+              : (s.text && s.text !== s.original_text ? s.text : '')
             if (!t) return <span style={{ fontStyle: 'italic', opacity: 0.35, fontSize: 13 }}>Chưa dịch</span>
             return t.includes('|')
               ? t.split('|').slice(1).join('|').trim() || t
@@ -379,6 +384,9 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const characters = useStore(s => s.characters)
   const activeSubId = useStore(s => s.activeSubId)
   const selectedIds = useStore(s => s.selectedIds)
+  // v3.3: project source_lang để biết có phải SRT Việt thuần (ẩn row TQ + tắt nút Dịch lại)
+  const sourceLang = useStore(s => s.project?.source_lang)
+  const isViOnly = sourceLang === 'vi'
   const toggleSelect    = useStore(s => s.toggleSelect)
   const updateSubtitle  = useStore(s => s.updateSubtitle)
   const deleteAudioStore = useStore(s => s.deleteAudio)
@@ -723,6 +731,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
               onSetVoiceMode={handleSetVoiceMode}
               emotionVoiceOn={emotionVoiceOn}
               availableModes={s.character_id ? (voiceModesByChar[s.character_id] || []) : []}
+              isViOnly={isViOnly}
               top={vi.start}
               height={vi.size}
             />

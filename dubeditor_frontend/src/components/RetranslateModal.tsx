@@ -31,6 +31,7 @@ interface StoredSettings {
 }
 
 const STORAGE_KEY = 'translate_config_v3'
+const RT_THINKING_KEY = 'retranslate_thinking_v1'   // toggle riêng cho modal Dịch lại
 
 function loadSettings(): StoredSettings {
   try {
@@ -47,6 +48,19 @@ function loadSettings(): StoredSettings {
   return { api_key: '', provider: 'gemini', model: 'gemini-2.5-flash' }
 }
 
+function loadThinking(): boolean {
+  try {
+    const raw = localStorage.getItem(RT_THINKING_KEY)
+    if (raw === 'true') return true
+    if (raw === 'false') return false
+  } catch {}
+  return false   // mặc định TẮT — nhanh + rẻ, hợp dịch lại 1 dòng
+}
+
+function saveThinking(v: boolean) {
+  try { localStorage.setItem(RT_THINKING_KEY, String(v)) } catch {}
+}
+
 export default function RetranslateModal({
   projectId, subtitleId, originalText, currentText, onClose, onApply,
 }: Props) {
@@ -58,6 +72,8 @@ export default function RetranslateModal({
   const [resultEmotion, setResultEmotion] = useState<string | null>(null)
   const [resultIntensity, setResultIntensity] = useState<number | null>(null)
   const [tokens, setTokens] = useState<{ in: number; out: number } | null>(null)
+  // v3.3: toggle thinking — mặc định tắt (nhanh, rẻ); persist localStorage
+  const [thinking, setThinking] = useState<boolean>(() => loadThinking())
 
   async function handleRun() {
     setErr('')
@@ -81,6 +97,7 @@ export default function RetranslateModal({
         api_key: settings.api_key,
         provider: settings.provider,
         model: settings.model,
+        thinking,
       })
       setResultV1(r.new_text_v1 || '')
       setResultV2(r.new_text_v2 || null)
@@ -153,9 +170,24 @@ export default function RetranslateModal({
             />
           </div>
 
-          {/* Run button */}
-          <div className="flex items-center gap-3">
-            <div className="text-[11px] text-zinc-500 flex-1">
+          {/* Run button + Thinking toggle */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="flex items-center gap-2 px-2.5 py-1 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/50 cursor-pointer select-none"
+              title="Thinking: bật cho chất lượng cao hơn (chậm + tốn token), tắt cho tốc độ + tiết kiệm">
+              <input
+                type="checkbox"
+                checked={thinking}
+                onChange={e => { setThinking(e.target.checked); saveThinking(e.target.checked) }}
+                className="accent-blue-600 w-3.5 h-3.5"
+              />
+              <span className="text-[12px] font-medium text-zinc-700 dark:text-zinc-200">
+                🧠 Thinking
+              </span>
+              <span className="text-[10px] text-zinc-400">
+                {thinking ? '(chậm, chất lượng cao)' : '(nhanh, rẻ)'}
+              </span>
+            </label>
+            <div className="text-[11px] text-zinc-500 flex-1 min-w-0">
               Tự động trả 2 bản: sát nghĩa (v1) + thoát ý (v2)
             </div>
             <button

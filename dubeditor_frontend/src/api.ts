@@ -98,6 +98,7 @@ export const translateApi = {
     api_key: string
     provider?: 'gemini' | 'openai' | 'deepseek'
     model?: string
+    thinking?: boolean | null     // v3.3: toggle thinking (mặc định false ở BE)
   }) =>
     api.post<RetranslateResult>(`/projects/${pid}/translate/retranslate`, payload).then(r => r.data),
 

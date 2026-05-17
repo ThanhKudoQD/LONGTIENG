@@ -51,7 +51,7 @@ for d in [DATA_DIR, PUBLIC_DIR, UPLOADS_DIR,
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 MODEL_ID   = str(BASE_DIR / "VoxCPM2")
-GPU_MEM    = 0.75
+GPU_MEM    = 0.95
 MAX_SEQS   = 2
 HOST       = "0.0.0.0"
 PORT       = 8809

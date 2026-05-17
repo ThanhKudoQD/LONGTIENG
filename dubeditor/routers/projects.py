@@ -172,16 +172,18 @@ async def upload_video(project_id: int, file: UploadFile = File(...), db: Sessio
 async def import_srt(
     project_id: int,
     file: UploadFile = File(...),
-    force: bool = False,
+    force: bool = False,                 # giữ lại để backward-compatible
+    lang_override: str | None = None,    # 'vi' = user xác nhận import như SRT Việt
     db: Session = Depends(get_db),
 ):
     """Import SRT vào project.
 
     Tự động detect language qua tỉ lệ ký tự CJK.
     - is_chinese=True (CJK ≥ 30%): set source_lang='zh', dùng cho pipeline v2
-    - is_chinese=False: trả 400 với mã DETECTED_NON_CHINESE
-      → Pipeline v2 cần tiếng Trung gốc. User có thể truyền ?force=true để
-        bypass (ví dụ test pipeline với SRT đã dịch sẵn).
+    - is_chinese=False:
+        + Nếu lang_override='vi' (hoặc force=True): import như SRT tiếng Việt,
+          source_lang='vi'. Phụ đề được lưu thẳng vào `text` (đã dịch sẵn).
+        + Ngược lại: trả 400 với mã DETECTED_NON_CHINESE để FE confirm.
     """
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
@@ -225,8 +227,11 @@ async def import_srt(
     cjk_ratio = cjk_count / max(text_chars, 1)
     is_chinese = cjk_ratio >= 0.3   # 30% trở lên ≈ chắc chắn là Trung
 
-    # Block nếu không phải tiếng Trung (trừ khi force)
-    if not is_chinese and not force:
+    # User đã xác nhận import như SRT Việt (qua dialog FE) hoặc force cũ
+    as_vietnamese = (lang_override == "vi") or force
+
+    # Block nếu không phải tiếng Trung (trừ khi user đã xác nhận as_vietnamese)
+    if not is_chinese and not as_vietnamese:
         raise HTTPException(
             status_code=400,
             detail={
@@ -235,8 +240,7 @@ async def import_srt(
                     f"File này không phải SRT tiếng Trung "
                     f"(chỉ {cjk_count} ký tự Trung / {text_chars} ký tự = "
                     f"{cjk_ratio*100:.1f}%, cần ≥ 30%). "
-                    f"Pipeline v2 dịch Trung→Việt — không hỗ trợ SRT tiếng Việt làm input. "
-                    f"Nếu bạn vẫn muốn import (vd: chỉ để chạy polish), thêm ?force=true."
+                    f"Bạn có muốn import như SRT tiếng Việt (đã dịch sẵn) không?"
                 ),
                 "cjk_count": cjk_count,
                 "total_chars": text_chars,
@@ -245,23 +249,34 @@ async def import_srt(
             },
         )
 
+    # Parse SRT — nếu as_vietnamese thì coi như đã dịch (không cần TQ)
     subs = parse_srt(content, is_chinese=is_chinese)
     if not subs:
         raise HTTPException(400, "SRT không có dòng hợp lệ nào (không match được timestamp).")
 
     db.query(Subtitle).filter(Subtitle.project_id == project_id).delete()
     for i, s in enumerate(subs):
-        # Lưu cùng text vào cả `text` (sẽ thay bằng bản dịch sau) và
-        # `original_text` (bản gốc — không bao giờ thay đổi).
-        sub_data = {
-            "start_time":    s["start_time"],
-            "end_time":      s["end_time"],
-            "text":          s["text"],
-            "original_text": s["text"],
-        }
+        if as_vietnamese:
+            # SRT Việt: text = nội dung (đã dịch), original_text = None (không có TQ gốc).
+            # → FE biết để ẩn row TQ, không hiện "Chưa dịch".
+            sub_data = {
+                "start_time":    s["start_time"],
+                "end_time":      s["end_time"],
+                "text":          s["text"],
+                "original_text": None,
+            }
+        else:
+            # SRT Trung: lưu cùng text vào cả `text` (sẽ thay bằng bản dịch sau)
+            # và `original_text` (bản gốc — không bao giờ thay đổi).
+            sub_data = {
+                "start_time":    s["start_time"],
+                "end_time":      s["end_time"],
+                "text":          s["text"],
+                "original_text": s["text"],
+            }
         db.add(Subtitle(project_id=project_id, index=i+1, **sub_data))
 
-    p.source_lang = "zh" if is_chinese else "vi"
+    p.source_lang = "vi" if as_vietnamese else ("zh" if is_chinese else "vi")
     db.commit()
     return {
         "imported": len(subs),
@@ -269,7 +284,7 @@ async def import_srt(
         "detected_chinese": is_chinese,
         "cjk_ratio": round(cjk_ratio, 3),
         "encoding": used_encoding,
-        "forced": force,
+        "as_vietnamese": as_vietnamese,
     }
 
 

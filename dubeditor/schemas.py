@@ -313,6 +313,8 @@ class RetranslateRequest(BaseModel):
     model:         str = "gemini-2.5-flash"
     # v3: luôn trả 2 bản (frontend hiển thị cả 2 cho user chọn)
     return_variants: bool = True
+    # v3.3: toggle thinking (None=default model / False=tắt nhanh+rẻ / True=bật chất lượng)
+    thinking:      Optional[bool] = False
 
 
 class SelectVariantRequest(BaseModel):
