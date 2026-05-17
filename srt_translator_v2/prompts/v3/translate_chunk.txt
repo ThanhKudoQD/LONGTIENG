@@ -13,12 +13,56 @@ Dịch CHUNK dưới đây sang tiếng Việt. Mỗi dòng cần 2 bản:
 5 TẦNG DỊCH CHO text_v1
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-╔═══ TẦNG 1: ĐÚNG NGHĨA ═══╗
-- Đọc CỤM sub cùng speaker để hiểu trọn ý, không word-by-word.
-  Vd: "你不愿意 / 可以走" (2 sub) → "Cô không muốn / thì cứ đi"
-  KHÔNG ép sub 2 thành câu riêng "Có thể đi"
-- Đa nghĩa → chọn theo ngữ cảnh (context trước/sau + scene)
-- Tự loại từ rác lẻ chen trong câu:
+╔═══ TẦNG 1: ĐÚNG NGHĨA + HIỂU CỤM SUB ═══╗
+
+Phụ đề TQ cắt theo NHỊP HƠI THỞ diễn viên, không theo ngữ pháp.
+1 câu dài thường bị cắt thành 2-4 sub liên tiếp cùng speaker.
+
+NHẬN BIẾT CỤM SUB LIỀN MẠCH (cùng 1 câu cắt nhỏ):
+- Cùng speaker_zh ở các sub liên tiếp
+- Sub kết thúc bằng "，" / "、" hoặc KHÔNG có dấu câu → câu chưa trọn
+- Sub sau bắt đầu bằng bổ ngữ / định ngữ / vị ngữ rời
+
+CÁCH DỊCH CỤM SUB:
+- ĐỌC CẢ CỤM, hiểu trọn ý câu TQ gốc
+- DỊCH thành câu Việt tự nhiên hoàn chỉnh trong đầu
+- PHÂN BỔ chữ Việt vào các sub theo timing — KHÔNG ép mỗi sub thành câu riêng
+
+Vì cấu trúc TQ và VN NGƯỢC NHAU (TQ: bổ ngữ/định ngữ TRƯỚC danh từ;
+VN: bổ ngữ/định ngữ SAU danh từ), thứ tự chữ trong các sub Việt
+thường KHÔNG khớp với thứ tự chữ trong các sub TQ — đây là BÌNH THƯỜNG.
+
+Ví dụ cụm 2 sub:
+  Sub A (zh): 我要让你成为全世界
+  Sub B (zh): 最幸福的女人
+
+  ❌ Ép sub A thành câu riêng (tự đóng câu → rác nghĩa):
+     A: "Anh muốn em trở thành cả thế giới"
+     B: "người phụ nữ hạnh phúc nhất"
+
+  ❌ Word-by-word giữ thứ tự TQ (sai ngữ pháp VN):
+     A: "Anh muốn em thành cả thế giới"
+     B: "hạnh phúc nhất của người phụ nữ"
+
+  ✅ Đảo thứ tự cho VN tự nhiên, phân bổ lại giữa 2 sub:
+     A: "Anh muốn biến em thành"
+     B: "người phụ nữ hạnh phúc nhất trên thế gian này"
+
+Ví dụ cụm 3 sub:
+  Sub A (zh): 你不愿意    Sub B (zh): 可以    Sub C (zh): 走
+  ✅ A: "Cô không muốn"   B: "thì cứ"          C: "đi đi"
+
+Ví dụ cụm 3 sub có đảo cấu trúc:
+  Sub A (zh): 我从来没有        (Tôi chưa từng)
+  Sub B (zh): 这么认真地         (nghiêm túc đến vậy)
+  Sub C (zh): 喜欢过一个人       (thích một người)
+  ✅ A: "Anh chưa bao giờ"
+     B: "thích một ai"
+     C: "nghiêm túc đến thế này"
+
+Đa nghĩa → chọn theo ngữ cảnh (context trước/sau + scene).
+
+LOẠI RÁC LẺ trong sub:
   - "腾讯视频 我爱你"      → "Em yêu anh" (bỏ watermark)
   - "继续给我找 我与周家"  → "Tiếp tục tìm cho tôi" (bỏ chữ rời rạc)
   - "[音乐] 你好"           → "Xin chào"
@@ -86,11 +130,30 @@ Văn phong theo era (từ Bible.world.era):
 - Hiện đại: thoải mái, có tiếng lóng nhẹ
 - Ngôn tình: mượt mà, tình cảm
 
-╔═══ TẦNG 5: KHÔNG GỘP DÒNG ═══╗
-- DỊCH 1-1: mỗi line_index zh → 1 text_v1 tiếng Việt
-- KHÔNG bỏ dòng, KHÔNG gộp 2 dòng thành 1, KHÔNG tách 1 dòng thành 2
-- KHÔNG trả text_v1 = "" (LỖI)
-- Mọi line_index trong input PHẢI có entry trong output
+╔═══ TẦNG 5: GIỮ SỐ DÒNG — KHÔNG GỘP / KHÔNG TÁCH ═══╗
+
+LUẬT BẤT BIẾN (không được vi phạm):
+- Mỗi line_index trong input PHẢI có ĐÚNG 1 entry trong output
+- KHÔNG bỏ dòng (text_v1 rỗng = LỖI)
+- KHÔNG gộp 2 sub thành 1 (để sub kia text_v1 rỗng = LỖI)
+- KHÔNG tách 1 sub thành 2 entry trong output
+
+ĐƯỢC PHÉP (theo Tầng 1):
+- PHÂN BỔ LẠI chữ Việt giữa các sub LIỀN KỀ cùng speaker để câu mượt
+- ĐẢO THỨ TỰ bổ ngữ / định ngữ giữa các sub (do TQ và VN ngược cấu trúc)
+- Sub Việt CÓ THỂ là MẢNH CÂU khi nó thuộc 1 cụm — miễn:
+  · Cả cụm đọc lên trọn ý, văn phong tự nhiên
+  · Mỗi sub vẫn có nội dung KHÔNG rỗng, KHÔNG trùng lặp sub khác
+
+KHÔNG ĐƯỢC PHÉP:
+- Tự thêm chủ ngữ / bổ ngữ giả để "đóng" sub thành câu trọn riêng
+  (gây sai nghĩa kiểu "trở thành cả thế giới")
+- Để 1 sub trong cụm bị bỏ trống / lặp y nguyên sub trước
+- Dồn toàn bộ ý vào 1 sub rồi để các sub khác rỗng
+
+SUB ĐỘC LẬP (không thuộc cụm):
+- Speaker khác sub trước/sau, HOẶC sub TQ là câu trọn ý (kết thúc bằng 。！？)
+- → Dịch thành câu Việt TRỌN, đứng độc lập
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 text_v2 — BẢN DỊCH KHÁC v1
@@ -183,11 +246,11 @@ CHECKLIST CUỐI (rà trước khi trả JSON)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🔴 5 TẦNG:
-□ Tầng 1: Đúng nghĩa, không word-by-word, loại rác lẻ
+□ Tầng 1: Đúng nghĩa, hiểu CỤM sub liền mạch, đảo cấu trúc TQ→VN khi cần, loại rác lẻ
 □ Tầng 2: Câu Việt tự nhiên, không "mùi dịch"
 □ Tầng 3: Xưng hô đúng quan hệ, áp Genre Pack, không phá rule CẤM
 □ Tầng 4: Thành ngữ TQ → VN, văn phong khớp era
-□ Tầng 5: Mọi line có text_v1 không rỗng, không gộp/tách dòng
+□ Tầng 5: Đủ entry cho mọi line_index, không gộp/tách, sub mảnh OK nếu thuộc cụm và không rỗng
 
 🔵 v2:
 □ Diễn đạt khác v1, vẫn đúng nghĩa + nhân vật

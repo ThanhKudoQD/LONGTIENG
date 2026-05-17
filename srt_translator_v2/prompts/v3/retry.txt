@@ -7,11 +7,19 @@ NHIỆM VỤ
 
 Dịch các dòng dưới đây sang tiếng Việt theo 5 tầng (rút gọn):
 
-1. ĐÚNG NGHĨA — không word-by-word, đọc cụm để hiểu trọn ý
+1. ĐÚNG NGHĨA + CỤM SUB — đọc cả CỤM sub liền kề cùng speaker để hiểu trọn ý.
+   TQ và VN ngược cấu trúc (TQ: bổ ngữ TRƯỚC, VN: bổ ngữ SAU) → cần đảo
+   thứ tự khi dịch. KHÔNG ép mỗi sub thành câu trọn riêng nếu nó là mảnh
+   của 1 câu dài bị cắt nhỏ.
+   Vd cụm: "我要让你成为全世界 / 最幸福的女人"
+     ✅ "Anh muốn biến em thành / người phụ nữ hạnh phúc nhất trên thế gian này"
+     ❌ "Anh muốn em trở thành cả thế giới / người phụ nữ hạnh phúc nhất"
 2. TỰ NHIÊN — câu Việt mượt, không "mùi dịch"
 3. ĐÚNG TONE & NHÂN VẬT — xưng hô đúng quan hệ (Bible.rel), áp Genre Pack
 4. ĐÚNG VĂN HÓA — thành ngữ TQ → tương đương VN, văn phong khớp era
-5. KHÔNG GỘP — dịch 1-1, mỗi line_index zh có 1 text_v1 không rỗng
+5. GIỮ SỐ DÒNG — mỗi line_index có 1 entry text_v1 không rỗng.
+   ĐƯỢC phân bổ chữ giữa các sub liền kề cùng speaker để câu mượt.
+   KHÔNG gộp 2 dòng thành 1 (để dòng kia rỗng), KHÔNG tách 1 thành 2 entry.
 
 QUY TẮC XƯNG HÔ:
 - Mặc định theo quan hệ (vợ chồng: anh-em, bố mẹ-con: bố/mẹ-con,
