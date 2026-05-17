@@ -26,6 +26,30 @@ interface EditorStore {
   activeSubId: number | null
   selectedIds: Set<number>
 
+  // ── FILTER STATE (single source of truth) ──────────────────────────────
+  // Dùng cho TOÀN BỘ hành động: hiển thị, đếm, select-all, bulk TTS, auto-fix,
+  // bulk trim, set speed character… Khi có filter → mọi xử lý hàng loạt chỉ
+  // động vào subset đang lọc. Không filter → áp toàn phim như cũ.
+  filterText: string
+  filterNoChar: boolean
+  filterNoTTS: boolean
+  filterOverlap: boolean
+  filterCharIds: number[]
+  filterChapterIds: number[]
+  // chapters cached ở store để selector visibility tính được range
+  chapters: any[]
+  // overlapSubIds cache cho filter "Lọc đè"
+  overlapSubIds: Set<number>
+
+  setFilterText: (v: string) => void
+  setFilterNoChar: (v: boolean) => void
+  setFilterNoTTS: (v: boolean) => void
+  setFilterOverlap: (v: boolean) => void
+  setFilterCharIds: (ids: number[]) => void
+  setFilterChapterIds: (ids: number[]) => void
+  setChapters: (ch: any[]) => void
+  setOverlapSubIds: (s: Set<number>) => void
+
   setProject: (p: Project) => void
   setSubtitles: (s: Subtitle[]) => void
   setCharacters: (c: Character[]) => void
@@ -69,6 +93,25 @@ const useStore = create<EditorStore>((set, get) => ({
   selectedIds: new Set(),
   seekRequest: null,
   lastTtsAt: 0,
+
+  // ── Filter state defaults ────────────────────────────────────────────
+  filterText: '',
+  filterNoChar: false,
+  filterNoTTS: false,
+  filterOverlap: false,
+  filterCharIds: [],
+  filterChapterIds: [],
+  chapters: [],
+  overlapSubIds: new Set(),
+
+  setFilterText: (v) => set({ filterText: v }),
+  setFilterNoChar: (v) => set({ filterNoChar: v }),
+  setFilterNoTTS: (v) => set({ filterNoTTS: v }),
+  setFilterOverlap: (v) => set({ filterOverlap: v }),
+  setFilterCharIds: (ids) => set({ filterCharIds: ids }),
+  setFilterChapterIds: (ids) => set({ filterChapterIds: ids }),
+  setChapters: (ch) => set({ chapters: ch }),
+  setOverlapSubIds: (s) => set({ overlapSubIds: s }),
 
   // Stub — thực tế đọc/ghi qua usePlayTimeStore. Setter forward bên dưới.
   playTime: 0,
@@ -202,6 +245,15 @@ const useStore = create<EditorStore>((set, get) => ({
       voiceModesByCharacter: vm,
       activeSubId: null,
       selectedIds: new Set(),
+      // v3.4: reset filter khi đổi project (tránh filter chapter project A áp sang B)
+      filterText: '',
+      filterNoChar: false,
+      filterNoTTS: false,
+      filterOverlap: false,
+      filterCharIds: [],
+      filterChapterIds: [],
+      chapters: [],
+      overlapSubIds: new Set(),
     })
   },
 }))
@@ -237,3 +289,113 @@ export const usePlayTimeStore = create<PlayTimeStore>((set) => ({
 }))
 
 export default useStore
+
+// ─────────────────────────────────────────────────────────────────────
+// VISIBLE SELECTORS — single source of truth cho filter
+// ─────────────────────────────────────────────────────────────────────
+// Bất cứ hành động hàng loạt nào (TTS, auto-fix, delete, set speed,
+// swap NV, trim…) ĐỀU phải dùng các hàm này, KHÔNG được đọc trực tiếp
+// state.subtitles và tự build filter, để tránh lệch giữa các component.
+//
+// Quy tắc: nếu có BẤT KỲ filter nào đang bật → trả subset đã lọc.
+//          nếu không filter → trả toàn bộ subtitles.
+
+export interface VisibleFilters {
+  filterText: string
+  filterNoChar: boolean
+  filterNoTTS: boolean
+  filterOverlap: boolean
+  filterCharIds: number[]
+  filterChapterIds: number[]
+  overlapSubIds: Set<number>
+  chapters: any[]
+}
+
+export function readFilters(): VisibleFilters {
+  const s = useStore.getState()
+  return {
+    filterText: s.filterText,
+    filterNoChar: s.filterNoChar,
+    filterNoTTS: s.filterNoTTS,
+    filterOverlap: s.filterOverlap,
+    filterCharIds: s.filterCharIds,
+    filterChapterIds: s.filterChapterIds,
+    overlapSubIds: s.overlapSubIds,
+    chapters: s.chapters,
+  }
+}
+
+export function hasAnyFilter(f?: VisibleFilters): boolean {
+  const v = f ?? readFilters()
+  return !!(
+    v.filterText.trim() ||
+    v.filterNoChar ||
+    v.filterNoTTS ||
+    v.filterOverlap ||
+    v.filterCharIds.length > 0 ||
+    v.filterChapterIds.length > 0
+  )
+}
+
+function buildChapterRanges(f: VisibleFilters): [number, number][] {
+  if (!f.filterChapterIds.length) return []
+  return f.chapters
+    .filter((c: any) => f.filterChapterIds.includes(c.id))
+    .map((c: any) => [c.start_sub_index, c.end_sub_index] as [number, number])
+}
+
+function matchVisible(s: Subtitle, f: VisibleFilters, chapterRanges: [number, number][]): boolean {
+  if (f.filterText) {
+    const q = f.filterText.toLowerCase()
+    if (!s.text.toLowerCase().includes(q) &&
+        !(s.character?.name?.toLowerCase().includes(q))) return false
+  }
+  if (f.filterNoChar && s.character_id) return false
+  if (f.filterNoTTS && (s as any).tts_done) return false
+  if (f.filterOverlap && !f.overlapSubIds.has(s.id)) return false
+  if (f.filterCharIds.length > 0 &&
+      (!s.character_id || !f.filterCharIds.includes(s.character_id))) return false
+  if (chapterRanges.length > 0) {
+    const inRange = chapterRanges.some(([lo, hi]) => s.index >= lo && s.index <= hi)
+    if (!inRange) return false
+  }
+  return true
+}
+
+/**
+ * Trả các Subtitle đang VISIBLE theo filter hiện tại.
+ * Không filter → trả full subtitles.
+ */
+export function getVisibleSubtitles(): Subtitle[] {
+  const f = readFilters()
+  if (!hasAnyFilter(f)) return useStore.getState().subtitles
+  const ranges = buildChapterRanges(f)
+  return useStore.getState().subtitles.filter(s => matchVisible(s, f, ranges))
+}
+
+/**
+ * Trả ids các Subtitle đang VISIBLE theo filter hiện tại.
+ */
+export function getVisibleSubtitleIds(): number[] {
+  return getVisibleSubtitles().map(s => s.id)
+}
+
+/**
+ * Helper cho component cần tính visible từ state đã có (memo).
+ * Truyền subtitles + filters → trả subset.
+ */
+export function filterVisible(
+  subtitles: Subtitle[],
+  f: VisibleFilters,
+): Subtitle[] {
+  const has =
+    !!f.filterText.trim() ||
+    f.filterNoChar ||
+    f.filterNoTTS ||
+    f.filterOverlap ||
+    f.filterCharIds.length > 0 ||
+    f.filterChapterIds.length > 0
+  if (!has) return subtitles
+  const ranges = buildChapterRanges(f)
+  return subtitles.filter(s => matchVisible(s, f, ranges))
+}

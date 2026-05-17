@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import json
 import logging
 from datetime import datetime
@@ -35,6 +35,9 @@ class AutoFixRequest(BaseModel):
     overlap_threshold: float = 0.5
     threshold_anchor:  float = 4.0
     dry_run:           bool  = True
+    # v3.4: nếu truyền → CHỈ scan + fix các sub này (frontend dùng để giới hạn
+    # auto-fix trong đoạn đang lọc). Không truyền → fix toàn project như cũ.
+    subtitle_ids: Optional[List[int]] = None
 
 
 class FixChangeOut(BaseModel):
@@ -56,8 +59,11 @@ class AutoFixResponse(BaseModel):
 def auto_fix_overlap(project_id: int, data: AutoFixRequest, db: Session = Depends(get_db)):
     _ensure_snapshot_table()
 
-    # Load subtitles
-    subs = db.query(Subtitle).filter(Subtitle.project_id == project_id).order_by(Subtitle.index).all()
+    # Load subtitles — scope theo subtitle_ids nếu có
+    query = db.query(Subtitle).filter(Subtitle.project_id == project_id)
+    if data.subtitle_ids:
+        query = query.filter(Subtitle.id.in_(data.subtitle_ids))
+    subs = query.order_by(Subtitle.index).all()
     if not subs:
         raise HTTPException(404, "Project không có phụ đề")
 

@@ -5,6 +5,12 @@ import useStore from '../store'
 interface Props {
   projectId: number
   onClose: () => void
+  /**
+   * v3.4: nếu có filter đoạn/NV đang bật ở Editor, parent truyền danh sách
+   * subtitle ids visible xuống. Auto-fix sẽ CHỈ scan + fix các sub này.
+   * undefined → fix toàn phim như behavior cũ.
+   */
+  subtitleIdsFilter?: number[]
 }
 
 interface FixChange {
@@ -27,7 +33,7 @@ interface PreviewData {
   changes: FixChange[]
 }
 
-export default function AutoFixOverlapModal({ projectId, onClose }: Props) {
+export default function AutoFixOverlapModal({ projectId, onClose, subtitleIdsFilter }: Props) {
   const [overlapThreshold, setOverlapThreshold] = useState(0.5)
   const [thresholdAnchor, setThresholdAnchor]   = useState(4.0)
   const [preview, setPreview]                   = useState<PreviewData | null>(null)
@@ -37,16 +43,27 @@ export default function AutoFixOverlapModal({ projectId, onClose }: Props) {
 
   const updateSubtitle = useStore(s => s.updateSubtitle)
 
+  // v3.4: helper build payload — kèm subtitle_ids nếu có filter
+  const buildPayload = (dryRun: boolean) => {
+    const base: any = {
+      overlap_threshold: overlapThreshold,
+      threshold_anchor:  thresholdAnchor,
+      dry_run:           dryRun,
+    }
+    if (subtitleIdsFilter && subtitleIdsFilter.length > 0) {
+      base.subtitle_ids = subtitleIdsFilter
+    }
+    return base
+  }
+
+  const isScoped = !!(subtitleIdsFilter && subtitleIdsFilter.length > 0)
+
   // Tự load preview khi mở hoặc đổi config
   useEffect(() => {
     if (applied) return
     let cancelled = false
     setLoading(true)
-    api.post(`/projects/${projectId}/auto-fix-overlap`, {
-      overlap_threshold: overlapThreshold,
-      threshold_anchor:  thresholdAnchor,
-      dry_run:           true,
-    }).then(r => {
+    api.post(`/projects/${projectId}/auto-fix-overlap`, buildPayload(true)).then(r => {
       if (!cancelled) setPreview(r.data)
     }).catch(() => {
       if (!cancelled) setPreview(null)
@@ -54,17 +71,13 @@ export default function AutoFixOverlapModal({ projectId, onClose }: Props) {
       if (!cancelled) setLoading(false)
     })
     return () => { cancelled = true }
-  }, [overlapThreshold, thresholdAnchor, projectId, applied])
+  }, [overlapThreshold, thresholdAnchor, projectId, applied, subtitleIdsFilter])
 
   const handleApply = async () => {
     if (!preview || preview.changes.length === 0) return
     setApplying(true)
     try {
-      const r = await api.post(`/projects/${projectId}/auto-fix-overlap`, {
-        overlap_threshold: overlapThreshold,
-        threshold_anchor:  thresholdAnchor,
-        dry_run:           false,
-      })
+      const r = await api.post(`/projects/${projectId}/auto-fix-overlap`, buildPayload(false))
       // Update local store ngay
       r.data.changes.forEach((c: FixChange) => {
         updateSubtitle(c.sub_id, { audio_offset: c.new_offset })
@@ -100,6 +113,11 @@ export default function AutoFixOverlapModal({ projectId, onClose }: Props) {
         <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-700 flex items-center justify-between">
           <h3 className="text-base font-bold flex items-center gap-2">
             <span>⚡</span> Tự động fix audio chồng lấn
+            {isScoped && (
+              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 border border-blue-200 dark:border-blue-800">
+                đoạn đang lọc · {subtitleIdsFilter!.length} dòng
+              </span>
+            )}
           </h3>
           <button onClick={onClose} className="text-zinc-400 hover:text-zinc-600 text-xl leading-none">×</button>
         </div>

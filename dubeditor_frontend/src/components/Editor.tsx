@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react'
-import useStore, { usePlayTimeStore } from '../store'
+import useStore, { usePlayTimeStore, filterVisible } from '../store'
 import api from '../api'
 import CharSidebar from './CharSidebar'
 import SubtitleList from './SubtitleList'
@@ -33,12 +33,21 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   const setActiveSubId = useStore(s => s.setActiveSubId)
   const updateSubtitle = useStore(s => s.updateSubtitle)
   const [sidebarVisible, setSidebarVisible] = useState(true)
-  const [filter, setFilter] = useState('')
-  const [filterNoChar, setFilterNoChar] = useState(false)
-  const [filterNoTTS, setFilterNoTTS] = useState(false)
-  const [filterOverlap, setFilterOverlap] = useState(false)
-  const [filterCharIds, setFilterCharIds] = useState<number[]>([])   // Lọc theo nhiều NV (rỗng = tất cả)
-  const [filterChapterIds, setFilterChapterIds] = useState<number[]>([])  // Lọc theo nhiều chapter (rỗng = tất cả)
+  // v3.4: filter state đã chuyển sang Zustand store. Đọc state + setters trực tiếp.
+  const filter = useStore(s => s.filterText)
+  const setFilter = useStore(s => s.setFilterText)
+  const filterNoChar = useStore(s => s.filterNoChar)
+  const setFilterNoChar = useStore(s => s.setFilterNoChar)
+  const filterNoTTS = useStore(s => s.filterNoTTS)
+  const setFilterNoTTS = useStore(s => s.setFilterNoTTS)
+  const filterOverlap = useStore(s => s.filterOverlap)
+  const setFilterOverlap = useStore(s => s.setFilterOverlap)
+  const filterCharIds = useStore(s => s.filterCharIds)
+  const setFilterCharIds = useStore(s => s.setFilterCharIds)
+  const filterChapterIds = useStore(s => s.filterChapterIds)
+  const setFilterChapterIds = useStore(s => s.setFilterChapterIds)
+  const setChaptersInStore = useStore(s => s.setChapters)
+  const setOverlapSubIdsInStore = useStore(s => s.setOverlapSubIds)
   const [showSwapModal, setShowSwapModal] = useState(false)
   const [swapping, setSwapping]           = useState(false)
   const [showAutoFix, setShowAutoFix] = useState(false)
@@ -131,8 +140,10 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
     try {
       const r = await api.get(`/chapters/project/${projectId}`)
       setChapters(r.data)
+      // v3.4: sync vào store để filter helpers tính range được
+      setChaptersInStore(r.data || [])
     } catch {}
-  }, [projectId])
+  }, [projectId, setChaptersInStore])
 
   useEffect(() => { reloadChapters() }, [reloadChapters])
 
@@ -369,7 +380,10 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
     if (!fromId || !toId || fromId === toId) return
     setSwapping(true)
     try {
-      const ids = subtitles.filter(s => s.character_id === fromId).map(s => s.id)
+      // v3.4: nếu có filter đang bật → chỉ swap subs nằm trong visible
+      // (đoạn đang lọc / NV đang lọc / text đang lọc). Không filter → toàn phim như cũ.
+      const baseList = hasActiveFilter ? subtitles.filter(s => visibleIdsSet.has(s.id)) : subtitles
+      const ids = baseList.filter(s => s.character_id === fromId).map(s => s.id)
       if (!ids.length) return
       const charTo = characters.find(c => c.id === toId)
       await api.post('/subtitles/bulk-assign', { subtitle_ids: ids, character_id: toId })
@@ -434,8 +448,11 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
     }
   }
 
-  // Tính overlap chains — chuỗi audio liên tiếp chồng nhau
-  const overlapGroups = useMemo(() => {
+  // v3.4: overlapGroups TÁCH thành 2 view:
+  //  - overlapGroupsAll: full project — cần cho filter checkbox "Lọc đè" + AudioList
+  //  - overlapGroups: chỉ chuỗi đè TRONG đoạn đang lọc — số hiển thị ở nút Auto fix
+  // Khi user lọc đoạn 9 dòng, nút "Auto fix (N)" phải show N theo đoạn đó.
+  const overlapGroupsAll = useMemo(() => {
     const withAudio = subtitles.filter(s => s.tts_done && s.audio_path)
     if (!withAudio.length) return []
 
@@ -479,29 +496,65 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
     return chains
   }, [subtitles, overlapMinCount, overlapMinSec])
 
-  const overlapSubIds = useMemo(() => new Set(overlapGroups.flat()), [overlapGroups])
+  const overlapSubIds = useMemo(() => new Set(overlapGroupsAll.flat()), [overlapGroupsAll])
 
-  // PERF: memo visibleCount — trước đây chạy filter trên 6000 items mỗi render
-  const visibleCount = useMemo(() => {
+  // Sync overlapSubIds vào store để filter helpers + checkbox "Lọc đè" dùng được
+  useEffect(() => { setOverlapSubIdsInStore(overlapSubIds) }, [overlapSubIds, setOverlapSubIdsInStore])
+
+  // v3.4: visibleIdsSet — Set id subtitle đang visible theo filter (chapter+char+text+...)
+  // Dùng cho: visibleCount, nút ☑ select all, overlapGroups scoped, topbar done counter
+  const visibleIdsSet = useMemo(() => {
     const f = filter.toLowerCase()
-    let n = 0
+    const chapterRanges: [number, number][] = (filterChapterIds.length > 0)
+      ? chapters
+          .filter(c => filterChapterIds.includes(c.id))
+          .map(c => [c.start_sub_index, c.end_sub_index] as [number, number])
+      : []
+    const ids = new Set<number>()
     for (const s of subtitles) {
-      if (f && !s.text.toLowerCase().includes(f)) continue
+      if (f && !s.text.toLowerCase().includes(f) &&
+          !(s.character?.name.toLowerCase().includes(f))) continue
       if (filterNoChar && s.character_id) continue
       if (filterNoTTS && s.tts_done) continue
       if (filterOverlap && !overlapSubIds.has(s.id)) continue
-      if (filterCharIds.length > 0 && (!s.character_id || !filterCharIds.includes(s.character_id))) continue
-      n++
+      if (filterCharIds.length > 0 &&
+          (!s.character_id || !filterCharIds.includes(s.character_id))) continue
+      if (chapterRanges.length > 0) {
+        let inAny = false
+        for (const [a, b] of chapterRanges) {
+          if (s.index >= a && s.index <= b) { inAny = true; break }
+        }
+        if (!inAny) continue
+      }
+      ids.add(s.id)
     }
-    return n
-  }, [subtitles, filter, filterNoChar, filterNoTTS, filterOverlap, overlapSubIds, filterCharIds])
+    return ids
+  }, [subtitles, filter, filterNoChar, filterNoTTS, filterOverlap, overlapSubIds, filterCharIds, filterChapterIds, chapters])
 
-  // PERF: memo done count
+  const hasActiveFilter = !!filter || filterNoChar || filterNoTTS || filterOverlap ||
+    filterCharIds.length > 0 || filterChapterIds.length > 0
+
+  // overlapGroups giới hạn trong đoạn đang lọc — chỉ giữ chain nào TOÀN BỘ id thuộc visible
+  // (an toàn: không auto-fix chuỗi đè nửa trong nửa ngoài đoạn)
+  const overlapGroups = useMemo(() => {
+    if (!hasActiveFilter) return overlapGroupsAll
+    return overlapGroupsAll.filter(chain => chain.every(id => visibleIdsSet.has(id)))
+  }, [overlapGroupsAll, visibleIdsSet, hasActiveFilter])
+
+  // PERF: memo visibleCount — số dòng đang hiển thị theo filter
+  const visibleCount = visibleIdsSet.size
+
+  // PERF: memo done count — theo filter: nếu có lọc thì đếm trong đoạn, không lọc thì cả phim
   const done = useMemo(() => {
+    if (hasActiveFilter) {
+      let n = 0
+      for (const s of subtitles) if (visibleIdsSet.has(s.id) && s.tts_done) n++
+      return n
+    }
     let n = 0
     for (const s of subtitles) if (s.tts_done) n++
     return n
-  }, [subtitles])
+  }, [subtitles, visibleIdsSet, hasActiveFilter])
 
   return (
     <div className="flex flex-col h-screen bg-zinc-100 dark:bg-zinc-950 overflow-hidden text-zinc-900 dark:text-zinc-100">
@@ -533,10 +586,23 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <span className="text-[13px] font-semibold truncate">{project?.name || '...'}</span>
           {project && <span className="text-[11px] text-zinc-300 bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded font-mono flex-shrink-0">#{project.id}</span>}
-          <span className="text-[12px] text-zinc-400 flex-shrink-0">{subtitles.length} dòng</span>
-          <span className={`text-[12px] flex-shrink-0 ${done === subtitles.length && done > 0 ? 'text-emerald-500' : 'text-zinc-400'}`}>
-            · {done}/{subtitles.length} TTS
-          </span>
+          {hasActiveFilter ? (
+            <>
+              <span className="text-[12px] text-blue-500 flex-shrink-0" title="Đang lọc — số đếm chỉ trong đoạn đang lọc">
+                {visibleCount} dòng (lọc)
+              </span>
+              <span className={`text-[12px] flex-shrink-0 ${done === visibleCount && done > 0 ? 'text-emerald-500' : 'text-zinc-400'}`}>
+                · {done}/{visibleCount} TTS
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="text-[12px] text-zinc-400 flex-shrink-0">{subtitles.length} dòng</span>
+              <span className={`text-[12px] flex-shrink-0 ${done === subtitles.length && done > 0 ? 'text-emerald-500' : 'text-zinc-400'}`}>
+                · {done}/{subtitles.length} TTS
+              </span>
+            </>
+          )}
         </div>
         <label className="btn cursor-pointer">
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M6.5 1v8M3 5.5l3.5 3.5L10 5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M1 10h11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
@@ -594,10 +660,12 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           {emotionVoiceOn ? 'Mode cảm xúc ON' : 'Mode cảm xúc OFF'}
         </button>
 
-        {/* Auto Fix Overlap button */}
+        {/* Auto Fix Overlap button — số chuỗi đè theo đoạn đang lọc */}
         <button onClick={() => setShowAutoFix(true)}
           disabled={overlapGroups.length === 0}
-          title={overlapGroups.length > 0 ? `Tự động fix ${overlapGroups.length} chuỗi đè` : 'Không có chuỗi đè'}
+          title={overlapGroups.length > 0
+            ? `Tự động fix ${overlapGroups.length} chuỗi đè${hasActiveFilter ? ' (trong đoạn đang lọc)' : ''}`
+            : 'Không có chuỗi đè'}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0 border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-950 disabled:opacity-40 disabled:cursor-not-allowed">
           <span>⚡</span>
           Auto fix{overlapGroups.length > 0 ? ` (${overlapGroups.length})` : ''}
@@ -710,18 +778,18 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
               <input placeholder="Tìm phụ đề..." value={filter} onChange={e => setFilter(e.target.value)}
                 className="input w-full pl-8 text-[13px]" />
             </div>
-            <button onClick={() => setFilterNoChar(v => !v)}
+            <button onClick={() => setFilterNoChar(!filterNoChar)}
               className={`flex-shrink-0 px-2.5 py-1.5 text-[12px] rounded-lg border transition-all font-medium ${filterNoChar ? 'bg-amber-50 text-amber-700 border-amber-300' : 'btn'}`}>
               ? char
             </button>
-            <button onClick={() => setFilterNoTTS(v => !v)}
+            <button onClick={() => setFilterNoTTS(!filterNoTTS)}
               className={`flex-shrink-0 px-2.5 py-1.5 text-[12px] rounded-lg border transition-all font-medium ${filterNoTTS ? 'bg-blue-50 text-blue-700 border-blue-300' : 'btn'}`}>
               no TTS
             </button>
 
             {/* Overlap navigator */}
             <div className="flex items-center gap-1 flex-shrink-0">
-              <button onClick={() => { setFilterOverlap(v => !v); setOverlapIdx(0) }}
+              <button onClick={() => { setFilterOverlap(!filterOverlap); setOverlapIdx(0) }}
                 className={`px-2.5 py-1.5 text-[12px] rounded-lg border transition-all font-medium ${filterOverlap ? 'bg-red-50 text-red-700 border-red-300 dark:bg-red-950 dark:text-red-400 dark:border-red-800' : 'btn'}`}>
                 ⚠{overlapGroups.length > 0 ? ` ${overlapGroups.length}` : ''}
               </button>
@@ -766,21 +834,13 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
               )}
             </div>
 
-            {/* Chọn tất cả visible */}
+            {/* Chọn tất cả visible — theo filter đoạn/NV/text đang lọc */}
             <button
               onClick={() => {
-                const { subtitles: subs } = useStore.getState()
-                const visibleIds = subs.filter(s => {
-                  if (filter && !s.text.toLowerCase().includes(filter.toLowerCase())) return false
-                  if (filterNoChar && s.character_id) return false
-                  if (filterNoTTS && s.tts_done) return false
-                  if (filterOverlap && !overlapSubIds.has(s.id)) return false
-                  if (filterCharIds.length > 0 && (!s.character_id || !filterCharIds.includes(s.character_id))) return false
-                  return true
-                }).map(s => s.id)
+                const visibleIds = Array.from(visibleIdsSet)
                 const { selectedIds } = useStore.getState()
-                // Toggle: nếu đã chọn hết thì bỏ chọn, chưa thì chọn tất cả
-                const allSelected = visibleIds.every(id => selectedIds.has(id))
+                // Toggle: nếu đã chọn hết thì bỏ chọn, chưa thì chọn tất cả visible
+                const allSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id))
                 if (allSelected) {
                   useStore.setState({ selectedIds: new Set() })
                 } else {
@@ -852,6 +912,8 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
       {showAutoFix && (
         <AutoFixOverlapModal
           projectId={projectId}
+          // v3.4: khi có filter — chỉ fix trong đoạn đang lọc
+          subtitleIdsFilter={hasActiveFilter ? Array.from(visibleIdsSet) : undefined}
           onClose={() => setShowAutoFix(false)}
         />
       )}

@@ -502,8 +502,34 @@ async def character_set_speed(char_id: int, data: CharacterSetSpeedRequest, db: 
         raise HTTPException(404, "Character not found")
 
     speed = max(0.5, min(2.0, data.tts_speed))
-    char.tts_speed = speed
 
+    # v3.4: phân nhánh theo có subtitle_ids hay không
+    #
+    # Có subtitle_ids (frontend đang lọc đoạn):
+    #   - KHÔNG đổi Character.tts_speed (giữ nguyên tốc độ chung của NV)
+    #   - SET tts_speed = speed cho TỪNG sub trong list (override per-sub)
+    #   - Chỉ động vào subs thuộc list + có character_id = char_id
+    #
+    # Không có subtitle_ids (toàn phim như cũ):
+    #   - ĐỔI Character.tts_speed thành speed
+    #   - Nếu apply_to_subs → reset override (tts_speed=NULL) cho mọi sub
+    #     của NV này để chúng kế thừa tốc độ NV mới
+    if data.subtitle_ids:
+        # Scoped mode — không đổi tốc độ character, chỉ override các sub trong list
+        affected_subs = db.query(Subtitle).filter(
+            Subtitle.id.in_(data.subtitle_ids),
+            Subtitle.character_id == char_id,
+        ).update({"tts_speed": speed}, synchronize_session=False)
+        db.commit()
+        return {
+            "character_id": char_id,
+            "tts_speed": speed,
+            "subs_updated": affected_subs,
+            "scoped": True,
+        }
+
+    # Full mode — behavior cũ
+    char.tts_speed = speed
     affected_subs = 0
     if data.apply_to_subs:
         affected_subs = db.query(Subtitle).filter(

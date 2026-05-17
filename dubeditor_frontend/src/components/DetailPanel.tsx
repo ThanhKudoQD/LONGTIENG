@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react'
-import useStore from '../store'
+import React, { useState, useRef, useEffect, useMemo } from 'react'
+import useStore, { filterVisible } from '../store'
 import api from '../api'
 import ConfirmModal from './ConfirmModal'
 import InfoDialog from './InfoDialog'
@@ -13,6 +13,33 @@ export default function DetailPanel() {
   const activeSubId = useStore(s => s.activeSubId)
   const updateSubtitle = useStore(s => s.updateSubtitle)
   const selectedIds = useStore(s => s.selectedIds)
+
+  // v3.4: filter state — dùng để giới hạn mọi bulk action trong đoạn đang lọc
+  const filterText = useStore(s => s.filterText)
+  const filterNoChar = useStore(s => s.filterNoChar)
+  const filterNoTTS = useStore(s => s.filterNoTTS)
+  const filterOverlap = useStore(s => s.filterOverlap)
+  const filterCharIds = useStore(s => s.filterCharIds)
+  const filterChapterIds = useStore(s => s.filterChapterIds)
+  const overlapSubIdsFromStore = useStore(s => s.overlapSubIds)
+  const chaptersFromStore = useStore(s => s.chapters)
+
+  const hasFilter = useMemo(() => (
+    !!filterText.trim() || filterNoChar || filterNoTTS || filterOverlap ||
+    filterCharIds.length > 0 || filterChapterIds.length > 0
+  ), [filterText, filterNoChar, filterNoTTS, filterOverlap, filterCharIds, filterChapterIds])
+
+  // visibleSubtitles = đang hiển thị theo filter. Khi không filter → full subtitles.
+  // TẤT CẢ bulk actions (TTS, trim, set speed, delete audio, done counter) đều dựa
+  // trên cái này — không được đọc thẳng `subtitles` nữa.
+  const visibleSubtitles = useMemo(() => filterVisible(subtitles, {
+    filterText, filterNoChar, filterNoTTS, filterOverlap,
+    filterCharIds, filterChapterIds,
+    overlapSubIds: overlapSubIdsFromStore,
+    chapters: chaptersFromStore,
+  }), [subtitles, filterText, filterNoChar, filterNoTTS, filterOverlap,
+       filterCharIds, filterChapterIds, overlapSubIdsFromStore, chaptersFromStore])
+  const visibleIdSet = useMemo(() => new Set(visibleSubtitles.map(s => s.id)), [visibleSubtitles])
 
   const activeSub = subtitles.find(s => s.id === activeSubId)
   const lastSubRef = useRef<typeof activeSub | undefined>(undefined)
@@ -74,23 +101,27 @@ export default function DetailPanel() {
     return () => document.removeEventListener('mousedown', onClickOut)
   }, [srtMenuOpen])
 
-  const done = subtitles.filter(s => s.tts_done).length
-  const total = subtitles.length
-  const noChar = subtitles.filter(s => !s.character_id).length
+  // v3.4: done/total/noChar — khi có filter → đếm trong đoạn đang lọc; không filter → toàn phim
+  const baseList = hasFilter ? visibleSubtitles : subtitles
+  const done = baseList.filter(s => s.tts_done).length
+  const total = baseList.length
+  const noChar = baseList.filter(s => !s.character_id).length
   const pct = total ? Math.round(done / total * 100) : 0
 
   // ────────────────────── ACTIONS ──────────────────────
 
   const bulkTTS = async () => {
     if (!project) return
-    const willGenerate = subtitles.filter(s => !s.tts_done && s.character_id).map(s => s.id)
-    const skipped = subtitles.filter(s => !s.tts_done).length - willGenerate.length
+    // v3.4: chỉ áp trong đoạn đang lọc (nếu có filter), không thì toàn phim như cũ
+    const src = hasFilter ? visibleSubtitles : subtitles
+    const willGenerate = src.filter(s => !s.tts_done && s.character_id).map(s => s.id)
+    const skipped = src.filter(s => !s.tts_done).length - willGenerate.length
 
     if (!willGenerate.length) {
       setInfo({
         message: skipped > 0
           ? `${skipped} dòng chưa gán nhân vật bị bỏ qua, không có dòng nào hợp lệ để tạo TTS.`
-          : 'Tất cả phụ đề đã có TTS rồi!',
+          : (hasFilter ? 'Tất cả phụ đề trong đoạn lọc đã có TTS rồi!' : 'Tất cả phụ đề đã có TTS rồi!'),
         variant: 'info',
       })
       return
@@ -100,8 +131,10 @@ export default function DetailPanel() {
     if (skipped > 0) warnings.push(`Bỏ qua ${skipped} dòng chưa gán nhân vật`)
 
     setConfirmCfg({
-      title: 'Tạo TTS tất cả',
-      message: `Sẽ tạo TTS cho ${willGenerate.length} dòng đã gán nhân vật. Quá trình này có thể mất nhiều thời gian.`,
+      title: hasFilter ? 'Tạo TTS (đoạn đang lọc)' : 'Tạo TTS tất cả',
+      message: hasFilter
+        ? `Sẽ tạo TTS cho ${willGenerate.length} dòng trong đoạn đang lọc. Quá trình này có thể mất nhiều thời gian.`
+        : `Sẽ tạo TTS cho ${willGenerate.length} dòng đã gán nhân vật. Quá trình này có thể mất nhiều thời gian.`,
       warnings,
       variant: 'default',
       confirmText: 'Bắt đầu',
@@ -250,10 +283,17 @@ export default function DetailPanel() {
     if (!project) return
     setTrimLoading(true); setTrimMsg('')
     try {
-      const ids = subtitles.filter(s => s.tts_done && s.audio_path).map(s => s.id)
+      // v3.4: chỉ trim trong đoạn đang lọc (nếu có filter)
+      const src = hasFilter ? visibleSubtitles : subtitles
+      const ids = src.filter(s => s.tts_done && s.audio_path).map(s => s.id)
+      if (!ids.length) {
+        setTrimMsg(hasFilter ? 'Không có audio trong đoạn lọc' : 'Không có audio để trim')
+        setTrimLoading(false)
+        return
+      }
       const res = await api.post('/tts/trim-bulk', { subtitle_ids: ids, threshold_db: trimDb })
       ids.forEach(id => updateSubtitle(id, { tts_done: true }))
-      setTrimMsg(`✓ Đã trim ${res.data.trimmed}/${ids.length} file`)
+      setTrimMsg(`✓ Đã trim ${res.data.trimmed}/${ids.length} file${hasFilter ? ' (đoạn lọc)' : ''}`)
     } catch {
       setTrimMsg('Lỗi trim')
     } finally { setTrimLoading(false) }
@@ -545,6 +585,27 @@ function SpeedSection({ sub, setConfirmCfg, setInfo }: SpeedSectionProps) {
   const setCharacters = useStore(s => s.setCharacters)
   const selectedIds = useStore(s => s.selectedIds)
 
+  // v3.4: filter state — áp speed character chỉ trong đoạn lọc nếu có filter
+  const filterText = useStore(s => s.filterText)
+  const filterNoChar = useStore(s => s.filterNoChar)
+  const filterNoTTS = useStore(s => s.filterNoTTS)
+  const filterOverlap = useStore(s => s.filterOverlap)
+  const filterCharIds = useStore(s => s.filterCharIds)
+  const filterChapterIds = useStore(s => s.filterChapterIds)
+  const overlapSubIdsFromStore = useStore(s => s.overlapSubIds)
+  const chaptersFromStore = useStore(s => s.chapters)
+  const hasFilter = (
+    !!filterText.trim() || filterNoChar || filterNoTTS || filterOverlap ||
+    filterCharIds.length > 0 || filterChapterIds.length > 0
+  )
+  const visibleSubtitles = React.useMemo(() => filterVisible(subtitles, {
+    filterText, filterNoChar, filterNoTTS, filterOverlap,
+    filterCharIds, filterChapterIds,
+    overlapSubIds: overlapSubIdsFromStore,
+    chapters: chaptersFromStore,
+  }), [subtitles, filterText, filterNoChar, filterNoTTS, filterOverlap,
+       filterCharIds, filterChapterIds, overlapSubIdsFromStore, chaptersFromStore])
+
   const char = sub.character || characters.find((c: any) => c.id === sub.character_id)
   const effective = getEffectiveSpeed(sub, char)
   const isInherited = sub.tts_speed == null
@@ -580,13 +641,40 @@ function SpeedSection({ sub, setConfirmCfg, setInfo }: SpeedSectionProps) {
         setInfo({ message: 'Sub chưa gán nhân vật', variant: 'info' })
         return
       }
-      const charSubs = subtitles.filter(s => s.character_id === char.id)
+      // v3.4: nếu có filter → chỉ áp cho subs của NV này NẰM TRONG đoạn lọc
+      const baseList = hasFilter ? visibleSubtitles : subtitles
+      const charSubs = baseList.filter(s => s.character_id === char.id)
       const overrideCount = charSubs.filter(s => s.tts_speed != null).length
+
+      if (!charSubs.length) {
+        setInfo({
+          message: hasFilter
+            ? `Không có dòng nào của "${char.name}" trong đoạn đang lọc.`
+            : `Không có dòng nào của "${char.name}".`,
+          variant: 'info',
+        })
+        return
+      }
 
       const doApply = async () => {
         try {
-          await api.post(`/tts/character/${char.id}/set-speed`, { tts_speed: speed, apply_to_subs: true })
-          setCharacters(characters.map((c: any) => c.id === char.id ? { ...c, tts_speed: speed } : c))
+          // Khi có filter → gửi kèm subtitle_ids để backend chỉ reset override
+          // trong scope visible (không động tới subs ngoài đoạn lọc).
+          // Khi không filter → giữ behavior cũ (apply_to_subs cho toàn NV).
+          const charSubIds = charSubs.map(s => s.id)
+          if (hasFilter) {
+            await api.post(`/tts/character/${char.id}/set-speed`, {
+              tts_speed: speed,
+              apply_to_subs: true,
+              subtitle_ids: charSubIds,
+            })
+          } else {
+            await api.post(`/tts/character/${char.id}/set-speed`, {
+              tts_speed: speed,
+              apply_to_subs: true,
+            })
+            setCharacters(characters.map((c: any) => c.id === char.id ? { ...c, tts_speed: speed } : c))
+          }
           charSubs.forEach(s => {
             if (s.tts_speed != null) updateSubtitle(s.id, { tts_speed: null })
           })
@@ -596,8 +684,12 @@ function SpeedSection({ sub, setConfirmCfg, setInfo }: SpeedSectionProps) {
       }
 
       setConfirmCfg({
-        title: `Đặt tốc độ ${speed.toFixed(2)}x cho "${char.name}"`,
-        message: `Sẽ áp dụng cho ${charSubs.length} dòng của nhân vật này.`,
+        title: hasFilter
+          ? `Đặt tốc độ ${speed.toFixed(2)}x cho "${char.name}" (đoạn đang lọc)`
+          : `Đặt tốc độ ${speed.toFixed(2)}x cho "${char.name}"`,
+        message: hasFilter
+          ? `Sẽ áp dụng cho ${charSubs.length} dòng của nhân vật này TRONG ĐOẠN ĐANG LỌC.`
+          : `Sẽ áp dụng cho ${charSubs.length} dòng của nhân vật này.`,
         warnings: overrideCount > 0
           ? [`${overrideCount} dòng đã có tốc độ riêng — sẽ bị reset về tốc độ chung`]
           : [],

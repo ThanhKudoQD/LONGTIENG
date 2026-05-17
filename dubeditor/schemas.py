@@ -245,6 +245,12 @@ class BulkSetSpeedRequest(BaseModel):
 class CharacterSetSpeedRequest(BaseModel):
     tts_speed:     float
     apply_to_subs: bool = True
+    # v3.4: nếu truyền → chỉ áp speed mới + reset override cho subs trong list này
+    # (frontend dùng để giới hạn trong đoạn đang lọc). Khi truyền subtitle_ids,
+    # tốc độ character (Character.tts_speed) sẽ KHÔNG bị thay đổi — chỉ override
+    # tốc độ riêng cho từng sub trong list. Không truyền → behavior cũ: đổi
+    # character.tts_speed + reset mọi override của character đó.
+    subtitle_ids:  Optional[list[int]] = None
 
 class TTSEnqueueRequest(BaseModel):
     subtitle_ids: list[int]

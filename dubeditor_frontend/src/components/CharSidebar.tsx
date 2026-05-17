@@ -174,18 +174,45 @@ export default function CharSidebar({ visible }: Props) {
   const realChars    = characters.filter(c => !c.name.startsWith('SPEAKER_'))
 
   const mapSpeakerToChar = async (speakerCharId: number, targetCharId: number) => {
-    // Lấy tất cả subtitle của speaker
-    const { subtitles: subs } = useStore.getState()
-    const ids = subs.filter(s => s.character_id === speakerCharId).map(s => s.id)
+    // v3.4: nếu có filter đoạn/NV đang bật → CHỈ remap subs trong đoạn lọc.
+    // KHÔNG xóa speaker character vì nó vẫn còn subs ngoài đoạn lọc.
+    // Không filter → behavior cũ: remap tất cả + xóa speaker.
+    const state = useStore.getState()
+    const hasFilter = (
+      !!state.filterText.trim() || state.filterNoChar || state.filterNoTTS ||
+      state.filterOverlap || state.filterCharIds.length > 0 ||
+      state.filterChapterIds.length > 0
+    )
+
+    // Import filterVisible động để tránh circular
+    const { filterVisible } = await import('../store')
+    const baseList = hasFilter
+      ? filterVisible(state.subtitles, {
+          filterText: state.filterText,
+          filterNoChar: state.filterNoChar,
+          filterNoTTS: state.filterNoTTS,
+          filterOverlap: state.filterOverlap,
+          filterCharIds: state.filterCharIds,
+          filterChapterIds: state.filterChapterIds,
+          overlapSubIds: state.overlapSubIds,
+          chapters: state.chapters,
+        })
+      : state.subtitles
+
+    const ids = baseList.filter(s => s.character_id === speakerCharId).map(s => s.id)
     if (!ids.length) return
     const targetChar = characters.find(c => c.id === targetCharId)
     // Reassign
     await api.post('/subtitles/bulk-assign', { subtitle_ids: ids, character_id: targetCharId })
     ids.forEach(id => updateSubtitle(id, { character_id: targetCharId, character: targetChar }))
     window.dispatchEvent(new CustomEvent('subs_assigned', { detail: { subtitle_ids: ids } }))
-    // Xóa speaker char
-    await api.delete(`/characters/${speakerCharId}`)
-    setCharacters(characters.filter(c => c.id !== speakerCharId))
+
+    // v3.4: chỉ xóa speaker character khi KHÔNG còn sub nào tham chiếu nó
+    const stillRefs = useStore.getState().subtitles.some(s => s.character_id === speakerCharId)
+    if (!stillRefs) {
+      await api.delete(`/characters/${speakerCharId}`)
+      setCharacters(characters.filter(c => c.id !== speakerCharId))
+    }
     setMappingCharId(null)
   }
 
