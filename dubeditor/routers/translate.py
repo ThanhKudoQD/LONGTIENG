@@ -546,22 +546,28 @@ def revert_cleaned_subtitle(pid: int, subtitle_id: int, db: Session = Depends(ge
     # Xóa log
     db.delete(removed)
 
-    # Reindex liên tục để đảm bảo không có gap
+    # Reindex liên tục để đảm bảo không có gap.
+    # v3.9 perf: bulk_update_mappings thay vì load 6000 ORM + commit từng UPDATE.
     db.commit()
-    remaining = db.query(Subtitle).filter(
-        Subtitle.project_id == pid,
-    ).order_by(Subtitle.index).all()
-    for new_idx, sub in enumerate(remaining, start=1):
-        if sub.index != new_idx:
-            sub.index = new_idx
-    db.commit()
+    remaining_rows = (
+        db.query(Subtitle.id, Subtitle.index)
+        .filter(Subtitle.project_id == pid)
+        .order_by(Subtitle.index)
+        .all()
+    )
+    mappings = []
+    for new_idx, (sub_id, old_idx) in enumerate(remaining_rows, start=1):
+        if old_idx != new_idx:
+            mappings.append({"id": sub_id, "index": new_idx})
+    if mappings:
+        db.bulk_update_mappings(Subtitle, mappings)
 
-    # Cập nhật subtitle_count
+    # Cập nhật subtitle_count — gộp commit chung
     from dubeditor.models import Project
     project = db.query(Project).filter(Project.id == pid).first()
     if project:
-        project.subtitle_count = len(remaining)
-        db.commit()
+        project.subtitle_count = len(remaining_rows)
+    db.commit()
 
     return {"ok": True, "subtitle_id": subtitle_id, "action": "restored_removed"}
 

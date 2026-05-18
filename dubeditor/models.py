@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, Text
+from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, DateTime, Text, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from dubeditor.database import Base
@@ -137,6 +137,11 @@ class Subtitle(Base):
     project   = relationship("Project",   back_populates="subtitles")
     character = relationship("Character", back_populates="subtitles")
     scene     = relationship("Scene",     back_populates="subtitles")
+    # v3.9 perf: composite index cho query "WHERE project_id=? ORDER BY index"
+    # Stage 0 reindex chạy query này, không có index sẽ full scan + filesort.
+    __table_args__ = (
+        Index('ix_subtitles_project_index', 'project_id', 'index'),
+    )
 
 class Chapter(Base):
     __tablename__ = "chapters"

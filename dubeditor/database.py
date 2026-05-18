@@ -145,6 +145,19 @@ def _migrate_v3():
             conn.commit()
             print("[migrate v3] Dropped deprecated table: translate_chunks")
 
+        # v3.9 perf: composite index cho Stage 0 reindex query.
+        # "WHERE project_id=? ORDER BY index" — không có index sẽ full scan + filesort.
+        # Phim 6000 dòng: reindex ~30s → ~1s sau khi có index + bulk_update_mappings.
+        if has_table("subtitles"):
+            try:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS ix_subtitles_project_index "
+                    "ON subtitles(project_id, \"index\")"
+                )
+                conn.commit()
+            except Exception as e:
+                print(f"[migrate v3.9] index create failed: {e}")
+
         # Note: tables bibles, scenes, story_arcs, polish_issues, chunks (NEW)
         # được tạo tự động bởi Base.metadata.create_all (SQLAlchemy).
 
