@@ -486,7 +486,7 @@ export default function CharSidebar({ visible }: Props) {
                           _sidebarAudio?.pause(); _sidebarAudio = null; setPlayingAudio(null)
                         } else {
                           if (_sidebarAudio) { _sidebarAudio.pause(); _sidebarAudio = null }
-                          const a = new Audio(`http://localhost:8809${c.audio}`)
+                          const a = new Audio(`${c.audio}`)
                           _sidebarAudio = a; a.play().catch(()=>{})
                           a.onended = () => { _sidebarAudio = null; setPlayingAudio(null) }
                           setPlayingAudio(c.audio!)

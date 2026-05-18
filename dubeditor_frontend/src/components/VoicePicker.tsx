@@ -25,7 +25,7 @@ function AudioPlayer({ src }: { src: string }) {
   const toggle = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (!audioRef.current) {
-      audioRef.current = new Audio(`http://localhost:8809${src}`)
+      audioRef.current = new Audio(`${src}`)
       audioRef.current.onended = () => setPlaying(false)
     }
     if (playing) { audioRef.current.pause(); audioRef.current.currentTime = 0; setPlaying(false) }
@@ -322,7 +322,7 @@ export default function VoicePicker({ onSelect, onClose }: Props) {
                     {/* Ảnh */}
                     <div style={{ position: 'relative', height: 220, background: '#1a1a2e', overflow: 'hidden' }}>
                       {actor.avatar ? (
-                        <img src={`http://localhost:8809${actor.avatar}`}
+                        <img src={`${actor.avatar}`}
                           style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: 'top' }} />
                       ) : (
                         <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 40, color: 'rgba(255,255,255,0.2)' }}>🎙</div>

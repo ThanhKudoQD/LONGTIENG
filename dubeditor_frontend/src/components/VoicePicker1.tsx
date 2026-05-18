@@ -26,7 +26,7 @@ function AudioPlayer({ src }: { src: string }) {
   const toggle = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (!audioRef.current) {
-      audioRef.current = new Audio(`http://localhost:8809${src}`)
+      audioRef.current = new Audio(`${src}`)
       audioRef.current.onended = () => setPlaying(false)
     }
     if (playing) { 
@@ -320,7 +320,7 @@ export default function VoicePicker({ onSelect, onClose }: Props) {
                       {isSelected && <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2 6L5 9L10 3" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
                     </div>
                     <div style={{ position: 'relative', height: 180, background: '#1a1a2e' }}>
-                      {actor.avatar && <img src={`http://localhost:8809${actor.avatar}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
+                      {actor.avatar && <img src={`${actor.avatar}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />}
                     </div>
                     <div style={{ padding: '12px' }}>
                       <p style={{ fontSize: 14, fontWeight: 700 }}>{role.character_name}</p>
