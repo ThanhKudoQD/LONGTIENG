@@ -101,17 +101,26 @@ def _run_tts(text: str, role_id: str, emotion: Optional[str] = None,
         lora_path = (role.lora_path or "").strip() or None
         use_lora  = lora_path and Path(lora_path).exists()
 
+        # v3.13: Thêm dấu "," đầu câu để VoxCPM gen audio chuẩn hơn
+        # (kỹ thuật prompt — dấu phẩy giúp model "khởi động" giọng tự nhiên,
+        #  tránh bị cắt đầu hoặc burst âm thanh ở milisecond đầu).
+        # Skip nếu text đã bắt đầu bằng dấu câu/khoảng trắng.
+        tts_text = (text or "").strip()
+        if tts_text and tts_text[0] not in ',.!?;:，。！？；：、 ':
+            tts_text = ', ' + tts_text
+
         # Log mode được dùng (để debug)
         logger.info(
             f"[TTS-MODE] role={role_id} emotion={emotion or '-'} "
             f"intensity={intensity} → mode_used={mode_used} "
-            f"ref={'✓' if ref_path else '✗'} ref_text={'✓' if ref_text else '✗'}"
+            f"ref={'✓' if ref_path else '✗'} ref_text={'✓' if ref_text else '✗'} "
+            f"tts_text={tts_text!r}"[:300]
         )
 
         # Hi-Fi khi đủ ref + ref_text
         if ref_path and ref_text:
             return generate_sync(
-                target_text=text,
+                target_text=tts_text,
                 reference_wav_path=ref_path,
                 prompt_wav_path=ref_path,
                 prompt_text=ref_text,
@@ -120,14 +129,14 @@ def _run_tts(text: str, role_id: str, emotion: Optional[str] = None,
             )
         elif ref_path:
             return generate_sync(
-                target_text=text,
+                target_text=tts_text,
                 reference_wav_path=ref_path,
                 cfg_value=TTS_CFG,
                 lora_path=lora_path if use_lora else None,
             )
         else:
             return generate_sync(
-                target_text=text,
+                target_text=tts_text,
                 cfg_value=TTS_CFG,
                 lora_path=lora_path if use_lora else None,
             )

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
 import { Project } from '../types'
+import SettingsModal from './SettingsModal'
 
 interface Props { onOpen: (id: number) => void }
 
@@ -8,6 +9,7 @@ export default function ProjectList({ onOpen }: Props) {
   const [projects, setProjects] = useState<Project[]>([])
   const [name, setName] = useState('')
   const [loading, setLoading] = useState(true)
+  const [showSettings, setShowSettings] = useState(false)  // v3.12
 
   const load = async () => {
     const res = await api.get('/projects/'); setProjects(res.data); setLoading(false)
@@ -27,9 +29,18 @@ export default function ProjectList({ onOpen }: Props) {
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950">
       <div className="max-w-2xl mx-auto px-6 py-12">
-        <div className="mb-8">
-          <h1 className="text-2xl font-semibold mb-1">DubEditor</h1>
-          <p className="text-sm text-zinc-400">Lồng tiếng và chỉnh sửa phụ đề</p>
+        <div className="mb-8 flex items-start justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold mb-1">DubEditor</h1>
+            <p className="text-sm text-zinc-400">Lồng tiếng và chỉnh sửa phụ đề</p>
+          </div>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="text-sm text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 px-3 py-1.5 rounded border border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100 dark:hover:bg-zinc-900"
+            title="API keys + Preset model"
+          >
+            ⚙ Cài đặt
+          </button>
         </div>
 
         {/* Create new */}
@@ -83,6 +94,7 @@ export default function ProjectList({ onOpen }: Props) {
           </div>
         )}
       </div>
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
     </div>
   )
 }

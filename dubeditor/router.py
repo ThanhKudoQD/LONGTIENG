@@ -3,6 +3,7 @@ from dubeditor.routers import projects, subtitles, characters, tts, export, ws, 
 from dubeditor.routers import auto_assign, auto_fix, chapters
 from dubeditor.routers import translate
 from dubeditor.routers import license as license_router
+from dubeditor.routers import settings  # v3.12
 
 router = APIRouter()
 # License — đặt TRƯỚC các router khác để middleware không chặn nhầm
@@ -18,3 +19,5 @@ router.include_router(chapters.router,     prefix="/api/chapters",   tags=["dub-
 router.include_router(translate.router,    prefix="/api",            tags=["dub-translate"])
 router.include_router(ws.router,                                      tags=["dub-ws"])
 router.include_router(presets.router,      prefix="/api/presets",    tags=["dub-presets"])
+# v3.12: settings global (API keys + model presets)
+router.include_router(settings.router,     prefix="/api",            tags=["dub-settings"])

@@ -295,7 +295,28 @@ class PipelineConfig:
     quality: QualityConfig = field(default_factory=QualityConfig)
 
     provider: Literal["gemini", "openai", "deepseek"] = "gemini"
-    api_key: str = ""
+    api_key: str = ""   # Legacy — dùng khi 3 key dưới rỗng (fallback)
+
+    # v3.12: Per-provider keys — cho phép mix provider giữa các stage trong cùng 1 pipeline
+    api_key_gemini:   str = ""
+    api_key_openai:   str = ""
+    api_key_deepseek: str = ""
+
+    def get_api_key_for(self, model: str) -> str:
+        """Pick đúng key theo provider detect từ model name.
+
+        Fallback chain:
+          model là gemini → api_key_gemini → api_key (nếu provider mặc định = gemini)
+          model là openai → api_key_openai → api_key (nếu provider mặc định = openai)
+          model là deepseek → api_key_deepseek → api_key (nếu provider mặc định = deepseek)
+        """
+        m = (model or "").strip().lower()
+        if m.startswith("gemini"):
+            return self.api_key_gemini or (self.api_key if self.provider == "gemini" else "")
+        if m.startswith("deepseek"):
+            return self.api_key_deepseek or (self.api_key if self.provider == "deepseek" else "")
+        # GPT / o1 / o3 / chatgpt → openai
+        return self.api_key_openai or (self.api_key if self.provider == "openai" else "")
 
     # Paths
     prompts_dir: Path = field(default_factory=lambda: Path(__file__).parent / "prompts" / "v3")

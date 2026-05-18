@@ -337,7 +337,7 @@ async def process_one_chunk(
             prompt=prompt,
             cached_prefix=cached_prefix,
             model=config.models.get_model_for("stage4"),
-            api_key=config.api_key,
+            api_key=config.get_api_key_for(config.models.get_model_for("stage4")),
             temperature=0.4,
             max_output=16000,
             json_mode=True,

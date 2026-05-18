@@ -30,6 +30,9 @@ from core.pipeline import run_full_pipeline, PipelineCallbacks
 from core.srt_parser import SrtEntry, calculate_cps
 from models import (
     Bible as V3Bible,
+    Cast as V3Cast,
+    World as V3World,
+    Glossary as V3Glossary,
     ChunkMap as V3ChunkMap,
     Chunk as V3Chunk,
     Scene as V3Scene,
@@ -573,6 +576,14 @@ def build_pipeline_config(req) -> PipelineConfig:
     config.api_key = req.api_key
     config.provider = req.provider
 
+    # v3.12: Per-provider keys — cho phép mix gemini/openai/deepseek trong cùng pipeline
+    if hasattr(req, "api_key_gemini") and req.api_key_gemini:
+        config.api_key_gemini = req.api_key_gemini
+    if hasattr(req, "api_key_openai") and req.api_key_openai:
+        config.api_key_openai = req.api_key_openai
+    if hasattr(req, "api_key_deepseek") and req.api_key_deepseek:
+        config.api_key_deepseek = req.api_key_deepseek
+
     # ── Legacy tier (backward compat) ─────────────────────────────────
     config.models.heavy = req.model_heavy
     config.models.medium = req.model_medium
@@ -845,7 +856,7 @@ class TranslateRunner:
                 reason = (update_map.get(sub.index) or {}).get("reason") or ""
                 self.db.add(RemovedSubtitle(
                     project_id=self.project_id,
-                    original_index=sub.index,
+                    original_index=sub.original_raw and sub.index or sub.index,
                     removed_after_index=sub.index,
                     start_time=sub.start_time,
                     end_time=sub.end_time,
@@ -859,32 +870,24 @@ class TranslateRunner:
                 Subtitle.index.in_(remove_indices),
             ).delete(synchronize_session=False)
 
-            # v3.9 perf fix: REINDEX bằng bulk_update_mappings (executemany)
-            # thay vì load 6000 ORM object + 6000 UPDATE riêng lẻ.
-            # Chỉ fetch (id, index) qua tuples, build mapping → bulk update.
-            # Trên SQLite + 6000 dòng: ~30s → ~1s.
-            remaining_rows = (
-                self.db.query(Subtitle.id, Subtitle.index)
-                .filter(Subtitle.project_id == self.project_id)
-                .order_by(Subtitle.index)
-                .all()
-            )
-            mappings = []
-            for new_idx, (sub_id, old_idx) in enumerate(remaining_rows, start=1):
-                if old_idx != new_idx:
-                    mappings.append({"id": sub_id, "index": new_idx})
-            if mappings:
-                self.db.bulk_update_mappings(Subtitle, mappings)
+            # Reindex các dòng còn lại liên tục 1, 2, 3...
+            remaining = self.db.query(Subtitle).filter(
+                Subtitle.project_id == self.project_id,
+            ).order_by(Subtitle.index).all()
+            for new_idx, sub in enumerate(remaining, start=1):
+                if sub.index != new_idx:
+                    sub.index = new_idx
+            self.db.commit()
 
-            # Cập nhật subtitle_count của project — gộp commit chung với reindex
+            # Cập nhật subtitle_count của project
             from dubeditor.models import Project
             project = self.db.query(Project).filter(Project.id == self.project_id).first()
             if project:
-                project.subtitle_count = len(remaining_rows)
-            self.db.commit()
+                project.subtitle_count = len(remaining)
+                self.db.commit()
 
-            logger.info(f"[Stage 0] Đã xóa {len(remove_indices)} dòng + reindex "
-                        f"{len(mappings)} dòng (còn lại {len(remaining_rows)})")
+            logger.info(f"[Stage 0] Đã xóa {len(remove_indices)} dòng + reindex còn "
+                        f"{len(remaining)} dòng")
 
     async def run_bible(self) -> V3Bible:
         await self._emit("bible", 0, "Stage 1: Phân tích phim...")
@@ -896,10 +899,36 @@ class TranslateRunner:
             raise ValueError("Project không có subtitles")
 
         await self._emit("bible_1a", 5, f"1A: Trích xuất nhân vật ({len(entries)} dòng)...")
-        bible = await run_stage1_bible(entries, self.config, self.tracker)
+
+        # v3.11: callback save partial Bible (cast + glossary) NGAY sau khi 1A xong.
+        # Nếu 1B bị cancel → cast/glossary đã có trong DB, không phải chạy lại 1A.
+        async def _on_cast_done(cast: V3Cast, glossary: V3Glossary):
+            try:
+                # Tạo Bible tạm với world rỗng để save partial
+                empty_world = V3World(
+                    genre=[], genre_id="other", era="", tone="", plot="", arcs=[]
+                )
+                partial_bible = V3Bible(
+                    cast=cast,
+                    world=empty_world,
+                    glossary=glossary,
+                    model_used=self.config.models.get_model_for("stage1"),
+                )
+                save_bible_to_db(self.db, self.project_id, partial_bible, self.tracker)
+                await self._emit("bible_1a_saved", 12,
+                                 f"1A xong: {len(cast.characters)} nhân vật, "
+                                 f"{len(glossary.terms)} thuật ngữ (đã lưu)")
+                logger.info(f"[Stage 1] Partial Bible saved after 1A "
+                            f"({len(cast.characters)} cast)")
+            except Exception as e:
+                logger.warning(f"[Stage 1] partial save after 1A failed: {e}")
+
+        bible = await run_stage1_bible(entries, self.config, self.tracker,
+                                        on_cast_done=_on_cast_done)
         self._check_cancelled()
 
-        await self._emit("bible_save", 18, "Lưu Bible...")
+        await self._emit("bible_save", 18, "Lưu Bible (đầy đủ)...")
+        # Save lại Bible đầy đủ (cast + world + glossary) — sẽ deactivate partial Bible cũ
         save_bible_to_db(self.db, self.project_id, bible, self.tracker)
         self._bible = bible
 

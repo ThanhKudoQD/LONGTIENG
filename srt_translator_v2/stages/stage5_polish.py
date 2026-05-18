@@ -225,7 +225,7 @@ async def retry_batch(
         req = LLMRequest(
             prompt=prompt,
             model=config.models.get_model_for("stage5"),
-            api_key=config.api_key,
+            api_key=config.get_api_key_for(config.models.get_model_for("stage5")),
             temperature=0.3,
             max_output=8000,
             json_mode=True,

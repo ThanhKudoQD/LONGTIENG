@@ -270,7 +270,7 @@ async def _process_chunk_inner(
         prompt=variable if cached_prefix else prompt,
         cached_prefix=cached_prefix if cached_prefix else None,
         model=config.models.get_model_for("stage3"),
-        api_key=config.api_key,
+        api_key=config.get_api_key_for(config.models.get_model_for("stage3")),
         temperature=0.2,
         max_output=12000,
         json_mode=True,

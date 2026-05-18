@@ -3,6 +3,7 @@ import type {
   Bible, Scene, StoryArc, Chunk, PolishIssue,
   TranslateStatus, TranslateConfig, RetranslateResult,
   CleanedSubtitle, ScanResult, Stage0RunResult,
+  ApiKeys, ModelPreset, ModelPresetInput,
 } from './types'
 
 // API instance — timeout 5 phút cho LLM calls.
@@ -231,4 +232,29 @@ export function openProgressSSE(
   }
 
   return () => es.close()
+}
+
+// ─── v3.12: Settings (API keys + Model Presets) ─────────────────────
+
+export const settingsApi = {
+  getApiKeys: () =>
+    api.get<ApiKeys>('/settings/api-keys').then(r => r.data),
+
+  putApiKeys: (keys: Partial<ApiKeys>) =>
+    api.put('/settings/api-keys', keys).then(r => r.data),
+
+  listPresets: () =>
+    api.get<ModelPreset[]>('/settings/presets').then(r => r.data),
+
+  createPreset: (preset: ModelPresetInput) =>
+    api.post<ModelPreset>('/settings/presets', preset).then(r => r.data),
+
+  updatePreset: (id: number, preset: ModelPresetInput) =>
+    api.put<ModelPreset>(`/settings/presets/${id}`, preset).then(r => r.data),
+
+  deletePreset: (id: number) =>
+    api.delete(`/settings/presets/${id}`).then(r => r.data),
+
+  setDefaultPreset: (id: number) =>
+    api.post(`/settings/presets/${id}/default`).then(r => r.data),
 }

@@ -97,7 +97,7 @@ async def stage1a_cast_and_glossary(
         prompt=variable if cached_prefix else prompt,
         cached_prefix=cached_prefix if cached_prefix else None,
         model=config.models.get_model_for("stage1"),
-        api_key=config.api_key,
+        api_key=config.get_api_key_for(config.models.get_model_for("stage1")),
         temperature=0.2,
         max_output=20000,           # đủ cho cả Cast + Glossary
         json_mode=True,
@@ -201,7 +201,7 @@ async def stage1b_world(
         prompt=variable if cached_prefix else prompt,
         cached_prefix=cached_prefix if cached_prefix else None,
         model=config.models.get_model_for("stage1"),
-        api_key=config.api_key,
+        api_key=config.get_api_key_for(config.models.get_model_for("stage1")),
         temperature=0.3,
         max_output=10000,           # tăng vì có arc summaries
         json_mode=True,
@@ -338,12 +338,17 @@ async def run_stage1_bible(
     entries: list[SrtEntry],
     config: PipelineConfig,
     tracker: CostTracker,
+    on_cast_done: Optional[callable] = None,
 ) -> Bible:
     """Stage 1 — Bible v3.
 
     Order TUẦN TỰ (cache-friendly):
     1A Cast + Glossary (heavy, full SRT)
     1B World + Arc summaries (medium, SRT cached từ 1A → giảm 50-90% input cost)
+
+    v3.11: thêm `on_cast_done` callback — gọi NGAY sau khi 1A xong với (cast, glossary)
+    để caller có thể save Bible PARTIAL (chỉ cast + glossary, chưa có world).
+    Nếu 1B bị cancel → caller vẫn giữ được data 1A.
     """
     logger.info("=" * 60)
     logger.info("STAGE 1 — BIBLE (2 sub-calls, sequential for cache)")
@@ -352,6 +357,13 @@ async def run_stage1_bible(
     async with httpx.AsyncClient() as client:
         # 1A trước — Cast + Glossary gộp
         cast, glossary = await stage1a_cast_and_glossary(entries, config, tracker, client)
+
+        # v3.11: callback để caller save partial NGAY sau 1A
+        if on_cast_done is not None:
+            try:
+                await on_cast_done(cast, glossary)
+            except Exception as e:
+                logger.warning(f"[Stage 1] on_cast_done callback failed: {e}")
 
         # 1B sau — World + Arc summaries (cache hit SRT từ 1A)
         world = await stage1b_world(entries, cast, config, tracker, client)

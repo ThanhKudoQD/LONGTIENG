@@ -292,6 +292,31 @@ export interface TranslateStatus {
   can_resume?: boolean                   // có data dở dang để tiếp tục không
 }
 
+
+// ─── v3.12: Settings — API keys + Model Presets ─────────────────────
+
+export interface ApiKeys {
+  api_key_gemini: string
+  api_key_openai: string
+  api_key_deepseek: string
+}
+
+export interface ModelPreset {
+  id: number
+  name: string
+  description?: string | null
+  model_stage0?: string | null
+  model_stage1?: string | null
+  model_stage2?: string | null
+  model_stage3?: string | null
+  model_stage4?: string | null
+  model_stage5?: string | null
+  model_retranslate?: string | null
+  is_default: boolean
+}
+
+export type ModelPresetInput = Omit<ModelPreset, 'id' | 'is_default'>
+
 // v3.2: Stage 0 — dòng đã được chuẩn hóa
 export interface CleanedSubtitle {
   id: number
@@ -345,6 +370,10 @@ export type VariantMode = 'off' | 'important_only' | 'always'
 export interface TranslateConfig {
   api_key: string
   provider: 'gemini' | 'openai' | 'deepseek'
+  // v3.12: Per-provider keys — backend tự pick đúng key theo model của từng stage
+  api_key_gemini?: string
+  api_key_openai?: string
+  api_key_deepseek?: string
   // ── Legacy tier (vẫn gửi để backward compat) ────────────────────────
   model_heavy: string
   model_medium: string

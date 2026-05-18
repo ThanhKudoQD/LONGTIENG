@@ -412,3 +412,43 @@ class PipelineEvent(Base):
     progress    = Column(Float, default=0.0)
     message     = Column(String, nullable=True)
     detail_json = Column(Text, nullable=True)
+
+
+# ─── v3.12: Per-stage model presets + Global API keys ────────────────────────
+
+class ModelPreset(Base):
+    """Preset cấu hình model per-stage. Global (không gắn project).
+
+    Ví dụ:
+      name: "Dịch tối ưu", description: "Pro + GPT cho task khó",
+      stage0=gemini-2.5-flash, stage1=gpt-4o, stage2=deepseek-v3, ...
+    """
+    __tablename__ = "model_presets"
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    name        = Column(String, nullable=False, unique=True)
+    description = Column(String, nullable=True)
+    # Per-stage model (6 stage + retranslate). Rỗng = dùng tier fallback.
+    model_stage0      = Column(String, nullable=True)
+    model_stage1      = Column(String, nullable=True)
+    model_stage2      = Column(String, nullable=True)
+    model_stage3      = Column(String, nullable=True)
+    model_stage4      = Column(String, nullable=True)
+    model_stage5      = Column(String, nullable=True)
+    model_retranslate = Column(String, nullable=True)
+    is_default        = Column(Boolean, default=False)  # 1 preset được mark default
+    created_at        = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AppSetting(Base):
+    """Key-value store cho cài đặt global (api keys, default preset, etc.)
+
+    Schema đơn giản: key (string PK) + value (text).
+    Dùng cho:
+      - api_key_gemini
+      - api_key_openai
+      - api_key_deepseek
+      - default_preset_id
+    """
+    __tablename__ = "app_settings"
+    key   = Column(String, primary_key=True)
+    value = Column(Text, nullable=True)

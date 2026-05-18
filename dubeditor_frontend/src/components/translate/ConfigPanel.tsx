@@ -10,9 +10,10 @@
  */
 import React, { useEffect, useState } from 'react'
 import type {
-  Project, TranslateStatus, TranslateConfig, VariantMode,
+  Project, TranslateStatus, TranslateConfig, VariantMode, ModelPreset,
 } from '../../types'
 import { VARIANT_MODE_LABELS } from '../../types'
+import { settingsApi } from '../../api'
 
 interface Props {
   project: Project
@@ -289,7 +290,11 @@ export default function ConfigPanel({
 }: Props) {
   const stored = loadStored()
 
-  const [provider, setProvider] = useState(stored.provider)
+  // v3.12: `provider` chỉ giữ làm field "primary provider" gửi xuống BE để backward
+  // compat (BE cũ check legacy field này). Không còn UI dropdown đổi nữa.
+  // Setter dùng `_setProvider` để TS không cảnh báo unused — giữ ref nếu sau cần.
+  const [provider, _setProvider] = useState(stored.provider)
+  void _setProvider  // silence unused warning
   const [apiKeys, setApiKeys] = useState<{gemini: string; openai: string; deepseek: string}>(stored.api_keys)
   const [showKey, setShowKey] = useState(false)
   // Legacy tier state — vẫn lưu để gửi xuống backend backward compat
@@ -348,12 +353,6 @@ export default function ConfigPanel({
   // Save state — báo "đã lưu" sau khi user bấm
   const [savedTick, setSavedTick] = useState(0)
 
-  // Current API key theo provider đang chọn
-  const apiKey = apiKeys[provider] || ''
-  const setApiKey = (v: string) => {
-    setApiKeys(prev => ({ ...prev, [provider]: v }))
-  }
-
   // Build StoredConfig hiện tại
   function currentStored(): StoredConfig {
     return {
@@ -392,6 +391,33 @@ export default function ConfigPanel({
     }
   }
 
+  // v3.12: load API keys từ backend khi mount — merge với localStorage
+  // (backend giữ key global, localStorage cũ là fallback cho user chưa migrate)
+  useEffect(() => {
+    settingsApi.getApiKeys().then(serverKeys => {
+      // Chỉ override key nào server có (không clobber key đang nhập dở)
+      setApiKeys(prev => ({
+        gemini:   serverKeys.api_key_gemini   || prev.gemini,
+        openai:   serverKeys.api_key_openai   || prev.openai,
+        deepseek: serverKeys.api_key_deepseek || prev.deepseek,
+      }))
+    }).catch(() => {
+      // Backend cũ chưa có endpoint → bỏ qua, dùng localStorage
+    })
+  }, [])
+
+  // v3.12: auto-save 3 API keys lên backend khi đổi (debounce 1s, tránh spam)
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      settingsApi.putApiKeys({
+        api_key_gemini:   apiKeys.gemini,
+        api_key_openai:   apiKeys.openai,
+        api_key_deepseek: apiKeys.deepseek,
+      }).catch(() => { /* silent — vẫn có localStorage backup */ })
+    }, 1000)
+    return () => clearTimeout(handle)
+  }, [apiKeys])
+
   // Auto-save vào localStorage (debounce 300ms) — vẫn giữ vì tiện
   useEffect(() => {
     const handle = setTimeout(() => {
@@ -412,48 +438,23 @@ export default function ConfigPanel({
     setTimeout(() => setSavedTick(0), 2000)
   }
 
-  // Auto-suggest models when provider changes
-  useEffect(() => {
-    if (provider === 'gemini') {
-      if (!modelHeavy.startsWith('gemini')) setModelHeavy('gemini-2.5-pro')
-      if (!modelMedium.startsWith('gemini')) setModelMedium('gemini-2.5-flash')
-      if (!modelLight.startsWith('gemini')) setModelLight('gemini-2.5-flash')
-      if (stage0Model && !stage0Model.startsWith('gemini')) setStage0Model('')
-    } else if (provider === 'openai') {
-      if (!modelHeavy.startsWith('gpt')) setModelHeavy('gpt-5')
-      if (!modelMedium.startsWith('gpt')) setModelMedium('gpt-5-mini')
-      if (!modelLight.startsWith('gpt')) setModelLight('gpt-5-mini')
-      if (stage0Model && !stage0Model.startsWith('gpt')) setStage0Model('')
-    } else if (provider === 'deepseek') {
-      if (!modelHeavy.startsWith('deepseek')) setModelHeavy('deepseek-v4-pro')
-      if (!modelMedium.startsWith('deepseek')) setModelMedium('deepseek-v4-flash')
-      if (!modelLight.startsWith('deepseek')) setModelLight('deepseek-v4-flash')
-      if (stage0Model && !stage0Model.startsWith('deepseek')) setStage0Model('')
-    }
-    // v3.5: per-stage cũng switch theo provider mới
-    const prefix = provider === 'gemini' ? 'gemini' : provider === 'openai' ? 'gpt' : 'deepseek'
-    setStageModels(prev => {
-      const next = { ...prev }
-      for (const st of STAGES) {
-        const cur = prev[st.key] || ''
-        if (cur && !cur.startsWith(prefix)) {
-          // Rỗng được phép với stage0 (allowEmpty) → giữ rỗng
-          next[st.key] = st.allowEmpty && !cur ? '' : st.defaultModel[provider]
-        }
-        // Nếu trống và không allowEmpty → set default
-        if (!cur && !st.allowEmpty) {
-          next[st.key] = st.defaultModel[provider]
-        }
-      }
-      return next
-    })
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider])
+  // v3.12: KHÔNG còn auto-suggest theo provider — vì giờ mỗi stage chọn provider
+  // riêng. User tự chọn model cho mỗi stage qua dropdown trong StageModelCard.
+  // (Legacy tier model_heavy/medium/light vẫn dùng giá trị mặc định Gemini —
+  //  pipeline backend luôn ưu tiên model_stage* nếu set, fallback về tier mới dùng.)
 
   function buildConfig(): TranslateConfig {
+    // Legacy single api_key — pick key đầu không rỗng làm fallback
+    // (backend mới đọc 3 key riêng; field này chỉ giữ cho schema cũ).
+    const fallbackKey = apiKeys.gemini || apiKeys.openai || apiKeys.deepseek || ''
     return {
-      api_key: apiKey.trim(),
+      api_key: fallbackKey.trim(),
       provider,
+      // v3.12: gửi cả 3 key — backend tự pick đúng key theo model của từng stage
+      // → cho phép mix Gemini + OpenAI + DeepSeek trong cùng pipeline
+      api_key_gemini:   (apiKeys.gemini   || '').trim(),
+      api_key_openai:   (apiKeys.openai   || '').trim(),
+      api_key_deepseek: (apiKeys.deepseek || '').trim(),
       // Legacy tier (backend backward compat)
       model_heavy: modelHeavy.trim(),
       model_medium: modelMedium.trim(),
@@ -493,17 +494,37 @@ export default function ConfigPanel({
     }
   }
 
+  // v3.12: validate xem các model đang chọn có đủ key tương ứng không
+  function validateKeysForModels(): string | null {
+    const usedProviders = new Set<string>()
+    Object.values(stageModels).forEach(m => {
+      if (!m || !m.trim()) return
+      usedProviders.add(detectProviderFromModel(m))
+    })
+    const missing: string[] = []
+    if (usedProviders.has('gemini')   && !apiKeys.gemini.trim())   missing.push('Gemini')
+    if (usedProviders.has('openai')   && !apiKeys.openai.trim())   missing.push('OpenAI')
+    if (usedProviders.has('deepseek') && !apiKeys.deepseek.trim()) missing.push('DeepSeek')
+    if (missing.length === 0) return null
+    return `Thiếu API key cho: ${missing.join(', ')}.\nNhập key ở phần "1. API Keys" hoặc đổi model sang provider khác.`
+  }
+
   function handleStart() {
-    if (!apiKey.trim()) {
-      alert('Cần API key')
+    const err = validateKeysForModels()
+    if (err) { alert(err); return }
+    // Fallback an toàn: phải có ít nhất 1 key bất kỳ
+    if (!apiKeys.gemini && !apiKeys.openai && !apiKeys.deepseek) {
+      alert('Cần ít nhất 1 API key')
       return
     }
     onStart(buildConfig())
   }
 
   function handleRunStage(stage: string) {
-    if (!apiKey.trim()) {
-      alert('Cần API key')
+    const err = validateKeysForModels()
+    if (err) { alert(err); return }
+    if (!apiKeys.gemini && !apiKeys.openai && !apiKeys.deepseek) {
+      alert('Cần ít nhất 1 API key')
       return
     }
     onRunStage(buildConfig(), stage)
@@ -533,62 +554,58 @@ export default function ConfigPanel({
         {/* Body */}
         <div className="p-5 space-y-5">
 
-          {/* Provider + API key */}
+          {/* v3.12: 3 API keys cùng lúc — pipeline tự pick key theo model của từng stage */}
           <section>
-            <SectionLabel>1. API Provider</SectionLabel>
-            <div className="grid grid-cols-3 gap-2 mb-3">
+            <SectionLabel>1. API Keys (mỗi provider 1 key)</SectionLabel>
+            <div className="text-[11px] text-zinc-500 mb-3 leading-snug">
+              Nhập key cho provider bạn sẽ dùng. Có thể nhập cả 3 — pipeline tự pick
+              key đúng theo model bạn chọn cho từng Stage bên dưới.
+            </div>
+            <div className="space-y-2">
               {(['gemini', 'openai', 'deepseek'] as const).map(p => {
-                const hasKey = !!apiKeys[p]
+                const labels: Record<string, string> = {
+                  gemini: '🔷 Gemini', openai: '🟢 OpenAI', deepseek: '🔵 DeepSeek',
+                }
+                const placeholders: Record<string, string> = {
+                  gemini: 'AIzaSy...', openai: 'sk-proj-...', deepseek: 'sk-...',
+                }
+                const v = apiKeys[p] || ''
                 return (
-                  <button
-                    key={p}
-                    onClick={() => setProvider(p)}
-                    className={`px-3 py-2 rounded-lg border text-[13px] font-medium transition-all relative ${
-                      provider === p
-                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
-                        : 'border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800'
-                    }`}
-                  >
-                    <span className="flex items-center justify-center gap-1.5">
-                      {p === 'gemini' && '🤖 Gemini'}
-                      {p === 'openai' && '🧠 OpenAI'}
-                      {p === 'deepseek' && '🐳 DeepSeek'}
-                      {hasKey && (
-                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400" title="Có API key">●</span>
-                      )}
+                  <div key={p} className="flex items-center gap-2">
+                    <span className="text-[12px] font-medium w-24 shrink-0">
+                      {labels[p]}
                     </span>
-                  </button>
+                    <input
+                      type={showKey ? 'text' : 'password'}
+                      value={v}
+                      onChange={e => setApiKeys(prev => ({ ...prev, [p]: e.target.value }))}
+                      placeholder={placeholders[p]}
+                      className="input flex-1 text-[12px] font-mono"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    {v && (
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 w-16 text-right">
+                        ✓ {v.length} ký tự
+                      </span>
+                    )}
+                    {!v && <span className="w-16" />}
+                  </div>
                 )
               })}
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowKey(s => !s)}
+                  className="text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300"
+                  tabIndex={-1}
+                >
+                  {showKey ? '🙈 Ẩn keys' : '👁 Hiện keys'}
+                </button>
+              </div>
             </div>
-            <div className="relative">
-              <input
-                type={showKey ? 'text' : 'password'}
-                value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
-                placeholder={`Paste ${provider} API key...`}
-                className="input w-full pr-20"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <button
-                type="button"
-                onClick={() => setShowKey(s => !s)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 px-1.5 py-0.5"
-                tabIndex={-1}
-              >
-                {showKey ? '🙈 Ẩn' : '👁 Hiện'}
-              </button>
-            </div>
-            <div className="flex items-center gap-2 text-[11px] mt-1">
-              <span className="text-zinc-500">
-                Key của <span className="font-medium text-zinc-700 dark:text-zinc-300">{provider}</span> lưu riêng trong browser.
-              </span>
-              {apiKey && (
-                <span className="text-green-600 dark:text-green-400 ml-auto">
-                  ✓ {apiKey.length} ký tự
-                </span>
-              )}
+            <div className="text-[10px] text-zinc-400 mt-2">
+              Keys tự lưu lên server sau 1 giây. Có thể quản lý ở ⚙ Cài đặt (ngoài project).
             </div>
           </section>
 
@@ -599,12 +616,28 @@ export default function ConfigPanel({
               Mỗi Stage chọn model độc lập. Stage 4 Translate là task chính,
               các stage khác có thể dùng model rẻ hơn để tiết kiệm chi phí.
             </div>
+
+            {/* v3.12: Preset dropdown — fill nhanh model cho 7 stage */}
+            <PresetSelector
+              onApply={(p) => {
+                setStageModels({
+                  stage0:      p.model_stage0      || '',
+                  stage1:      p.model_stage1      || '',
+                  stage2:      p.model_stage2      || '',
+                  stage3:      p.model_stage3      || '',
+                  stage4:      p.model_stage4      || '',
+                  stage5:      p.model_stage5      || '',
+                  retranslate: p.model_retranslate || '',
+                })
+              }}
+              currentModels={stageModels}
+            />
+
             <div className="space-y-2.5">
               {STAGES.map(st => (
                 <StageModelCard
                   key={st.key}
                   stage={st}
-                  provider={provider}
                   value={stageModels[st.key]}
                   onChange={v => setStageModel(st.key, v)}
                   thinking={stageThinking[st.key]}
@@ -927,15 +960,24 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   )
 }
 
-// ─── StageModelCard — UI v3.5 ─────────────────────────────────────────────
-// 1 card per Stage. Title TO + ĐẬM ở trên, mô tả nhỏ ở dưới, dropdown rộng,
-// thinking toggle. Card Stage 4 có viền nổi bật vì là task chính.
+// ─── StageModelCard — UI v3.12 ─────────────────────────────────────────────
+// Mỗi card có DROPDOWN PROVIDER RIÊNG → user có thể mix
+// Stage 0 = Gemini, Stage 1 = OpenAI, Stage 2 = DeepSeek...
+//
+// Provider được TỰ DETECT từ tên model (gemini-* → gemini, deepseek-* → deepseek,
+// còn lại → openai). User đổi provider → auto fill default model của provider mới.
+
+function detectProviderFromModel(model: string): 'gemini' | 'openai' | 'deepseek' {
+  const m = (model || '').toLowerCase().trim()
+  if (m.startsWith('gemini')) return 'gemini'
+  if (m.startsWith('deepseek')) return 'deepseek'
+  return 'openai'  // gpt-*, o1-*, o3-*, ... + fallback
+}
 
 function StageModelCard({
-  stage, provider, value, onChange, thinking, onThinkingChange, extra,
+  stage, value, onChange, thinking, onThinkingChange, extra,
 }: {
   stage: StageDef
-  provider: 'gemini' | 'openai' | 'deepseek'
   value: string
   onChange: (v: string) => void
   thinking: boolean
@@ -943,14 +985,24 @@ function StageModelCard({
   /** v3.6: nội dung bổ sung hiển thị cuối card (vd retranslate context_window) */
   extra?: React.ReactNode
 }) {
-  const options = MODELS[provider] || []
+  // v3.12: provider RIÊNG cho từng card — detect từ model hiện tại
+  // Nếu rỗng → mặc định gemini (sẽ hiện option "dùng mặc định" nếu allowEmpty)
+  const cardProvider = value ? detectProviderFromModel(value) : 'gemini'
+
+  const options = MODELS[cardProvider] || []
   const known = options.find(m => m.id === value)
   const [customMode, setCustomMode] = React.useState(!known && !!value)
 
   React.useEffect(() => {
     if (options.find(m => m.id === value)) setCustomMode(false)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, provider])
+  }, [value, cardProvider])
+
+  // Khi user đổi provider → set value về default của provider đó
+  function handleProviderChange(newProvider: 'gemini' | 'openai' | 'deepseek') {
+    const defaultModel = stage.defaultModel[newProvider] || ''
+    onChange(defaultModel)
+  }
 
   // Thinking chỉ hỗ trợ Gemini 2.5+/3.x hoặc GPT-5/o-series
   const thinkingSupported =
@@ -963,6 +1015,11 @@ function StageModelCard({
   const containerClass = stage.isMain
     ? 'border-2 border-rose-300 dark:border-rose-700 rounded-xl p-3 bg-rose-50/50 dark:bg-rose-950/20 shadow-sm'
     : 'border border-zinc-200 dark:border-zinc-700 rounded-xl p-3 bg-white dark:bg-zinc-900/40'
+
+  // Label gọn cho dropdown provider
+  const providerLabels: Record<string, string> = {
+    gemini: '🔷 Gemini', openai: '🟢 OpenAI', deepseek: '🔵 DeepSeek',
+  }
 
   return (
     <div className={containerClass}>
@@ -988,30 +1045,44 @@ function StageModelCard({
         </button>
       </div>
 
-      {/* Model selector */}
+      {/* v3.12: Provider selector + Model selector — 2 dropdown song song */}
       {customMode ? (
         <input
           value={value}
           onChange={e => onChange(e.target.value)}
-          placeholder={stage.allowEmpty ? "(trống = dùng mặc định)" : "Tên model (vd: gemini-2.5-pro)"}
+          placeholder={stage.allowEmpty ? "(trống = dùng mặc định)" : "Tên model (vd: gemini-2.5-pro, gpt-4o, deepseek-v4-pro)"}
           className="input w-full text-[12px] font-mono"
         />
       ) : (
         <>
-          <select
-            value={value}
-            onChange={e => onChange(e.target.value)}
-            className="input w-full text-[12px]"
-          >
-            {stage.allowEmpty && (
-              <option value="">{stage.emptyLabel || '↪ Dùng mặc định'}</option>
-            )}
-            {options.map(m => (
-              <option key={m.id} value={m.id}>
-                {m.label}  ·  ${m.priceIn}/${m.priceOut} per 1M
-              </option>
-            ))}
-          </select>
+          <div className="flex gap-1.5">
+            {/* Dropdown chọn PROVIDER cho stage này */}
+            <select
+              value={cardProvider}
+              onChange={e => handleProviderChange(e.target.value as any)}
+              className="input text-[12px] py-1 px-1.5 shrink-0"
+              title="Chọn nhà cung cấp model cho stage này"
+            >
+              <option value="gemini">{providerLabels.gemini}</option>
+              <option value="openai">{providerLabels.openai}</option>
+              <option value="deepseek">{providerLabels.deepseek}</option>
+            </select>
+            {/* Dropdown chọn MODEL trong provider đã chọn */}
+            <select
+              value={value}
+              onChange={e => onChange(e.target.value)}
+              className="input flex-1 text-[12px]"
+            >
+              {stage.allowEmpty && (
+                <option value="">{stage.emptyLabel || '↪ Dùng mặc định'}</option>
+              )}
+              {options.map(m => (
+                <option key={m.id} value={m.id}>
+                  {m.label}  ·  ${m.priceIn}/${m.priceOut} per 1M
+                </option>
+              ))}
+            </select>
+          </div>
           {known && (
             <div className="text-[10px] text-zinc-500 mt-1 leading-snug">
               {known.desc}
@@ -1230,5 +1301,170 @@ function StageButton({ onClick, done, disabled, children }: {
       {done && <span className="absolute top-0.5 right-1 text-[10px]">✓</span>}
       {children}
     </button>
+  )
+}
+
+// ─── v3.12: Preset selector ─────────────────────────────────────────
+// Dropdown chọn preset → apply 7 model vào form. Có nút "Lưu thành preset"
+// để bookmark cấu hình hiện tại.
+
+interface PresetSelectorProps {
+  onApply: (preset: ModelPreset) => void
+  currentModels: {
+    stage0: string; stage1: string; stage2: string; stage3: string;
+    stage4: string; stage5: string; retranslate: string;
+  }
+}
+
+function PresetSelector({ onApply, currentModels }: PresetSelectorProps) {
+  const [presets, setPresets] = useState<ModelPreset[]>([])
+  const [loading, setLoading] = useState(false)
+  const [selectedId, setSelectedId] = useState<number | ''>('')
+  const [showSaveForm, setShowSaveForm] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newDesc, setNewDesc] = useState('')
+
+  async function reload() {
+    setLoading(true)
+    try {
+      const list = await settingsApi.listPresets()
+      setPresets(list)
+      // Auto-select default preset nếu có
+      const def = list.find(p => p.is_default)
+      if (def && selectedId === '') setSelectedId(def.id)
+    } catch {
+      // Backend chưa hỗ trợ — ignore
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { reload() }, [])
+
+  function handleApply() {
+    const p = presets.find(x => x.id === selectedId)
+    if (!p) return
+    onApply(p)
+  }
+
+  async function handleSaveAsPreset() {
+    if (!newName.trim()) { alert('Cần tên preset'); return }
+    try {
+      await settingsApi.createPreset({
+        name: newName.trim(),
+        description: newDesc.trim() || null,
+        model_stage0:      currentModels.stage0 || null,
+        model_stage1:      currentModels.stage1 || null,
+        model_stage2:      currentModels.stage2 || null,
+        model_stage3:      currentModels.stage3 || null,
+        model_stage4:      currentModels.stage4 || null,
+        model_stage5:      currentModels.stage5 || null,
+        model_retranslate: currentModels.retranslate || null,
+      })
+      setNewName(''); setNewDesc(''); setShowSaveForm(false)
+      await reload()
+    } catch (e: any) {
+      alert(`Lỗi: ${e?.response?.data?.detail || e.message}`)
+    }
+  }
+
+  async function handleDelete() {
+    if (!selectedId) return
+    const p = presets.find(x => x.id === selectedId)
+    if (!p) return
+    if (!confirm(`Xóa preset "${p.name}"?`)) return
+    try {
+      await settingsApi.deletePreset(p.id)
+      setSelectedId('')
+      await reload()
+    } catch (e: any) {
+      alert(`Lỗi: ${e?.response?.data?.detail || e.message}`)
+    }
+  }
+
+  return (
+    <div className="mb-3 p-3 bg-blue-50/40 dark:bg-blue-900/10 border border-blue-200/60 dark:border-blue-800/40 rounded-lg">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-[11px] font-semibold text-blue-700 dark:text-blue-300">
+          🎛 Preset cấu hình
+        </span>
+        {loading && <span className="text-[10px] text-zinc-400">đang tải...</span>}
+      </div>
+
+      <div className="flex gap-2 items-center">
+        <select
+          value={selectedId}
+          onChange={e => setSelectedId(e.target.value ? parseInt(e.target.value) : '')}
+          className="input text-[12px] py-1 px-2 flex-1"
+        >
+          <option value="">— Chọn preset —</option>
+          {presets.map(p => (
+            <option key={p.id} value={p.id}>
+              {p.name}{p.is_default ? ' (default)' : ''}
+              {p.description ? ` — ${p.description}` : ''}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={handleApply}
+          disabled={!selectedId}
+          className="px-3 py-1 text-[12px] bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+          title="Áp dụng preset đã chọn — fill 7 ô model bên dưới"
+        >
+          ⬇ Áp dụng
+        </button>
+        <button
+          onClick={() => setShowSaveForm(s => !s)}
+          className="px-3 py-1 text-[12px] border border-blue-300 text-blue-700 rounded hover:bg-blue-100"
+          title="Lưu cấu hình hiện tại thành preset mới"
+        >
+          💾 Lưu
+        </button>
+        {selectedId && (
+          <button
+            onClick={handleDelete}
+            className="px-2 py-1 text-[12px] text-red-600 hover:bg-red-50 rounded"
+            title="Xóa preset đã chọn"
+          >
+            🗑
+          </button>
+        )}
+      </div>
+
+      {showSaveForm && (
+        <div className="mt-2 pt-2 border-t border-blue-200/60 dark:border-blue-800/40 space-y-2">
+          <div className="text-[11px] text-zinc-600 dark:text-zinc-400">
+            Lưu 7 model hiện tại thành preset để dùng lại.
+          </div>
+          <input
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            placeholder="Tên preset (VD: Dịch tối ưu, Dịch nhanh, Tiết kiệm)"
+            className="input text-[12px] py-1 px-2 w-full"
+            autoFocus
+          />
+          <input
+            value={newDesc}
+            onChange={e => setNewDesc(e.target.value)}
+            placeholder="Mô tả ngắn (tùy chọn)"
+            className="input text-[12px] py-1 px-2 w-full"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={handleSaveAsPreset}
+              className="px-3 py-1 text-[12px] bg-green-600 text-white rounded hover:bg-green-700"
+            >
+              Tạo preset
+            </button>
+            <button
+              onClick={() => { setShowSaveForm(false); setNewName(''); setNewDesc('') }}
+              className="px-3 py-1 text-[12px] border rounded hover:bg-zinc-50"
+            >
+              Hủy
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }

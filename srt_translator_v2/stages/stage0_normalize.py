@@ -264,7 +264,7 @@ async def run_stage0_normalize(
     req = LLMRequest(
         prompt=prompt,
         model=model,
-        api_key=config.api_key,
+        api_key=config.get_api_key_for(model),
         temperature=0.2,
         max_output=8000,
         json_mode=True,

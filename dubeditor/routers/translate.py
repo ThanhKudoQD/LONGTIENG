@@ -72,6 +72,9 @@ router = APIRouter()
 
 _progress_subscribers: dict[int, list[asyncio.Queue]] = {}
 _active_runners: dict[int, TranslateRunner] = {}
+# v3.11: lưu asyncio.Task để cancel thô (hủy LLM call in-flight ngay lập tức,
+# không phải đợi LLM call hiện tại trả về rồi mới gặp _check_cancelled).
+_active_tasks: dict[int, asyncio.Task] = {}
 
 
 async def _publish_progress(pid: int, stage: str, progress: float,
@@ -613,6 +616,7 @@ async def _run_pipeline_background(pid: int, runner: TranslateRunner,
         if only_stage is not None:
             runner._uninstall_llm_observer()
         _active_runners.pop(pid, None)
+        _active_tasks.pop(pid, None)
 
 
 @router.post("/projects/{pid}/translate/start")
@@ -686,7 +690,9 @@ async def start_translate(pid: int, req: TranslateStartRequest,
         finally:
             bg_db.close()
 
-    background.add_task(task)
+    # v3.11: asyncio.create_task để cancel thô (hủy httpx in-flight ngay lập tức)
+    task_obj = asyncio.create_task(task())
+    _active_tasks[pid] = task_obj
     return {"ok": True, "message": "Pipeline started", "subtitles": subs_count}
 
 
@@ -721,17 +727,34 @@ async def run_stage(pid: int, req: TranslateStageRequest,
         finally:
             bg_db.close()
 
-    background.add_task(task)
+    # v3.11: asyncio.create_task để cancel thô
+    task_obj = asyncio.create_task(task())
+    _active_tasks[pid] = task_obj
     return {"ok": True, "stage": req.stage, "message": f"Stage {req.stage} started"}
 
 
 @router.post("/projects/{pid}/translate/cancel")
 def cancel_translate(pid: int):
-    """Hủy pipeline đang chạy."""
+    """Hủy pipeline đang chạy.
+
+    v3.11: hủy THÔ — task.cancel() làm httpx in-flight raise CancelledError ngay,
+    không phải đợi LLM call hiện tại trả về. Dữ liệu các stage đã hoàn thành (qua
+    save_bible_to_db, save_speakers_to_db, ...) đã ở DB → giữ nguyên.
+    """
     runner = _active_runners.get(pid)
-    if not runner:
+    task = _active_tasks.get(pid)
+    if not runner and not task:
         return {"ok": False, "message": "Không có pipeline đang chạy"}
-    runner.cancel()
+
+    # Set flag trước (cho _check_cancelled vẫn còn tác dụng nếu task lỡ ngừng được)
+    if runner:
+        runner.cancel()
+
+    # Hủy thô task → asyncio raises CancelledError vào điểm await hiện tại
+    if task and not task.done():
+        task.cancel()
+        return {"ok": True, "message": "Đã hủy ngay lập tức (kể cả LLM call đang dở)"}
+
     return {"ok": True, "message": "Đã gửi cancel signal"}
 
 
