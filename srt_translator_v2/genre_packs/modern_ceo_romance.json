@@ -16,7 +16,7 @@
     "wife_to_ceo_default": "tôi-anh",
     "wife_to_ceo_intimate": "em-anh",
     "wife_to_ceo_formal": "tôi-anh",
-    "ceo_to_younger_brother": "anh-em (bình thường) / tao-mày (giận)"
+    "ceo_to_younger_brother": "anh-em (bình thường) / tôi-cô (giận)"
   },
 
   "common_terms": [
@@ -136,5 +136,5 @@
     }
   ],
 
-  "style_notes": "TONE TỔNG: Mạnh, ngắn, lạnh. Nam chính KHÔNG dùng câu hoa mỹ trừ cảnh tỏ tình. Nữ chính có thể có 1-2 lần bộc lộ yếu đuối nhưng phần lớn cứng cỏi. Đại từ: 'tôi-cô' default, 'anh-em' khi yêu, 'tao-mày' khi giận (rất hiếm)."
+  "style_notes": "TONE TỔNG: Mạnh, ngắn, lạnh. Nam chính KHÔNG dùng câu hoa mỹ trừ cảnh tỏ tình. Nữ chính có thể có 1-2 lần bộc lộ yếu đuối nhưng phần lớn cứng cỏi. Đại từ: 'tôi-cô' default, 'anh-em' khi yêu, hoặc gọi tên riêng kiểu thân thiết."
 }

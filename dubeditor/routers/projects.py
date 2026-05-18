@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pathlib import Path
-import shutil, uuid
+import json, shutil, uuid
 
 from dubeditor.database import get_db
 from dubeditor.models import Project, Subtitle, Bible, Scene
@@ -30,17 +30,45 @@ def _enrich_project_out(p: Project, db: Session) -> ProjectOut:
         Bible.project_id == p.id, Bible.is_active == True  # noqa: E712
     ).first() is not None
 
-    out = ProjectOut.model_validate(p)
-    out.subtitle_count = total or 0
-    out.tts_done_count = done or 0
-    out.scene_count = scene_count or 0
-    out.has_bible = has_bible
-    out.source_lang = p.source_lang or 'vi'
-    out.project_type = p.project_type or 'short_drama'
-    out.genre_pack = p.genre_pack
-    out.translate_status = p.translate_status or 'idle'
-    out.translate_progress = p.translate_progress or 0.0
-    out.translate_error = p.translate_error
+    # v3.9: parse last_filter_chapter_ids từ Text JSON → list[int].
+    # Pydantic v2 không tự parse JSON string → list nên phải làm tay TRƯỚC khi validate.
+    parsed_filter_ids = None
+    try:
+        raw = (p.last_filter_chapter_ids or "").strip()
+        if raw:
+            v = json.loads(raw)
+            if isinstance(v, list):
+                tmp = [int(x) for x in v if isinstance(x, (int, float))
+                       or (isinstance(x, str) and x.lstrip("-").isdigit())]
+                parsed_filter_ids = tmp if tmp else None
+    except Exception:
+        parsed_filter_ids = None
+
+    # Dùng model_construct() + gán field thủ công thay vì model_validate(p)
+    # để tránh đụng cột JSON-text vào kiểu list của Pydantic.
+    out = ProjectOut(
+        id=p.id,
+        name=p.name,
+        video_path=p.video_path,
+        video_name=p.video_name,
+        duration=p.duration or 0.0,
+        created_at=p.created_at,
+        subtitle_count=total or 0,
+        tts_done_count=done or 0,
+        current_chapter_id=p.current_chapter_id,
+        source_lang=p.source_lang or 'vi',
+        project_type=p.project_type or 'short_drama',
+        genre_pack=p.genre_pack,
+        translate_status=p.translate_status or 'idle',
+        translate_progress=p.translate_progress or 0.0,
+        translate_error=p.translate_error,
+        has_bible=has_bible,
+        scene_count=scene_count or 0,
+        use_emotion_voice=bool(p.use_emotion_voice),
+        tts_voice_mode=p.tts_voice_mode,
+        last_filter_chapter_ids=parsed_filter_ids,
+        last_subtitle_index=p.last_subtitle_index,
+    )
     return out
 
 
@@ -70,6 +98,10 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
 def update_project(project_id: int, body: dict, db: Session = Depends(get_db)):
     """Update các field cấu hình của project. Hiện tại hỗ trợ:
       - use_emotion_voice (bool): bật/tắt multi-mode voice cho TTS
+      - tts_voice_mode (str|null): override mode global
+      - name (str): đổi tên project
+      - last_filter_chapter_ids (list[int]|null): lưu filter chapter để resume
+      - last_subtitle_index (int|null): lưu sub đang làm dở để resume scroll
     """
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
@@ -84,12 +116,41 @@ def update_project(project_id: int, body: dict, db: Session = Depends(get_db)):
         p.tts_voice_mode = v if (v and str(v).strip()) else None
     if "name" in body:
         p.name = str(body["name"])
+    # v3.9: Editor resume state
+    if "last_filter_chapter_ids" in body:
+        v = body["last_filter_chapter_ids"]
+        if v is None or (isinstance(v, list) and len(v) == 0):
+            p.last_filter_chapter_ids = None
+        elif isinstance(v, list):
+            # Chỉ giữ int hợp lệ, dump compact JSON
+            clean = [int(x) for x in v if isinstance(x, (int, float)) or
+                     (isinstance(x, str) and x.lstrip("-").isdigit())]
+            p.last_filter_chapter_ids = json.dumps(clean) if clean else None
+        else:
+            raise HTTPException(400, "last_filter_chapter_ids phải là list[int] hoặc null")
+    if "last_subtitle_index" in body:
+        v = body["last_subtitle_index"]
+        if v is None:
+            p.last_subtitle_index = None
+        else:
+            try:
+                p.last_subtitle_index = int(v)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "last_subtitle_index phải là int hoặc null")
 
     db.commit(); db.refresh(p)
+    # Parse lại JSON để trả về
+    try:
+        raw = (p.last_filter_chapter_ids or "").strip()
+        parsed_ids = json.loads(raw) if raw else None
+    except Exception:
+        parsed_ids = None
     return {
         "ok": True,
         "use_emotion_voice": bool(p.use_emotion_voice),
         "tts_voice_mode": p.tts_voice_mode,
+        "last_filter_chapter_ids": parsed_ids,
+        "last_subtitle_index": p.last_subtitle_index,
     }
 
 

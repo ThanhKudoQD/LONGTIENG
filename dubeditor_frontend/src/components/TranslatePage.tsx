@@ -64,7 +64,7 @@ export default function TranslatePage({
     let cancelled = false
     async function load() {
       try {
-        const [proj, st, bib, chks, scs, ars, iss] = await Promise.all([
+        const [proj, st, bib, chks, scs, ars, iss, evts, calls] = await Promise.all([
           api.get<Project>(`/projects/${projectId}`).then(r => r.data),
           translateApi.getStatus(projectId),
           translateApi.getBible(projectId).catch(() => null),
@@ -72,6 +72,9 @@ export default function TranslatePage({
           translateApi.listScenes(projectId).catch(() => []),
           translateApi.listStoryArcs(projectId).catch(() => []),
           translateApi.listIssues(projectId, { resolved: false }).catch(() => []),
+          // v3.9: load history (events + LLM calls) đã persist trong DB
+          translateApi.listEvents(projectId).catch(() => []),
+          translateApi.listLlmCalls(projectId).catch(() => []),
         ])
         if (cancelled) return
         setProject(proj)
@@ -81,8 +84,16 @@ export default function TranslatePage({
         setScenes(scs)
         setArcs(ars)
         setIssues(iss)
+        // v3.9: hydrate logs từ DB. SSE sẽ append tiếp các event mới sau đó.
+        setProgressEvents(evts as any[])
+        setLlmCalls(calls as any[])
         setCurrentProgress(st.progress)
         setIsRunning(st.status === 'running')
+        // Nếu đang running và đã có event cuối, hiển thị message gần nhất
+        if (evts.length > 0) {
+          const last = evts[evts.length - 1] as any
+          if (last?.message) setCurrentMessage(last.message)
+        }
       } catch (e: any) {
         console.error('[Translate] load error', e)
       }
@@ -195,7 +206,47 @@ export default function TranslatePage({
 
   async function handleStart(config: TranslateConfig) {
     try {
+      // v3.9: nếu có data dở dang (Bible/Chunks/Speaker đã chạy 1 phần) → hỏi
+      // user muốn TIẾP TỤC TỪ STAGE TIẾP THEO hay CHẠY LẠI TOÀN BỘ
+      if (status?.can_resume && status?.next_stage && status.status !== 'running') {
+        const nextStage = status.next_stage
+        const stageLabel: Record<string, string> = {
+          bible: 'Stage 1 (Bible)',
+          chunks: 'Stage 2 (Chunks + Scenes)',
+          speaker: 'Stage 3 (Speaker)',
+          translate: 'Stage 4 (Translate)',
+        }
+        const label = stageLabel[nextStage] || `Stage "${nextStage}"`
+        const choice = window.confirm(
+          `Pipeline đang dở dang. Có dữ liệu của các stage trước đã chạy xong.\n\n` +
+          `▶ OK = TIẾP TỤC từ ${label} (giữ dữ liệu cũ, tiết kiệm tiền)\n` +
+          `▶ Cancel = CHẠY LẠI TOÀN BỘ từ đầu (xóa Bible + Chunks + Translations)`
+        )
+        if (choice) {
+          // Tiếp tục từ next_stage
+          return handleRunStage(config, nextStage)
+        } else {
+          // User muốn chạy lại từ đầu → confirm 1 lần nữa vì hành động phá huỷ
+          const reallyReset = window.confirm(
+            'Bạn chắc chắn muốn chạy lại từ đầu?\n\nToàn bộ Bible + Chunks + Translations sẽ bị XÓA.'
+          )
+          if (!reallyReset) return
+          try {
+            await translateApi.reset(projectId)
+            await refreshAll()
+            setProgressEvents([])
+            setLlmCalls([])
+            setCurrentMessage('Đã reset, bắt đầu chạy lại từ đầu...')
+          } catch (e: any) {
+            alert(`Reset failed: ${e?.response?.data?.detail || e.message}`)
+            return
+          }
+          // Fall through xuống start full pipeline phía dưới
+        }
+      }
+
       setProgressEvents([])
+      setLlmCalls([])
       setCurrentMessage('Khởi động...')
       setIsRunning(true)
       setShowConfig(false)
@@ -209,7 +260,8 @@ export default function TranslatePage({
 
   async function handleRunStage(config: TranslateConfig, stage: string) {
     try {
-      setProgressEvents([])
+      // v3.9: KHÔNG clear progressEvents/llmCalls khi run-stage —
+      // log cũ vẫn quý giá để debug; UI sẽ append event mới phía sau.
       setCurrentMessage(`Khởi động stage ${stage}...`)
       setIsRunning(true)
       setShowConfig(false)
@@ -222,7 +274,15 @@ export default function TranslatePage({
   }
 
   async function handleCancel() {
-    if (!confirm('Hủy pipeline đang chạy?')) return
+    // v3.9: dialog rõ ràng về hậu quả
+    const ok = window.confirm(
+      'Hủy pipeline đang chạy?\n\n' +
+      '⚠ Lưu ý:\n' +
+      '• API call LLM đang dở sẽ bị hủy thô → log của call đó có thể KHÔNG được lưu.\n' +
+      '• Dữ liệu các stage đã hoàn thành (Bible/Chunks/...) sẽ ĐƯỢC GIỮ — có thể tiếp tục sau.\n' +
+      '• Muốn xóa hết để chạy lại từ đầu → dùng nút "Reset" thay vì Cancel.'
+    )
+    if (!ok) return
     try {
       await translateApi.cancel(projectId)
     } catch (e: any) {
@@ -230,12 +290,25 @@ export default function TranslatePage({
     }
   }
 
+  async function handleClearLogs() {
+    if (!window.confirm('Xóa toàn bộ log + LLM history? Không ảnh hưởng dữ liệu pipeline.')) return
+    try {
+      await translateApi.clearLogs(projectId)
+      setProgressEvents([])
+      setLlmCalls([])
+    } catch (e: any) {
+      alert(`Clear logs failed: ${e?.response?.data?.detail || e.message}`)
+    }
+  }
+
   async function handleReset() {
-    if (!confirm('Xóa toàn bộ Bible + Scenes + Issues? Subtitles giữ nguyên.')) return
+    if (!confirm('Xóa toàn bộ Bible + Scenes + Issues + Logs? Subtitles giữ nguyên.')) return
     try {
       await translateApi.reset(projectId)
       await refreshAll()
+      // v3.9: backend đã clear_logs trong reset → đồng bộ FE
       setProgressEvents([])
+      setLlmCalls([])
       setCurrentMessage('Đã reset')
     } catch (e: any) {
       alert(`Reset failed: ${e?.response?.data?.detail || e.message}`)
@@ -293,13 +366,22 @@ export default function TranslatePage({
             <button
               onClick={() => setShowConfig(true)}
               className="btn-primary"
-              title="Bắt đầu pipeline 5 stage"
+              title={status?.can_resume
+                ? `Có dữ liệu dở dang. Bấm để chọn tiếp tục hoặc chạy lại từ đầu.`
+                : "Bắt đầu pipeline 5 stage"}
             >
-              ▶ Bắt đầu
+              {status?.can_resume ? '▶ Tiếp tục / Chạy lại' : '▶ Bắt đầu'}
             </button>
             {(status?.has_bible || (status?.scene_count ?? 0) > 0) && (
-              <button onClick={handleReset} className="btn text-zinc-500">
+              <button onClick={handleReset} className="btn text-zinc-500"
+                title="Xóa Bible + Chunks + Translations + Logs">
                 ↻ Reset
+              </button>
+            )}
+            {(progressEvents.length > 0 || llmCalls.length > 0) && (
+              <button onClick={handleClearLogs} className="btn text-zinc-500"
+                title="Xóa log + LLM history (không ảnh hưởng pipeline data)">
+                🗑 Clear logs
               </button>
             )}
           </>

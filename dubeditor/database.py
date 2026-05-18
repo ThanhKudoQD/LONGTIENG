@@ -73,6 +73,9 @@ def _migrate_v3():
             add_col("projects", "translate_error", "TEXT")
             add_col("projects", "use_emotion_voice", "BOOLEAN DEFAULT 0")
             add_col("projects", "tts_voice_mode", "TEXT")
+            # v3.9: Editor resume state
+            add_col("projects", "last_filter_chapter_ids", "TEXT")
+            add_col("projects", "last_subtitle_index", "INTEGER")
 
         # characters v2 fields (giữ nguyên column cũ để không mất data)
         if has_table("characters"):

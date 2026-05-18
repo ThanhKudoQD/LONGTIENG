@@ -31,6 +31,18 @@ export const translateApi = {
   reset: (pid: number) =>
     api.post(`/projects/${pid}/translate/reset`).then(r => r.data),
 
+  // v3.9: Persistent logs (load lại khi F5 / mở lại Translate)
+  listEvents: (pid: number, limit = 500) =>
+    api.get<ProgressMessage[]>(`/projects/${pid}/translate/events?limit=${limit}`)
+       .then(r => r.data),
+
+  listLlmCalls: (pid: number, limit = 200) =>
+    api.get<LLMCallMessage[]>(`/projects/${pid}/translate/llm-calls?limit=${limit}`)
+       .then(r => r.data),
+
+  clearLogs: (pid: number) =>
+    api.delete(`/projects/${pid}/translate/logs`).then(r => r.data),
+
   // Bible
   getBible: (pid: number) =>
     api.get<Bible | null>(`/projects/${pid}/bible`).then(r => r.data),

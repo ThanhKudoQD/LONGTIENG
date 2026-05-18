@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react'
-import useStore, { usePlayTimeStore, filterVisible } from '../store'
+import useStore, { usePlayTimeStore, filterVisible, markResumeApplied } from '../store'
 import api from '../api'
 import CharSidebar from './CharSidebar'
 import SubtitleList from './SubtitleList'
@@ -247,28 +247,76 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   useProjectWS(projectId)
   useEffect(() => { loadProject(projectId) }, [projectId])
 
-  // Khi subtitles đã load xong, tự scroll đến chapter đang làm dở (current_chapter_id)
-  // hoặc chapter pending đầu tiên
-  const didAutoJumpRef = useRef(false)
+  // v3.9: RESUME EDITOR STATE — restore filter + active sub khi mở lại project
+  //
+  // Workflow:
+  // 1. Đợi subtitles + chapters đã load xong.
+  // 2. Đọc project.last_filter_chapter_ids → intersect với chapters còn tồn tại.
+  // 3. Set filterChapterIds vào store (TRƯỚC khi set activeSubId để sub không bị hide).
+  // 4. Đọc project.last_subtitle_index → nếu sub còn tồn tại → setActiveSubId.
+  //    Nếu sub không còn → active sub đầu của filter (sau khi đã lọc) hoặc sub đầu phim.
+  // 5. Gọi markResumeApplied() để bật auto-sync filter/active → backend.
+  //
+  // didResumeRef = pid đã resume xong → tránh chạy lại. Reset khi đổi project.
+  const didResumeRef = useRef<number | null>(null)
   useEffect(() => {
-    if (didAutoJumpRef.current) return
+    // Reset flag khi đổi project
+    if (project?.id && didResumeRef.current !== null
+        && didResumeRef.current !== project.id) {
+      didResumeRef.current = null
+    }
     if (!project || !subtitles.length) return
-    didAutoJumpRef.current = true
+    if (didResumeRef.current === project.id) return
+    didResumeRef.current = project.id
 
-    // Async load chapters và jump
     ;(async () => {
       try {
+        // Lấy danh sách chapter hiện tại của project
         const r = await api.get(`/chapters/project/${projectId}`)
-        const chapters: any[] = r.data
-        if (!chapters.length) return
-        const target =
-          chapters.find(c => c.id === project.current_chapter_id) ||
-          chapters.find(c => c.status === 'in_progress') ||
-          chapters.find(c => c.status === 'pending')
-        if (!target) return
-        const sub = subtitles.find(s => s.index === target.start_sub_index)
-        if (sub) setActiveSubId(sub.id)
-      } catch {}
+        const chapters: any[] = r.data || []
+
+        // ── 1) RESTORE FILTER ──────────────────────────────────────────
+        const savedIds: number[] = Array.isArray(project.last_filter_chapter_ids)
+          ? project.last_filter_chapter_ids
+          : []
+        const existingChapterIds = new Set(chapters.map(c => c.id))
+        const validIds = savedIds.filter(id => existingChapterIds.has(id))
+        // Set filter (nếu validIds rỗng → clear filter = hiện all)
+        useStore.getState().setFilterChapterIds(validIds)
+
+        // ── 2) RESTORE ACTIVE SUBTITLE ────────────────────────────────
+        let targetSub = null as any
+        const savedIdx = project.last_subtitle_index
+        if (savedIdx != null) {
+          targetSub = subtitles.find(s => s.index === savedIdx)
+        }
+        if (!targetSub) {
+          // Sub đã mất → fallback:
+          // a) Nếu có filter → tìm sub đầu nằm trong filter
+          // b) Không filter → sub đầu phim
+          if (validIds.length > 0) {
+            // Tìm chapter còn lại đầu tiên, lấy start_sub_index
+            const targetChapter = chapters
+              .filter(c => validIds.includes(c.id))
+              .sort((a, b) => a.sort_order - b.sort_order)[0]
+            if (targetChapter) {
+              targetSub = subtitles.find(s => s.index === targetChapter.start_sub_index)
+                || subtitles.find(s => s.index >= targetChapter.start_sub_index
+                                      && s.index <= targetChapter.end_sub_index)
+            }
+          }
+          if (!targetSub) targetSub = subtitles[0]
+        }
+        if (targetSub) {
+          useStore.getState().setActiveSubId(targetSub.id)
+        }
+      } catch (e) {
+        console.warn('[Resume] failed:', e)
+      } finally {
+        // BẬT auto-sync — kể cả khi resume fail (để các thao tác sau vẫn ghi DB)
+        // Đợi 1 tick để mọi setState ở trên flush xong, rồi mới mark applied
+        setTimeout(() => { markResumeApplied() }, 50)
+      }
     })()
   }, [project?.id, subtitles.length, projectId])
 

@@ -399,3 +399,104 @@ export function filterVisible(
   const ranges = buildChapterRanges(f)
   return subtitles.filter(s => matchVisible(s, f, ranges))
 }
+
+
+// ─────────────────────────────────────────────────────────────────────
+// v3.9: AUTO-SYNC RESUME STATE → BACKEND
+// ─────────────────────────────────────────────────────────────────────
+// Mỗi khi user đổi filterChapterIds hoặc activeSubId, PATCH lên Project DB.
+// Khi mở lại project, Editor sẽ đọc last_filter_chapter_ids + last_subtitle_index
+// để restore trạng thái.
+//
+// Debounce để không spam HTTP request khi user click liên tục.
+// - filterChapterIds: 500ms
+// - activeSubId: 1500ms
+//
+// Dùng zustand.subscribe() mặc định (1 arg) + so sánh ref ngoài để tương thích
+// cả zustand v3 và v4 không cần subscribeWithSelector middleware.
+//
+// QUAN TRỌNG: Editor.tsx phải gọi `markResumeApplied()` SAU KHI đã restore
+// filter + activeSubId từ DB, để các thay đổi trước đó không bị ghi đè.
+
+let _filterSyncTimer: ReturnType<typeof setTimeout> | null = null
+let _activeSubSyncTimer: ReturnType<typeof setTimeout> | null = null
+let _lastSyncedFilterKey = ''         // dedup
+let _lastSyncedActiveIndex: number | null | undefined = undefined
+let _prevProjectId: number | null = null
+let _prevFilterChapterIds: number[] = []
+let _prevActiveSubId: number | null = null
+// Khi mở project mới, syncing bị tắt cho đến khi Editor restore xong
+// (tránh ghi đè data DB bằng filterChapterIds=[] mặc định)
+let _resumeApplied = false
+
+export function markResumeApplied() {
+  _resumeApplied = true
+  // Sync ngay value hiện tại làm baseline (không gọi API)
+  const s = useStore.getState()
+  const ids = [...s.filterChapterIds].sort((a, b) => a - b)
+  _lastSyncedFilterKey = JSON.stringify(ids)
+  const sub = s.activeSubId ? s.subtitles.find(x => x.id === s.activeSubId) : null
+  _lastSyncedActiveIndex = sub ? sub.index : null
+  _prevFilterChapterIds = s.filterChapterIds
+  _prevActiveSubId = s.activeSubId
+}
+
+function _patchProject(pid: number, body: Record<string, any>) {
+  return api.patch(`/projects/${pid}`, body).catch((e) => {
+    console.warn('[Resume] PATCH project failed:', e?.message)
+  })
+}
+
+useStore.subscribe((state) => {
+  const pid = state.project?.id ?? null
+
+  // Reset cache khi đổi project
+  if (pid !== _prevProjectId) {
+    _prevProjectId = pid
+    _prevFilterChapterIds = state.filterChapterIds
+    _prevActiveSubId = state.activeSubId
+    _lastSyncedFilterKey = ''
+    _lastSyncedActiveIndex = undefined
+    _resumeApplied = false    // chờ Editor restore xong
+    if (_filterSyncTimer) { clearTimeout(_filterSyncTimer); _filterSyncTimer = null }
+    if (_activeSubSyncTimer) { clearTimeout(_activeSubSyncTimer); _activeSubSyncTimer = null }
+    return
+  }
+  if (!pid) return
+  // Chưa restore xong → bỏ qua mọi thay đổi (default value, không phải user action)
+  if (!_resumeApplied) {
+    _prevFilterChapterIds = state.filterChapterIds
+    _prevActiveSubId = state.activeSubId
+    return
+  }
+
+  // Filter chapter changed?
+  if (state.filterChapterIds !== _prevFilterChapterIds) {
+    _prevFilterChapterIds = state.filterChapterIds
+    const ids = [...state.filterChapterIds].sort((a, b) => a - b)
+    const key = JSON.stringify(ids)
+    if (key !== _lastSyncedFilterKey) {
+      if (_filterSyncTimer) clearTimeout(_filterSyncTimer)
+      _filterSyncTimer = setTimeout(() => {
+        _lastSyncedFilterKey = key
+        _patchProject(pid, { last_filter_chapter_ids: ids.length ? ids : null })
+      }, 500)
+    }
+  }
+
+  // Active sub changed?
+  if (state.activeSubId !== _prevActiveSubId) {
+    _prevActiveSubId = state.activeSubId
+    const sub = state.activeSubId
+      ? state.subtitles.find(s => s.id === state.activeSubId)
+      : null
+    const idx = sub ? sub.index : null
+    if (idx !== _lastSyncedActiveIndex) {
+      if (_activeSubSyncTimer) clearTimeout(_activeSubSyncTimer)
+      _activeSubSyncTimer = setTimeout(() => {
+        _lastSyncedActiveIndex = idx
+        _patchProject(pid, { last_subtitle_index: idx })
+      }, 1500)
+    }
+  }
+})

@@ -182,6 +182,9 @@ class ProjectOut(ProjectBase):
     # v3: TTS toggle
     use_emotion_voice:  bool               = False
     tts_voice_mode:     Optional[str]      = None
+    # v3.9: Editor resume state
+    last_filter_chapter_ids: Optional[list[int]] = None  # parsed từ JSON Text
+    last_subtitle_index:     Optional[int]       = None
     class Config:
         from_attributes = True
 
@@ -484,6 +487,11 @@ class TranslateStatusOut(BaseModel):
     # v3.2: Stage 0 normalize stats
     cleaned_count:    int = 0       # dòng đã được Stage 0 sửa (is_cleaned=True)
     removed_count:    int = 0       # dòng đã bị Stage 0 đánh dấu noise
+    # v3.9: Resume support
+    # next_stage = stage tiếp theo cần chạy nếu user muốn tiếp tục (None nếu đã done hoặc chưa bắt đầu)
+    # can_resume = True nếu đang ở giữa pipeline (có Bible/Chunks dở dang)
+    next_stage:       Optional[str] = None
+    can_resume:       bool = False
 
 
 class CleanedSubtitleOut(BaseModel):
@@ -527,3 +535,40 @@ class Stage0RunResultOut(BaseModel):
     cost_usd:          float
     tokens_in:         int
     tokens_out:        int
+
+
+# ─── v3.9: LLM log persistence ───────────────────────────────────────────────
+
+class PipelineEventOut(BaseModel):
+    """1 progress event đã persist vào DB."""
+    id:          int
+    created_at:  float
+    stage:       Optional[str] = None
+    progress:    float = 0.0
+    message:     Optional[str] = None
+    detail:      Optional[dict] = None  # parsed từ detail_json
+    class Config:
+        from_attributes = True
+
+
+class LLMCallOut(BaseModel):
+    """1 LLM call đã persist vào DB. Field hợp với LLMCallMessage SSE."""
+    id:            int
+    created_at:    float
+    stage_tag:     Optional[str] = None
+    provider:      Optional[str] = None
+    model:         Optional[str] = None
+    attempt:       int = 1
+    tokens_in:     int = 0
+    tokens_out:    int = 0
+    cached_tokens: int = 0
+    timing_ms:     int = 0
+    temperature:   float = 0.0
+    json_mode:     bool = False
+    thinking:      Optional[str] = None
+    finish_reason: Optional[str] = None
+    error:         Optional[str] = None
+    prompt_full:   Optional[str] = None
+    response_full: Optional[str] = None
+    class Config:
+        from_attributes = True

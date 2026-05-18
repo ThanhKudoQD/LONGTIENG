@@ -29,6 +29,13 @@ class Project(Base):
     # Global override mode khi use_emotion_voice=True. Null = auto theo emotion.
     # Subtitle.tts_voice_mode (nếu set) sẽ override field này per-line.
     tts_voice_mode     = Column(String, nullable=True)
+    # ── Editor resume state (v3.9) ───────────────────────────────────────────
+    # JSON array các chapter id đang được filter ở Editor. "" hoặc null = không filter.
+    # Dùng để mở lại project active đúng các chapter user đang làm dở.
+    last_filter_chapter_ids = Column(Text, nullable=True)
+    # Subtitle.index (1-based, KHÔNG phải subtitle.id) của dòng cuối user làm.
+    # Dùng để scroll + active đúng dòng khi mở lại. index ổn định hơn id.
+    last_subtitle_index     = Column(Integer, nullable=True)
     # ── Relationships ────────────────────────────────────────────────────────
     subtitles  = relationship("Subtitle",  back_populates="project", cascade="all, delete")
     characters = relationship("Character", back_populates="project", cascade="all, delete")
@@ -361,3 +368,42 @@ class RoleImage(Base):
     url        = Column(String, nullable=False)
     sort_order = Column(Integer, default=0)
     role       = relationship("Role", back_populates="images")
+
+
+# ─── Translate v3.9 — Log persistence ────────────────────────────────────────
+# Lưu pipeline events + LLM calls vào DB để F5/back về Editor vẫn còn lịch sử.
+# Rolling buffer: 200 LLM calls + 500 events / project (xem llm_log_service.py).
+
+class LLMCall(Base):
+    __tablename__ = "llm_calls"
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    project_id    = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"),
+                            index=True, nullable=False)
+    created_at    = Column(Float, index=True)   # epoch seconds
+    stage_tag     = Column(String, nullable=True)
+    provider      = Column(String, nullable=True)
+    model         = Column(String, nullable=True)
+    attempt       = Column(Integer, default=1)
+    tokens_in     = Column(Integer, default=0)
+    tokens_out    = Column(Integer, default=0)
+    cached_tokens = Column(Integer, default=0)
+    timing_ms     = Column(Integer, default=0)
+    temperature   = Column(Float, default=0.0)
+    json_mode     = Column(Boolean, default=False)
+    thinking      = Column(Text, nullable=True)
+    finish_reason = Column(String, nullable=True)
+    error         = Column(Text, nullable=True)
+    prompt_full   = Column(Text, nullable=True)
+    response_full = Column(Text, nullable=True)
+
+
+class PipelineEvent(Base):
+    __tablename__ = "pipeline_events"
+    id          = Column(Integer, primary_key=True, autoincrement=True)
+    project_id  = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"),
+                          index=True, nullable=False)
+    created_at  = Column(Float, index=True)
+    stage       = Column(String, nullable=True)
+    progress    = Column(Float, default=0.0)
+    message     = Column(String, nullable=True)
+    detail_json = Column(Text, nullable=True)

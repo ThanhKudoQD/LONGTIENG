@@ -41,6 +41,8 @@ from dubeditor.models import (
     Bible as DBBible, Scene as DBScene, StoryArc as DBStoryArc,
     Chunk as DBChunk,
     PolishIssue as DBPolishIssue,
+    LLMCall as DBLLMCall,
+    PipelineEvent as DBPipelineEvent,
 )
 from dubeditor.schemas import (
     TranslateStartRequest, TranslateStageRequest, RetranslateRequest,
@@ -56,6 +58,11 @@ from dubeditor.translate_service import (
     TranslateRunner, build_pipeline_config,
     load_active_bible_from_db,
 )
+from dubeditor.llm_log_service import (
+    save_llm_call, save_pipeline_event,
+    load_llm_calls, load_pipeline_events,
+    clear_logs,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -69,7 +76,20 @@ _active_runners: dict[int, TranslateRunner] = {}
 
 async def _publish_progress(pid: int, stage: str, progress: float,
                              message: str, detail: Optional[dict] = None):
-    """Broadcast 1 progress event tới tất cả SSE subscribers của project."""
+    """Broadcast 1 progress event tới tất cả SSE subscribers của project.
+
+    v3.9: persist event vào DB TRƯỚC khi broadcast → F5 / reopen Editor vẫn còn log.
+    """
+    # Persist trước — best effort, không block broadcast nếu DB lỗi
+    try:
+        db = SessionLocal()
+        try:
+            save_pipeline_event(db, pid, stage, progress, message, detail)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"[_publish_progress] persist failed: {e}")
+
     payload = {
         "stage": stage,
         "progress": progress,
@@ -85,7 +105,19 @@ async def _publish_progress(pid: int, stage: str, progress: float,
 
 
 async def _publish_llm_call(pid: int, payload: dict):
-    """Broadcast 1 LLM call event (prompt + response) tới SSE subscribers."""
+    """Broadcast 1 LLM call event (prompt + response) tới SSE subscribers.
+
+    v3.9: persist call vào DB TRƯỚC khi broadcast.
+    """
+    try:
+        db = SessionLocal()
+        try:
+            save_llm_call(db, pid, payload)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"[_publish_llm_call] persist failed: {e}")
+
     msg = f"event: llm_call\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
     for q in list(_progress_subscribers.get(pid, [])):
         try:
@@ -222,6 +254,40 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         tokens_in += s.tokens_in or 0
         tokens_out += s.tokens_out or 0
 
+    # v3.9: Resume — xác định stage tiếp theo cần chạy
+    # Logic: dựa vào artifacts có sẵn trong DB, không phải translate_status string
+    # (vì status có thể là 'cancelled' hoặc 'error' khi dở dang)
+    next_stage = None
+    can_resume = False
+    is_running_now = (p.translate_status == "running")
+
+    if not is_running_now:
+        # Đếm xem stage nào đã có data:
+        has_bible_done = bool(active_bible)
+        has_chunks_done = chunk_count > 0
+        has_speaker_done = speaker_assigned > 0
+        has_translate_done = translated > 0
+
+        # Xác định stage tiếp theo (chronological order)
+        # Stage 0 normalize không tính vào resume — luôn rerun đầu pipeline
+        if not has_bible_done:
+            next_stage = "bible"
+        elif not has_chunks_done:
+            next_stage = "chunks"
+        elif not has_speaker_done:
+            next_stage = "speaker"
+        elif not has_translate_done:
+            next_stage = "translate"
+        else:
+            # Tất cả đã xong → không có gì resume
+            next_stage = None
+
+        # can_resume = đang dở giữa pipeline (có ít nhất 1 stage xong, chưa xong hết)
+        any_done = has_bible_done or has_chunks_done or has_speaker_done or has_translate_done
+        all_done = (has_bible_done and has_chunks_done and
+                    has_speaker_done and has_translate_done)
+        can_resume = any_done and (not all_done)
+
     return TranslateStatusOut(
         project_id=pid,
         status=p.translate_status or "idle",
@@ -241,6 +307,8 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         error_message=p.translate_error,
         cleaned_count=cleaned_count,
         removed_count=removed_count,
+        next_stage=next_stage,
+        can_resume=can_resume,
     )
 
 
@@ -704,8 +772,79 @@ def reset_translate(pid: int, db: Session = Depends(get_db)):
         p.translate_progress = 0.0
         p.translate_error = None
 
+    # v3.9: Reset = full clean → xóa log cũ luôn (Cancel KHÔNG xóa)
+    clear_logs(db, pid)
+
     db.commit()
     return {"ok": True, "message": "Đã reset translate state"}
+
+
+# ─── v3.9: Persistent logs (events + LLM calls) ──────────────────────────────
+
+@router.get("/projects/{pid}/translate/events")
+def list_events(pid: int, limit: int = 500, db: Session = Depends(get_db)):
+    """List pipeline events đã persist. Trả từ cũ → mới (asc) để FE append dễ.
+
+    Dùng khi FE mount TranslatePage sau F5 → restore log cũ trước khi SSE chạy.
+    """
+    rows = load_pipeline_events(db, pid, limit=limit)
+    out = []
+    for r in rows:
+        try:
+            detail = json.loads(r.detail_json) if r.detail_json else None
+        except Exception:
+            detail = None
+        out.append({
+            "id": r.id,
+            "created_at": r.created_at,
+            "stage": r.stage,
+            "progress": r.progress or 0.0,
+            "message": r.message,
+            "detail": detail,
+        })
+    return out
+
+
+@router.get("/projects/{pid}/translate/llm-calls")
+def list_llm_calls_endpoint(pid: int, limit: int = 200, db: Session = Depends(get_db)):
+    """List LLM calls đã persist (cũ → mới)."""
+    rows = load_llm_calls(db, pid, limit=limit)
+    out = []
+    for r in rows:
+        out.append({
+            "id": r.id,
+            "created_at": r.created_at,
+            "stage_tag": r.stage_tag,
+            "provider": r.provider,
+            "model": r.model,
+            "attempt": r.attempt or 1,
+            "tokens_in": r.tokens_in or 0,
+            "tokens_out": r.tokens_out or 0,
+            "cached_tokens": r.cached_tokens or 0,
+            "timing_ms": r.timing_ms or 0,
+            "temperature": r.temperature or 0.0,
+            "json_mode": bool(r.json_mode),
+            "thinking": r.thinking,
+            "finish_reason": r.finish_reason,
+            "error": r.error,
+            "prompt_full": r.prompt_full,
+            "response_full": r.response_full,
+            # alias cho FE LLMCallMessage shape (SSE dùng prompt_preview/response_preview)
+            "prompt_preview": (r.prompt_full or "")[:2000] if r.prompt_full else None,
+            "response_preview": (r.response_full or "")[:2000] if r.response_full else None,
+            "prompt_length": len(r.prompt_full or ""),
+            "response_length": len(r.response_full or ""),
+            "ok": not bool(r.error),
+            "call_idx": r.id,  # dùng id làm idx khi load từ DB
+        })
+    return out
+
+
+@router.delete("/projects/{pid}/translate/logs")
+def clear_logs_endpoint(pid: int, db: Session = Depends(get_db)):
+    """Xóa toàn bộ pipeline events + LLM calls của project (user bấm Clear logs)."""
+    clear_logs(db, pid)
+    return {"ok": True, "message": "Đã xóa logs"}
 
 
 # ─── SSE progress stream ──────────────────────────────────────────────────────

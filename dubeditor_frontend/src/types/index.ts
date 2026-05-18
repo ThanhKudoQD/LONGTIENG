@@ -127,6 +127,9 @@ export interface Project {
   scene_count?: number
   use_emotion_voice?: boolean
   tts_voice_mode?: string | null
+  // v3.9: Editor resume state
+  last_filter_chapter_ids?: number[] | null
+  last_subtitle_index?: number | null
 }
 
 // ─── Translate v3 types ──────────────────────────────────────────────────────
@@ -284,6 +287,9 @@ export interface TranslateStatus {
   // v3.2: Stage 0 normalize
   cleaned_count?: number                 // số dòng đã được Stage 0 sửa
   removed_count?: number                 // số dòng đã bị Stage 0 đánh dấu noise
+  // v3.9: Resume support
+  next_stage?: string | null             // stage tiếp theo cần chạy nếu muốn resume
+  can_resume?: boolean                   // có data dở dang để tiếp tục không
 }
 
 // v3.2: Stage 0 — dòng đã được chuẩn hóa
