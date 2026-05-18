@@ -229,7 +229,7 @@ async def _process_arc_inner(
         model=config.models.get_model_for("stage2"),
         api_key=config.api_key,
         temperature=0.3,
-        max_output=8000,
+        max_output=32000,           # v3.7.4: 8K → 32K (chunks ~2-3K + thinking)
         json_mode=True,
         thinking=config.models.get_thinking_for("stage2"),
         max_retries=config.concurrency.retry_max,

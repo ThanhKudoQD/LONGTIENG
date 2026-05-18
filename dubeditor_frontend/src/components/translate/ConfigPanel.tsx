@@ -187,8 +187,6 @@ interface StoredConfig {
   stage0_enabled: boolean
   stage0_model: string                  // (legacy) deprecated — nhường chỗ cho model_stage0
   stage0_context_window: number
-  // v3.6: số dòng context trước/sau gửi cho AI khi retranslate (1-5, default 2)
-  retranslate_context_window: number
 }
 
 function loadStored(): StoredConfig {
@@ -274,7 +272,6 @@ function defaultStored(): StoredConfig {
     stage0_enabled: true,
     stage0_model: '',                   // deprecated
     stage0_context_window: 2,
-    retranslate_context_window: 2,
   }
 }
 
@@ -342,8 +339,6 @@ export default function ConfigPanel({
   const [stage0Enabled, setStage0Enabled] = useState<boolean>(stored.stage0_enabled)
   const [stage0Model, setStage0Model] = useState<string>(stored.stage0_model)
   const [stage0ContextWindow, setStage0ContextWindow] = useState<number>(stored.stage0_context_window)
-  // v3.6: số dòng context cho retranslate (1-5, default 2)
-  const [retranslateContextWindow, setRetranslateContextWindow] = useState<number>(stored.retranslate_context_window)
 
   // Save state — báo "đã lưu" sau khi user bấm
   const [savedTick, setSavedTick] = useState(0)
@@ -388,7 +383,6 @@ export default function ConfigPanel({
       stage0_enabled: stage0Enabled,
       stage0_model: stage0Model,
       stage0_context_window: stage0ContextWindow,
-      retranslate_context_window: retranslateContextWindow,
     }
   }
 
@@ -402,8 +396,7 @@ export default function ConfigPanel({
       heavyThinking, mediumThinking, lightThinking, translateThinking,
       stageModels, stageThinking,
       variantMode, chunkOverlap, cacheEnabled, chunksParallel, speakerParallel,
-      speakerContextWindow, stage0Enabled, stage0Model, stage0ContextWindow,
-      retranslateContextWindow])
+      speakerContextWindow, stage0Enabled, stage0Model, stage0ContextWindow])
 
   // Manual save — báo cho user biết
   function handleSave() {
@@ -609,25 +602,6 @@ export default function ConfigPanel({
                   onChange={v => setStageModel(st.key, v)}
                   thinking={stageThinking[st.key]}
                   onThinkingChange={v => setStageThinkingFor(st.key, v)}
-                  extra={st.key === 'retranslate' ? (
-                    <div className="flex items-center gap-3">
-                      <label className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300 whitespace-nowrap">
-                        Số dòng context trước/sau:
-                      </label>
-                      <select
-                        value={retranslateContextWindow}
-                        onChange={e => setRetranslateContextWindow(parseInt(e.target.value))}
-                        className="input text-[12px] py-0.5 px-2"
-                      >
-                        {[1, 2, 3, 4, 5].map(n => (
-                          <option key={n} value={n}>{n}</option>
-                        ))}
-                      </select>
-                      <span className="text-[10px] text-zinc-500 leading-snug flex-1">
-                        Tổng {retranslateContextWindow * 2 + 1} dòng gửi cho AI (mặc định 2)
-                      </span>
-                    </div>
-                  ) : undefined}
                 />
               ))}
             </div>
@@ -932,7 +906,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 // thinking toggle. Card Stage 4 có viền nổi bật vì là task chính.
 
 function StageModelCard({
-  stage, provider, value, onChange, thinking, onThinkingChange, extra,
+  stage, provider, value, onChange, thinking, onThinkingChange,
 }: {
   stage: StageDef
   provider: 'gemini' | 'openai' | 'deepseek'
@@ -940,8 +914,6 @@ function StageModelCard({
   onChange: (v: string) => void
   thinking: boolean
   onThinkingChange: (v: boolean) => void
-  /** v3.6: nội dung bổ sung hiển thị cuối card (vd retranslate context_window) */
-  extra?: React.ReactNode
 }) {
   const options = MODELS[provider] || []
   const known = options.find(m => m.id === value)
@@ -952,12 +924,15 @@ function StageModelCard({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value, provider])
 
-  // Thinking chỉ hỗ trợ Gemini 2.5+/3.x hoặc GPT-5/o-series
+  // Thinking hỗ trợ: Gemini 2.5+/3.x, GPT-5/o-series, DeepSeek V4 Pro/Flash
+  // v3.7.4: thêm DeepSeek V4 (hỗ trợ thinking mode official)
   const thinkingSupported =
     value.startsWith('gemini-2.5') ||
     value.startsWith('gemini-3') ||
     value.startsWith('o1') || value.startsWith('o3') || value.startsWith('o4') ||
-    value.startsWith('gpt-5')
+    value.startsWith('gpt-5') ||
+    value.startsWith('deepseek-v4') ||
+    value.startsWith('deepseek-reasoner')
 
   // Card viền nổi bật cho Stage 4 (task chính)
   const containerClass = stage.isMain
@@ -1047,12 +1022,6 @@ function StageModelCard({
             : stage.thinkingHint}
         </span>
       </div>
-
-      {extra && (
-        <div className="mt-2 pt-2 border-t border-zinc-200 dark:border-zinc-700">
-          {extra}
-        </div>
-      )}
     </div>
   )
 }
@@ -1094,7 +1063,9 @@ function ModelSelector({ tier, stages, provider, value, onChange, allowEmpty, em
     value.startsWith('gemini-2.5') ||
     value.startsWith('gemini-3') ||
     value.startsWith('o1') || value.startsWith('o3') || value.startsWith('o4') ||
-    value.startsWith('gpt-5')
+    value.startsWith('gpt-5') ||
+    value.startsWith('deepseek-v4') ||
+    value.startsWith('deepseek-reasoner')
   )
 
   return (

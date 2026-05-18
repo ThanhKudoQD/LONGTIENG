@@ -99,7 +99,8 @@ async def stage1a_cast_and_glossary(
         model=config.models.get_model_for("stage1"),
         api_key=config.api_key,
         temperature=0.2,
-        max_output=20000,           # đủ cho cả Cast + Glossary
+        max_output=40000,           # v3.7.4: tăng từ 20K → 40K cho thinking model
+                                    # (cast extract ra ~5-8K, thinking ăn 20-30K)
         json_mode=True,
         thinking=config.models.get_thinking_for("stage1"),
         max_retries=config.concurrency.retry_max,
@@ -203,7 +204,7 @@ async def stage1b_world(
         model=config.models.get_model_for("stage1"),
         api_key=config.api_key,
         temperature=0.3,
-        max_output=10000,           # tăng vì có arc summaries
+        max_output=32000,           # v3.7.4: 10K → 32K (World+Arcs ~5K + thinking)
         json_mode=True,
         thinking=config.models.get_thinking_for("stage1"),
         max_retries=config.concurrency.retry_max,

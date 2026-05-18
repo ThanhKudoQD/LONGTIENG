@@ -339,7 +339,7 @@ async def process_one_chunk(
             model=config.models.get_model_for("stage4"),
             api_key=config.api_key,
             temperature=0.4,
-            max_output=16000,
+            max_output=48000,           # v3.7.4: 16K → 48K (translate 2 bản v1+v2 ~10K + thinking dài)
             json_mode=True,
             thinking=config.models.get_thinking_for("stage4"),
             max_retries=config.concurrency.retry_max,

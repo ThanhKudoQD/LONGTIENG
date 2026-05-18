@@ -266,7 +266,7 @@ async def run_stage0_normalize(
         model=model,
         api_key=config.api_key,
         temperature=0.2,
-        max_output=8000,
+        max_output=16000,           # v3.7.4: 8K → 16K (decisions ~3K + thinking nhẹ)
         json_mode=True,
         thinking=config.models.get_thinking_for("stage0"),
         max_retries=config.concurrency.retry_max,
@@ -274,9 +274,15 @@ async def run_stage0_normalize(
 
     async with httpx.AsyncClient() as client:
         try:
+            import time as _time
+            _t_llm = _time.time()
             resp = await call_llm(req, client=client, stage_tag="0_normalize")
+            logger.info(f"[Stage 0] ✓ LLM trả response ({_time.time()-_t_llm:.2f}s) — đang parse JSON...")
             tracker.add("0_normalize", resp)
+            _t_parse = _time.time()
             data = parse_json_response(resp.text, default={"decisions": []})
+            logger.info(f"[Stage 0] ✓ Parse JSON xong ({_time.time()-_t_parse:.2f}s) — "
+                        f"{len(data.get('decisions', []))} decisions")
         except Exception as e:
             logger.error(f"[Stage 0] AI call failed: {e}. Default keep all.")
             decisions = [
@@ -291,14 +297,19 @@ async def run_stage0_normalize(
         decisions = parse_decisions(data, suspicious_indices)
 
     # 4. Apply vào entries
+    logger.info(f"[Stage 0] Áp decisions vào {len(entries)} entries (in-memory)...")
     update_map = apply_decisions(entries, decisions)
+    logger.info(f"[Stage 0] ✓ Áp xong — {len(update_map)} thay đổi")
 
-    # 5. Checkpoint DB
+    # 5. Checkpoint DB (v3.7.1: thường None vì translate_service không pass callback nữa)
     if on_cluster_done and update_map:
         try:
+            import time as _time
+            _t_cp = _time.time()
             res = on_cluster_done(update_map)
             if asyncio.iscoroutine(res):
                 await res
+            logger.info(f"[Stage 0] ✓ Checkpoint DB ({_time.time()-_t_cp:.2f}s)")
         except Exception as e:
             logger.warning(f"[Stage 0] checkpoint failed: {e}")
 

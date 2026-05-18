@@ -750,22 +750,22 @@ class TranslateRunner:
         await self._emit("normalize_scan", 1, f"Scan {len(entries)} dòng...")
 
         # Callback checkpoint per cluster — update DB ngay
-        async def on_cluster_done(update_map: dict):
-            if not update_map:
-                return
-            try:
-                self._save_normalize_updates(update_map)
-            except Exception as e:
-                logger.warning(f"[Stage 0] checkpoint save failed: {e}")
+        # v3.7.1: BỎ on_cluster_done callback để tránh double-save bug
+        # (callback save lần 1 → reindex → Final save dưới đây save lại với
+        # index CŨ đã shift → xóa nhầm 13 dòng khác).
+        # Stage 0 chỉ cần save 1 LẦN ở "Final save" sau khi AI trả decisions.
 
         entries, report = await run_stage0_normalize(
             entries, self.config, self.tracker,
-            on_cluster_done=on_cluster_done,
+            on_cluster_done=None,
         )
         self._check_cancelled()
 
-        # Final save (full apply, idempotent)
+        # Final save — 1 lần duy nhất, atomic
         await self._emit("normalize_save", 4, "Lưu kết quả chuẩn hóa...")
+        logger.info(f"[Stage 0] Bắt đầu save DB: "
+                    f"{sum(1 for d in report.decisions if d.action == 'remove')} remove, "
+                    f"{sum(1 for d in report.decisions if d.action == 'clean')} clean")
         full_updates = {}
         for d in report.decisions:
             if d.action == "remove":
@@ -782,7 +782,10 @@ class TranslateRunner:
                     "new_text": d.new_text or "",
                     "reason": d.reason,
                 }
+        import time as _time
+        _t0 = _time.time()
         self._save_normalize_updates(full_updates)
+        logger.info(f"[Stage 0] Save DB DONE trong {_time.time()-_t0:.2f}s")
 
         await self._emit("normalize_done", 5, report.summary)
         return report
@@ -831,8 +834,11 @@ class TranslateRunner:
 
         # 2. Apply remove: XÓA HẲN + REINDEX
         if remove_indices:
-            # Trước khi xóa: nếu đã có chunks/scenes → reset (vì line index sẽ shift)
+            import time as _time
             from dubeditor.models import Scene as DBScene, Chunk as DBChunk, RemovedSubtitle
+
+            # Trước khi xóa: nếu đã có chunks/scenes → reset (vì line index sẽ shift)
+            _t0 = _time.time()
             self.db.query(DBScene).filter(DBScene.project_id == self.project_id).delete()
             self.db.query(DBChunk).filter(DBChunk.project_id == self.project_id).delete()
 
@@ -858,25 +864,76 @@ class TranslateRunner:
                 Subtitle.project_id == self.project_id,
                 Subtitle.index.in_(remove_indices),
             ).delete(synchronize_session=False)
+            self.db.flush()
+            logger.info(f"[Stage 0]   ├ xóa {len(remove_indices)} dòng + clear chunks/scenes "
+                        f"({_time.time()-_t0:.2f}s)")
 
-            # Reindex các dòng còn lại liên tục 1, 2, 3...
-            remaining = self.db.query(Subtitle).filter(
-                Subtitle.project_id == self.project_id,
-            ).order_by(Subtitle.index).all()
-            for new_idx, sub in enumerate(remaining, start=1):
-                if sub.index != new_idx:
-                    sub.index = new_idx
+            # ── REINDEX (bulk, 2-step để tránh UNIQUE constraint conflict) ──
+            # v3.7.1: trước đây loop từng ORM `sub.index = new_idx` rồi commit
+            # → 2994 UPDATE statement = ~3 phút trên SQLite. Giờ dùng raw SQL
+            # 2-step trick:
+            #   step 1: UPDATE … SET index = -id  (số âm, unique vì id unique)
+            #   step 2: UPDATE … SET index = rank theo thứ tự
+            # Cả 2 đều 1 statement → từ 3 phút xuống <1s.
+            _t1 = _time.time()
+            from sqlalchemy import text as sql_text
+
+            # Step 1: tạm thời set index = -id để không conflict unique
+            self.db.execute(
+                sql_text("UPDATE subtitles SET `index` = -id "
+                         "WHERE project_id = :pid"),
+                {"pid": self.project_id},
+            )
+            self.db.flush()
+
+            # Step 2: lấy danh sách id theo thứ tự index hiện tại (mà giờ là -id ASC)
+            # → cần order theo cái gì để re-rank? Phải dùng start_time vì index âm
+            # giờ không phản ánh thứ tự gốc.
+            # SQLite không có ROW_NUMBER() trong UPDATE → query id theo order rồi
+            # bulk UPDATE với CASE WHEN (1 statement, 1 commit).
+            rows = self.db.execute(
+                sql_text("SELECT id FROM subtitles WHERE project_id = :pid "
+                         "ORDER BY start_time ASC, id ASC"),
+                {"pid": self.project_id},
+            ).fetchall()
+
+            if rows:
+                # Build CASE WHEN id=? THEN ? END  (chia batch 500 để tránh
+                # query size limit của SQLite, mặc dù 2994 cũng vẫn OK)
+                BATCH = 500
+                for batch_start in range(0, len(rows), BATCH):
+                    batch = rows[batch_start:batch_start + BATCH]
+                    case_parts = []
+                    ids_list = []
+                    params = {"pid": self.project_id}
+                    for i, (sub_id,) in enumerate(batch):
+                        new_idx = batch_start + i + 1
+                        case_parts.append(f"WHEN id = :id_{i} THEN :idx_{i}")
+                        params[f"id_{i}"] = sub_id
+                        params[f"idx_{i}"] = new_idx
+                        ids_list.append(sub_id)
+                    case_sql = " ".join(case_parts)
+                    ids_csv = ",".join(str(x) for x in ids_list)
+                    self.db.execute(
+                        sql_text(f"UPDATE subtitles SET `index` = CASE {case_sql} END "
+                                 f"WHERE project_id = :pid AND id IN ({ids_csv})"),
+                        params,
+                    )
+                self.db.flush()
+
             self.db.commit()
+            logger.info(f"[Stage 0]   ├ reindex {len(rows)} dòng "
+                        f"({_time.time()-_t1:.2f}s)")
 
             # Cập nhật subtitle_count của project
             from dubeditor.models import Project
             project = self.db.query(Project).filter(Project.id == self.project_id).first()
             if project:
-                project.subtitle_count = len(remaining)
+                project.subtitle_count = len(rows)
                 self.db.commit()
 
             logger.info(f"[Stage 0] Đã xóa {len(remove_indices)} dòng + reindex còn "
-                        f"{len(remaining)} dòng")
+                        f"{len(rows)} dòng (tổng {_time.time()-_t0:.2f}s)")
 
     async def run_bible(self) -> V3Bible:
         await self._emit("bible", 0, "Stage 1: Phân tích phim...")

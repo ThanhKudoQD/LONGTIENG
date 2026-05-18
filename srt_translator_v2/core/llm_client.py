@@ -49,7 +49,18 @@ def detect_provider(model: str) -> Provider:
 # ─────────────────────────────────────────────────────────────────
 
 def cap_max_output(max_output: int, model: str) -> int:
+    """Cap max_output theo giới hạn THỰC của từng model (cập nhật 2026-05).
+
+    v3.7.4: trước đây cap DeepSeek V4 ở 8192 → thinking model bị Finish:length
+    do thinking tokens chiếm hết quota. Sửa đúng spec official:
+      - DeepSeek V4 Pro/Flash: 384K output, 1M context
+      - Gemini 3.x:            65K output
+      - Gemini 2.5 Pro/Flash:  65K output
+      - GPT-5 / o-series:      128K output (reasoning + output)
+      - GPT-4o / 4o-mini:      16K output
+    """
     m = model.lower()
+    # OpenAI
     if "gpt-4o-mini" in m or "gpt-4o" in m:
         return min(max_output, 16384)
     if "gpt-4-turbo" in m:
@@ -58,17 +69,21 @@ def cap_max_output(max_output: int, model: str) -> int:
         return min(max_output, 8192)
     if "gpt-3.5" in m:
         return min(max_output, 4096)
-    if m.startswith(("o1", "o3", "o4", "gpt-5")):
-        return min(max_output, 32768)
-    # DeepSeek V4 — context 1M, max output 384K (thực tế cap ở 8192 cho ổn định)
+    # GPT-5 và o-series: hỗ trợ reasoning + output dài
+    if m.startswith(("o1", "o3", "o4")):
+        return min(max_output, 100000)
+    if m.startswith("gpt-5"):
+        return min(max_output, 128000)
+    # DeepSeek V4 Pro/Flash: 384K max output theo official spec (2026-05)
+    # Thinking mode ăn rất nhiều token → KHÔNG cap thấp nữa.
     if "deepseek-v4" in m or "deepseek-reasoner" in m:
-        return min(max_output, 8192)
+        return min(max_output, 65536)  # cap an toàn ở 64K (đủ thinking + JSON dài nhất)
     if "deepseek" in m:
         return min(max_output, 8192)
     # Gemini 3.x
     if "gemini-3" in m:
         return min(max_output, 65536)
-    # Gemini 2.5
+    # Gemini 2.5 — 65K output
     if "gemini-2.5" in m:
         return min(max_output, 65536)
     return max_output
@@ -230,6 +245,22 @@ async def call_openai_compat(req: LLMRequest, client: httpx.AsyncClient,
     if req.json_mode:
         payload["response_format"] = {"type": "json_object"}
 
+    # v3.7.4: DeepSeek V4 yêu cầu explicit thinking flag để control.
+    # Nếu không gửi gì → default = thinking ON cho Pro → output bị cụt khi
+    # max_tokens thấp (Stage 1A bị Finish: length).
+    # Spec: extra_body={"thinking": {"type": "enabled"|"disabled"}}
+    #       reasoning_effort = "high" | "max" (chỉ khi enabled)
+    _is_deepseek_v4 = "deepseek.com" in base_url and (
+        "deepseek-v4" in req.model.lower() or "deepseek-reasoner" in req.model.lower()
+    )
+    if _is_deepseek_v4:
+        if req.thinking is True:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = "high"  # mặc định, "max" tốn token x10
+        elif req.thinking is False:
+            payload["thinking"] = {"type": "disabled"}
+        # req.thinking is None → không gửi gì, DeepSeek dùng default (Pro=ON, Flash=OFF)
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {req.api_key}",
@@ -293,10 +324,22 @@ async def call_llm(req: LLMRequest, client: Optional[httpx.AsyncClient] = None,
     if owns_client:
         client = httpx.AsyncClient()
 
+    # v3.7.3: log timing để user thấy progress thực sự
+    # (httpx tự log "HTTP 200 OK" nhưng đó chỉ là header, body có thể vẫn
+    # streaming tiếp; log dưới đây bao gồm cả body + parse)
+    import time as _time
+    _tag_str = f"[{stage_tag}] " if stage_tag else ""
+    _prompt_chars = len(req.prompt or "") + len(req.cached_prefix or "")
+    logger.info(f"{_tag_str}→ Gọi LLM ({provider}/{req.model}, "
+                f"prompt={_prompt_chars} chars, "
+                f"max_output={req.max_output}, "
+                f"thinking={req.thinking})")
+
     try:
         last_exc = None
         for attempt in range(req.max_retries):
             try:
+                _t_attempt = _time.time()
                 if provider == "gemini":
                     resp = await call_gemini(req, client)
                 elif provider == "deepseek":
@@ -305,16 +348,29 @@ async def call_llm(req: LLMRequest, client: Optional[httpx.AsyncClient] = None,
                     )
                 else:  # openai
                     resp = await call_openai_compat(req, client)
+                _elapsed = _time.time() - _t_attempt
+
+                # Log timing chi tiết: tokens + ký tự response + duration
+                _resp_chars = len(resp.text or "")
+                _attempt_str = f" (attempt {attempt+1})" if attempt > 0 else ""
+                logger.info(f"{_tag_str}✓ LLM trả response{_attempt_str}: "
+                            f"{_elapsed:.2f}s, "
+                            f"in={resp.tokens_in or 0} out={resp.tokens_out or 0} tok, "
+                            f"text={_resp_chars} chars")
 
                 # Notify observer (nếu có) — không block call
                 _notify_observer(req, resp, stage_tag, attempt + 1, error=None)
                 return resp
             except Exception as e:
                 last_exc = e
-                logger.warning(f"[LLM] Attempt {attempt+1}/{req.max_retries} failed: {e}")
+                _elapsed = _time.time() - _t_attempt
+                logger.warning(f"{_tag_str}✗ Attempt {attempt+1}/{req.max_retries} "
+                               f"FAILED sau {_elapsed:.2f}s: {e}")
                 _notify_observer(req, None, stage_tag, attempt + 1, error=str(e))
                 if attempt < req.max_retries - 1:
-                    await asyncio.sleep(req.retry_backoff * (2 ** attempt))
+                    _backoff = req.retry_backoff * (2 ** attempt)
+                    logger.info(f"{_tag_str}↺ Chờ {_backoff:.1f}s rồi retry...")
+                    await asyncio.sleep(_backoff)
 
         raise RuntimeError(f"All {req.max_retries} retries failed. Last: {last_exc}")
     finally:
@@ -398,6 +454,9 @@ def parse_json_response(text: str, default: Optional[dict | list] = None) -> dic
     """
     Parse JSON từ output LLM, có fallback cho output không sạch.
     """
+    import time as _time
+    _t_parse = _time.time()
+    _orig_len = len(text)
     text = text.strip()
 
     # Strip markdown fences
@@ -405,9 +464,13 @@ def parse_json_response(text: str, default: Optional[dict | list] = None) -> dic
     text = re.sub(r"\n?```\s*$", "", text)
     text = text.strip()
 
-    # Direct parse
+    # Direct parse — fast path
     try:
-        return json.loads(text)
+        result = json.loads(text)
+        _elapsed = _time.time() - _t_parse
+        if _elapsed > 0.5:  # log nếu parse chậm (hiếm)
+            logger.info(f"[JSON] parsed {_orig_len} chars in {_elapsed:.2f}s")
+        return result
     except json.JSONDecodeError:
         pass
 
@@ -416,6 +479,7 @@ def parse_json_response(text: str, default: Optional[dict | list] = None) -> dic
         m = re.search(pattern, text)
         if m:
             try:
+                logger.info(f"[JSON] fallback extract pattern (text {_orig_len} chars)")
                 return json.loads(m.group(0))
             except json.JSONDecodeError:
                 continue
@@ -424,6 +488,7 @@ def parse_json_response(text: str, default: Optional[dict | list] = None) -> dic
     # Remove trailing commas
     fixed = re.sub(r",\s*([}\]])", r"\1", text)
     try:
+        logger.info(f"[JSON] fallback fix trailing commas")
         return json.loads(fixed)
     except json.JSONDecodeError:
         pass

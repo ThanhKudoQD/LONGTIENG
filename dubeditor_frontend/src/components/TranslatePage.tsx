@@ -56,6 +56,9 @@ export default function TranslatePage({
   const [currentProgress, setCurrentProgress] = useState(0)
   const [currentMessage, setCurrentMessage] = useState('')
   const [isRunning, setIsRunning] = useState(false)
+  // v3.7.2: state "đang hủy" — UI disable nút Hủy + đổi label trong khi
+  // backend chờ httpx connection đóng (~vài giây).
+  const [isCancelling, setIsCancelling] = useState(false)
   const sseCloseRef = useRef<(() => void) | null>(null)
 
   // ─── Load initial data ────────────────────────────────────────────────────
@@ -103,10 +106,15 @@ export default function TranslatePage({
 
         if (msg.stage === 'done') {
           setIsRunning(false)
+          setIsCancelling(false)
           refreshAll()
         } else if (msg.stage === 'error' || msg.stage === 'cancelled') {
           setIsRunning(false)
+          setIsCancelling(false)
           refreshStatus()
+        } else if (msg.stage === 'cancelling') {
+          // v3.7.2: backend đã nhận signal hủy, đang dọn dẹp
+          setIsCancelling(true)
         }
 
         // Auto-refresh key data when corresponding stage completes
@@ -222,10 +230,19 @@ export default function TranslatePage({
   }
 
   async function handleCancel() {
-    if (!confirm('Hủy pipeline đang chạy?')) return
+    const ok = confirm(
+      'Hủy pipeline đang chạy?\n\n' +
+      '⚠ LƯU Ý:\n' +
+      '• Dữ liệu đã save (Stage 0 đã xóa dòng, Bible đã extract) sẽ GIỮ NGUYÊN, không rollback\n' +
+      '• Bạn có thể chạy lại từ stage chưa hoàn tất\n' +
+      '• LLM call đang chờ response sẽ bị hủy (mất ~$0.01 token)'
+    )
+    if (!ok) return
+    setIsCancelling(true)
     try {
       await translateApi.cancel(projectId)
     } catch (e: any) {
+      setIsCancelling(false)
       alert(`Cancel failed: ${e?.response?.data?.detail || e.message}`)
     }
   }
@@ -285,8 +302,11 @@ export default function TranslatePage({
         </button>
 
         {isRunning ? (
-          <button onClick={handleCancel} className="btn bg-red-50 text-red-700 hover:bg-red-100">
-            ⏹ Hủy
+          <button
+            onClick={handleCancel}
+            disabled={isCancelling}
+            className="btn bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-60 disabled:cursor-wait">
+            {isCancelling ? '⏳ Đang hủy...' : '⏹ Hủy'}
           </button>
         ) : (
           <>
