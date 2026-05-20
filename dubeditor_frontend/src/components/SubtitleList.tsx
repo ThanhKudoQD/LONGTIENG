@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import useStore from '../store'
+import useUndoStore from '../store/undo'
 import api from '../api'
 import { playSubAudio, stopGlobalAudio, subscribePlayingId } from '../audio'
 import { findDuplicateStarts } from '../utils/perf'
@@ -574,6 +575,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     if (!toApply.length) return
 
     try {
+      const idsForAutoTTS: number[] = []
       for (const line of toApply) {
         const patch: any = {
           text_v1: line.text_v1,
@@ -588,6 +590,14 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
           variant_selected: updated.variant_selected,
           cps_value: updated.cps_value,
         })
+        // Chỉ enqueue auto TTS cho sub có nhân vật (TTS cần biết dùng giọng nào)
+        const sub = useStore.getState().subtitles.find(s => s.id === line.subtitle_id)
+        if (sub?.character_id) idsForAutoTTS.push(line.subtitle_id)
+      }
+      if (idsForAutoTTS.length) {
+        window.dispatchEvent(new CustomEvent('subs_assigned', {
+          detail: { subtitle_ids: idsForAutoTTS },
+        }))
       }
       setInlineRT(null)
     } catch (err: any) {
@@ -796,18 +806,52 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const handleDeleteAudio = useCallback(async (e: React.MouseEvent, s: Subtitle) => {
     e.stopPropagation()
     if (!s.audio_path) return
-    await api.post('/tts/delete-audio', { subtitle_ids: [s.id] })
+    const res = await api.post('/tts/delete-audio', { subtitle_ids: [s.id] })
+    const undoToken = res.data?.undo_token
+    const backup    = res.data?.backup || []
     deleteAudioStore([s.id])
+
+    if (backup.length) {
+      useUndoStore.getState().push({
+        label: `Đã xóa audio #${s.index}`,
+        restore: async () => {
+          await api.post('/tts/restore-audio', { undo_token: undoToken, backup })
+          backup.forEach((b: any) => {
+            useStore.getState().updateSubtitle(b.sub_id, {
+              audio_path:   b.audio_path,
+              tts_done:     true,
+              wav_duration: b.wav_duration,
+            } as any)
+          })
+        },
+      })
+    }
   }, [deleteAudioStore])
 
   const handleDeleteSub = useCallback(async (e: React.MouseEvent, s: Subtitle) => {
     e.stopPropagation()
     if (!window.confirm(`Xóa dòng #${s.index}?\n"${s.text.slice(0, 60)}"`)) return
     const idx = subtitles.findIndex(sub => sub.id === s.id)
-    await api.delete(`/subtitles/${s.id}`)
+    const res = await api.delete(`/subtitles/${s.id}`)
+    const backup = res.data?.backup || []
     deleteSubStore(s.id)
     const remaining = subtitles.filter(sub => sub.id !== s.id)
     if (remaining.length > 0) setActiveSubId(remaining[Math.min(idx, remaining.length - 1)].id)
+
+    if (backup.length) {
+      useUndoStore.getState().push({
+        label: `Đã xóa phụ đề #${s.index}`,
+        restore: async () => {
+          await api.post('/subtitles/restore', { backup })
+          const pid = useStore.getState().project?.id
+          if (pid) {
+            const subs = await api.get(`/subtitles/project/${pid}`).then(r => r.data)
+            useStore.getState().setSubtitles(subs)
+            setActiveSubId(s.id)
+          }
+        },
+      })
+    }
   }, [subtitles, deleteSubStore, setActiveSubId])
 
   // v3: override voice mode per-line

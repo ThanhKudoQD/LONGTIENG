@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react'
 import useStore, { filterVisible } from '../store'
+import useUndoStore from '../store/undo'
 import api from '../api'
 import ConfirmModal from './ConfirmModal'
 import InfoDialog from './InfoDialog'
@@ -223,8 +224,33 @@ export default function DetailPanel() {
         setConfirmCfg(null)
         setBulkAudioDelLoading(true)
         try {
-          await api.post('/tts/delete-audio', { subtitle_ids: ids })
+          const res = await api.post('/tts/delete-audio', { subtitle_ids: ids })
+          const undoToken = res.data?.undo_token
+          const backup    = res.data?.backup || []
+          // Cập nhật FE: clear audio_path/tts_done của các sub đã xóa
           useStore.getState().deleteAudio(ids)
+
+          // Push Toast Undo
+          if (backup.length) {
+            useUndoStore.getState().push({
+              label: `Đã xóa ${backup.length} audio`,
+              restore: async () => {
+                await api.post('/tts/restore-audio', {
+                  undo_token: undoToken,
+                  backup,
+                })
+                // Cập nhật FE: set lại audio_path + tts_done
+                const setSubs = useStore.getState()
+                backup.forEach((b: any) => {
+                  setSubs.updateSubtitle(b.sub_id, {
+                    audio_path:   b.audio_path,
+                    tts_done:     true,
+                    wav_duration: b.wav_duration,
+                  } as any)
+                })
+              },
+            })
+          }
         } finally { setBulkAudioDelLoading(false) }
       },
     })
@@ -238,16 +264,32 @@ export default function DetailPanel() {
     }
     setConfirmCfg({
       title: 'Xóa phụ đề đã chọn',
-      message: `Xóa ${ids.length} dòng phụ đề? Hành động này không thể hoàn tác.`,
+      message: `Xóa ${ids.length} dòng phụ đề? Bạn có thể hoàn tác trong 8 giây.`,
       variant: 'danger',
       confirmText: 'Xóa',
       onConfirm: async () => {
         setConfirmCfg(null)
         setBulkDelLoading(true)
         try {
-          await api.post('/subtitles/bulk-delete', { subtitle_ids: ids })
+          const res = await api.post('/subtitles/bulk-delete', { subtitle_ids: ids })
+          const backup = res.data?.backup || []
           ids.forEach(id => useStore.getState().deleteSubtitle(id))
           useStore.setState({ selectedIds: new Set(), activeSubId: null })
+
+          if (backup.length) {
+            useUndoStore.getState().push({
+              label: `Đã xóa ${backup.length} phụ đề`,
+              restore: async () => {
+                await api.post('/subtitles/restore', { backup })
+                // Re-load để có đủ thông tin character + scene relationship
+                const pid = useStore.getState().project?.id
+                if (pid) {
+                  const subs = await api.get(`/subtitles/project/${pid}`).then(r => r.data)
+                  useStore.getState().setSubtitles(subs)
+                }
+              },
+            })
+          }
         } finally { setBulkDelLoading(false) }
       },
     })

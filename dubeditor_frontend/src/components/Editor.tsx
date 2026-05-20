@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import useStore, { usePlayTimeStore, filterVisible, markResumeApplied } from '../store'
+import useUndoStore from '../store/undo'
 import api from '../api'
 import CharSidebar from './CharSidebar'
 import SubtitleList from './SubtitleList'
@@ -18,6 +19,7 @@ import CharacterFilterDropdown from './CharacterFilterDropdown'
 import SwapCharacterModal from './SwapCharacterModal'
 import ConfirmModal from './ConfirmModal'
 import { LicenseChip, LicenseStatus } from './LicenseGate'
+import UndoToast from './UndoToast'
 
 interface Props { projectId: number; onBack: () => void; onTranslate: () => void }
 
@@ -372,6 +374,16 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       // Bỏ qua nếu đang ở chế độ recording shortcut (data-recording-shortcut)
       if (document.querySelector('[data-recording-shortcut="1"]')) return
+
+      // Ctrl+Z (hoặc Cmd+Z trên Mac) → trigger Toast Undo nếu đang hiện.
+      // Toast tự ẩn nếu không có entry — ở đây chỉ chặn khi có để khỏi spam browser.
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
+        const undo = useUndoStore.getState()
+        if (undo.current) {
+          e.preventDefault()
+          undo.undo()
+        }
+      }
 
       if (e.code === 'ArrowDown') {
         e.preventDefault()
@@ -998,6 +1010,9 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
 
       {/* Sticky toast tiến trình bulk TTS */}
       <BulkTTSProgress projectId={projectId} />
+
+      {/* Toast Hoàn tác (góc trái dưới) — xóa audio/phụ đề lỡ tay đều undo được */}
+      <UndoToast />
     </div>
   )
 }

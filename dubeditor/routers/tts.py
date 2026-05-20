@@ -105,9 +105,10 @@ def _run_tts(text: str, role_id: str, emotion: Optional[str] = None,
         # (kỹ thuật prompt — dấu phẩy giúp model "khởi động" giọng tự nhiên,
         #  tránh bị cắt đầu hoặc burst âm thanh ở milisecond đầu).
         # Skip nếu text đã bắt đầu bằng dấu câu/khoảng trắng.
+        # KHÔNG có space sau dấu phẩy.
         tts_text = (text or "").strip()
         if tts_text and tts_text[0] not in ',.!?;:，。！？；：、 ':
-            tts_text = ', ' + tts_text
+            tts_text = ',' + tts_text
 
         # Log mode được dùng (để debug)
         logger.info(
@@ -457,7 +458,29 @@ async def trim_bulk(data: TrimBulkRequest, db: Session = Depends(get_db)):
     return {"trimmed": trimmed_count, "total": len(subs)}
 
 
-# ─── Delete audio ─────────────────────────────────────────────────────────────
+# ─── Delete audio (SOFT) ──────────────────────────────────────────────────────
+#
+# Thay vì xóa cứng file audio + reset DB, ta:
+#   1. Move file audio sang thư mục `data/trash/audio/<token>/` (giữ nguyên cấu
+#      trúc tương đối) — token là 1 chuỗi random để tách từng lần xóa.
+#   2. Trả về `undo_token` + danh sách backup (sub_id, audio_path cũ, wav_duration)
+#      để FE giữ trong toast Undo.
+#   3. Khi user bấm "Hoàn tác" → FE gọi /tts/restore-audio với undo_token →
+#      BE move file ngược lại + set lại DB.
+#
+# Bonus: GC định kỳ có thể xóa thư mục trash > N ngày (chưa làm).
+
+import secrets
+import shutil
+
+TRASH_AUDIO_DIR = BASE_DIR / "data" / "trash" / "audio"
+
+
+def _audio_abs_path(audio_path: str) -> Path:
+    """Convert audio_path lưu trong DB sang absolute path trên disk."""
+    rel = audio_path.lstrip("/").replace("dub/projects/", "data/projects/", 1)
+    return BASE_DIR / rel
+
 
 @router.post("/delete-audio")
 async def delete_audio(data: dict, db: Session = Depends(get_db)):
@@ -465,24 +488,88 @@ async def delete_audio(data: dict, db: Session = Depends(get_db)):
     if not sub_ids:
         raise HTTPException(400, "Empty subtitle_ids")
 
-    deleted = 0
+    # Token duy nhất cho phiên xóa này — FE giữ để gọi restore
+    undo_token = secrets.token_urlsafe(12)
+    trash_dir  = TRASH_AUDIO_DIR / undo_token
+    trash_dir.mkdir(parents=True, exist_ok=True)
+
+    backup = []   # [{sub_id, audio_path, wav_duration, trash_file}]
     for sid in sub_ids:
         s = db.query(Subtitle).filter(Subtitle.id == sid).first()
         if not s or not s.audio_path:
             continue
+        old_audio_path = s.audio_path
+        old_wav_dur    = s.wav_duration
+        trash_file     = None
         try:
-            rel  = s.audio_path.lstrip("/").replace("dub/projects/", "data/projects/", 1)
-            path = BASE_DIR / rel
-            if path.exists():
-                path.unlink()
+            src = _audio_abs_path(old_audio_path)
+            if src.exists():
+                # Lưu vào trash với tên = sub id + ext gốc
+                trash_file = trash_dir / f"{sid}{src.suffix}"
+                shutil.move(str(src), str(trash_file))
         except Exception as e:
-            logger.warning(f"Delete audio file failed: {e}")
-        s.audio_path  = None
-        s.tts_done    = False
+            logger.warning(f"Move audio to trash failed (sub={sid}): {e}")
+        s.audio_path   = None
+        s.tts_done     = False
         s.wav_duration = None
-        deleted += 1
+        backup.append({
+            "sub_id":       sid,
+            "audio_path":   old_audio_path,
+            "wav_duration": old_wav_dur,
+            "trash_file":   str(trash_file.relative_to(BASE_DIR)) if trash_file else None,
+        })
     db.commit()
-    return {"deleted": deleted}
+    return {
+        "deleted":    len(backup),
+        "undo_token": undo_token,
+        "backup":     backup,
+    }
+
+
+@router.post("/restore-audio")
+async def restore_audio(data: dict, db: Session = Depends(get_db)):
+    """Khôi phục audio đã xóa qua undo_token + backup từ /tts/delete-audio."""
+    backup = data.get("backup", [])
+    if not backup:
+        raise HTTPException(400, "Empty backup")
+
+    restored = 0
+    for item in backup:
+        sid          = item.get("sub_id")
+        audio_path   = item.get("audio_path")
+        wav_duration = item.get("wav_duration")
+        trash_file   = item.get("trash_file")
+        s = db.query(Subtitle).filter(Subtitle.id == sid).first()
+        if not s:
+            continue
+        # Move file từ trash về vị trí cũ (nếu còn)
+        try:
+            if trash_file and audio_path:
+                src = BASE_DIR / trash_file
+                dst = _audio_abs_path(audio_path)
+                if src.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(dst))
+        except Exception as e:
+            logger.warning(f"Restore audio failed (sub={sid}): {e}")
+            continue
+        s.audio_path   = audio_path
+        s.tts_done     = True
+        s.wav_duration = wav_duration
+        restored += 1
+    db.commit()
+
+    # Cleanup trash dir nếu rỗng (best-effort)
+    undo_token = data.get("undo_token")
+    if undo_token:
+        trash_dir = TRASH_AUDIO_DIR / undo_token
+        try:
+            if trash_dir.exists() and not any(trash_dir.iterdir()):
+                trash_dir.rmdir()
+        except Exception:
+            pass
+
+    return {"restored": restored}
 
 
 # ─── Speed endpoints ──────────────────────────────────────────────────────────

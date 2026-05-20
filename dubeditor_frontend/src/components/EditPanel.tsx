@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react'
 import useStore from '../store'
+import useUndoStore from '../store/undo'
 import api, { translateApi } from '../api'
 import { secToSrt, srtToSec } from '../types'
 
@@ -61,12 +62,29 @@ export default function EditPanel() {
   const handleDelete = async () => {
     if (!sub) return
     const idx = subtitles.findIndex(s => s.id === sub.id)
-    await api.delete(`/subtitles/${sub.id}`)
+    const res = await api.delete(`/subtitles/${sub.id}`)
+    const backup = res.data?.backup || []
     deleteSubtitle(sub.id)
     setConfirmDelete(false)
     lastSubRef.current = null
     const remaining = subtitles.filter(s => s.id !== sub.id)
     if (remaining.length > 0) setActiveSubId(remaining[Math.min(idx, remaining.length - 1)].id)
+
+    if (backup.length) {
+      const subIdToRestore = sub.id
+      useUndoStore.getState().push({
+        label: `Đã xóa phụ đề #${sub.index}`,
+        restore: async () => {
+          await api.post('/subtitles/restore', { backup })
+          const pid = useStore.getState().project?.id
+          if (pid) {
+            const subs = await api.get(`/subtitles/project/${pid}`).then(r => r.data)
+            useStore.getState().setSubtitles(subs)
+            setActiveSubId(subIdToRestore)
+          }
+        },
+      })
+    }
   }
 
   const hasVariant = !!(sub && sub.text_v2 && sub.text_v2.trim())
@@ -115,6 +133,20 @@ export default function EditPanel() {
       if ('start_time' in patch) updates.start_time = patch.start_time
       if ('end_time' in patch) updates.end_time = patch.end_time
       updateSubtitle(sub.id, updates)
+
+      // ── Auto TTS ──────────────────────────────────────────────────────
+      // Nếu text active đã đổi (text_v1/text_v2/variant) HOẶC vừa gán nhân vật mới
+      // → dispatch event để Editor.tsx batch enqueue TTS (chỉ khi autoTTS BẬT).
+      // Hook ngay cuối save() vì lúc này store đã có data mới nhất + character_id
+      // mới nhất, autoTTS batch sẽ resolve đúng giọng.
+      const textChanged = 'text_v1' in patch || 'text_v2' in patch || 'variant_selected' in patch
+      const charChanged = 'character_id' in patch
+      const finalCharId = 'character_id' in patch ? patch.character_id : sub.character_id
+      if ((textChanged || charChanged) && finalCharId) {
+        window.dispatchEvent(new CustomEvent('subs_assigned', {
+          detail: { subtitle_ids: [sub.id] },
+        }))
+      }
     } finally {
       setSaving(false)
     }

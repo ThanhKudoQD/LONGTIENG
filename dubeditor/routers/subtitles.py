@@ -165,13 +165,42 @@ def _sync_variant_active(s: Subtitle) -> None:
     # → đơn giản: chỉ reset nếu cần. UI sẽ xử lý.
 
 
+# ─── Backup helpers cho undo delete subtitle ─────────────────────────────────
+#
+# Khi xóa, BE trả về snapshot Subtitle để FE giữ. Khi user bấm "Hoàn tác",
+# FE gửi snapshot ngược lên /restore → BE recreate row (giữ id cũ).
+#
+# LƯU Ý audio_path:
+#   - File audio gốc KHÔNG bị xóa khi delete subtitle (chỉ row DB bị xóa).
+#   - Vì vậy restore chỉ cần insert lại row → audio_path cũ vẫn dùng được.
+
+_BACKUP_FIELDS = (
+    "id", "project_id", "character_id", "scene_id", "index",
+    "start_time", "end_time", "text", "original_text",
+    "audio_path", "audio_offset", "tts_done", "wav_duration", "tts_speed",
+    "audio_voice_mode",
+    "speaker_zh", "speaker_confidence", "speaker_reason",
+    "emotion", "intensity", "cps_value",
+    "needs_review", "review_reason", "text_draft", "is_hook",
+    "translation_version",
+    "text_v1", "text_v2", "variant_selected",
+    "is_noise", "is_cleaned", "original_raw", "clean_reason",
+    "chunk_id", "tts_voice_mode",
+)
+
+
+def _snapshot_subtitle(s: Subtitle) -> dict:
+    return {k: getattr(s, k) for k in _BACKUP_FIELDS}
+
+
 @router.delete("/{subtitle_id}")
 def delete_subtitle(subtitle_id: int, db: Session = Depends(get_db)):
     s = db.query(Subtitle).filter(Subtitle.id == subtitle_id).first()
     if not s:
         raise HTTPException(404, "Subtitle not found")
+    backup = _snapshot_subtitle(s)
     db.delete(s); db.commit()
-    return {"ok": True}
+    return {"ok": True, "backup": [backup]}
 
 
 @router.post("/bulk-assign")
@@ -186,7 +215,31 @@ def bulk_assign(data: BulkAssignRequest, db: Session = Depends(get_db)):
 @router.post("/bulk-delete")
 async def bulk_delete(data: dict, db: Session = Depends(get_db)):
     ids = data.get("subtitle_ids", [])
-    if not ids: return {"deleted": 0}
+    if not ids: return {"deleted": 0, "backup": []}
+    rows = db.query(Subtitle).filter(Subtitle.id.in_(ids)).all()
+    backup = [_snapshot_subtitle(s) for s in rows]
     db.query(Subtitle).filter(Subtitle.id.in_(ids)).delete(synchronize_session=False)
     db.commit()
-    return {"deleted": len(ids)}
+    return {"deleted": len(backup), "backup": backup}
+
+
+@router.post("/restore")
+def restore_subtitles(data: dict, db: Session = Depends(get_db)):
+    """Khôi phục subtitles đã xóa. FE truyền backup từ /bulk-delete hoặc DELETE."""
+    backup = data.get("backup", [])
+    if not backup:
+        raise HTTPException(400, "Empty backup")
+
+    restored = []
+    for item in backup:
+        # Bỏ qua nếu id đã tồn tại (user đã restore rồi hoặc trùng)
+        sid = item.get("id")
+        if sid and db.query(Subtitle).filter(Subtitle.id == sid).first():
+            continue
+        # Lọc chỉ giữ các field hợp lệ
+        kwargs = {k: v for k, v in item.items() if k in _BACKUP_FIELDS}
+        s = Subtitle(**kwargs)
+        db.add(s)
+        restored.append(sid)
+    db.commit()
+    return {"restored": len(restored), "ids": restored}
