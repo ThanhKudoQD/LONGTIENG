@@ -113,23 +113,86 @@ export default function DetailPanel() {
 
   const bulkTTS = async () => {
     if (!project) return
+
+    // v3.4 FIX: Guard race condition — nếu user CÓ filter chapter mà chapters chưa
+    // load vào store → KHÔNG cho enqueue (tránh ra danh sách sai). User có thể đợi 1s
+    // rồi bấm lại — lúc đó chapters đã load.
+    if (filterChapterIds.length > 0 && chaptersFromStore.length === 0) {
+      setInfo({
+        message: 'Đang tải danh sách đoạn, vui lòng đợi 1-2 giây rồi thử lại.',
+        variant: 'warning',
+      })
+      return
+    }
+    // Nếu filterChapterIds có nhưng KHÔNG match chapter nào trong store
+    // (chapter id đã bị xóa) → cảnh báo
+    if (filterChapterIds.length > 0) {
+      const existingIds = new Set(chaptersFromStore.map(c => c.id))
+      const validFilterIds = filterChapterIds.filter(id => existingIds.has(id))
+      if (validFilterIds.length === 0) {
+        setInfo({
+          message: 'Filter đoạn hiện tại không khớp đoạn nào (có thể đã bị xóa). Vui lòng chọn lại.',
+          variant: 'warning',
+        })
+        return
+      }
+    }
+
     // v3.4: chỉ áp trong đoạn đang lọc (nếu có filter), không thì toàn phim như cũ
     const src = hasFilter ? visibleSubtitles : subtitles
-    const willGenerate = src.filter(s => !s.tts_done && s.character_id).map(s => s.id)
-    const skipped = src.filter(s => !s.tts_done).length - willGenerate.length
+    // v3.13 FIX: Map character_id → có voice (voxcpm_role_id) chưa
+    const charHasVoice: Record<number, boolean> = {}
+    for (const c of characters) {
+      charHasVoice[c.id] = !!c.voxcpm_role_id
+    }
+    // v3.13 FIX: Detect "chưa dịch" = text rỗng hoặc còn ký tự TQ.
+    // Tránh trường hợp import SRT Trung mà chưa dịch → TTS phát text Trung.
+    const CHINESE_RE = /[\u4e00-\u9fff]/
+    const isUntranslated = (s: any): boolean => {
+      const t = (s.text || '').trim()
+      if (!t) return true
+      if (CHINESE_RE.test(t)) return true
+      if (t.startsWith('[CHƯA DỊCH') || t.startsWith('[UNTRANSLATED')) return true
+      return false
+    }
+
+    const willGenerate = src.filter(s =>
+      !s.tts_done &&
+      s.character_id &&
+      charHasVoice[s.character_id] &&
+      !isUntranslated(s)              // ← thêm: skip dòng chưa dịch
+    ).map(s => s.id)
+    // Count skipped: chia thành 3 loại để báo user
+    const skippedNoChar = src.filter(s => !s.tts_done && !s.character_id).length
+    const skippedNoVoice = src.filter(s =>
+      !s.tts_done &&
+      s.character_id &&
+      !charHasVoice[s.character_id]
+    ).length
+    const skippedUntranslated = src.filter(s =>
+      !s.tts_done &&
+      s.character_id &&
+      charHasVoice[s.character_id] &&
+      isUntranslated(s)
+    ).length
+    const skipped = skippedNoChar + skippedNoVoice + skippedUntranslated
 
     if (!willGenerate.length) {
-      setInfo({
-        message: skipped > 0
-          ? `${skipped} dòng chưa gán nhân vật bị bỏ qua, không có dòng nào hợp lệ để tạo TTS.`
-          : (hasFilter ? 'Tất cả phụ đề trong đoạn lọc đã có TTS rồi!' : 'Tất cả phụ đề đã có TTS rồi!'),
-        variant: 'info',
-      })
+      const parts: string[] = []
+      if (skippedNoChar > 0) parts.push(`${skippedNoChar} dòng chưa gán NV`)
+      if (skippedNoVoice > 0) parts.push(`${skippedNoVoice} dòng có NV nhưng NV chưa có voice`)
+      if (skippedUntranslated > 0) parts.push(`${skippedUntranslated} dòng chưa dịch (còn TQ/rỗng)`)
+      const msg = skipped > 0
+        ? `Không có dòng hợp lệ để tạo TTS. ${parts.join('. ')}.`
+        : (hasFilter ? 'Tất cả phụ đề trong đoạn lọc đã có TTS rồi!' : 'Tất cả phụ đề đã có TTS rồi!')
+      setInfo({ message: msg, variant: 'info' })
       return
     }
 
     const warnings: string[] = []
-    if (skipped > 0) warnings.push(`Bỏ qua ${skipped} dòng chưa gán nhân vật`)
+    if (skippedNoChar > 0) warnings.push(`Bỏ qua ${skippedNoChar} dòng chưa gán nhân vật`)
+    if (skippedNoVoice > 0) warnings.push(`Bỏ qua ${skippedNoVoice} dòng có nhân vật nhưng chưa gán voice`)
+    if (skippedUntranslated > 0) warnings.push(`Bỏ qua ${skippedUntranslated} dòng chưa dịch (còn TQ/rỗng)`)
 
     setConfirmCfg({
       title: hasFilter ? 'Tạo TTS (đoạn đang lọc)' : 'Tạo TTS tất cả',
@@ -160,17 +223,47 @@ export default function DetailPanel() {
       return
     }
     const subs = useStore.getState().subtitles
+    const chars = useStore.getState().characters
+    // v3.13 FIX: Map character_id → có voice chưa
+    const charHasVoice: Record<number, boolean> = {}
+    for (const c of chars) {
+      charHasVoice[c.id] = !!c.voxcpm_role_id
+    }
+    // v3.13 FIX: Detect "chưa dịch" = text rỗng hoặc còn ký tự TQ
+    const CHINESE_RE = /[\u4e00-\u9fff]/
+    const isUntranslated = (s: any): boolean => {
+      const t = (s.text || '').trim()
+      if (!t) return true
+      if (CHINESE_RE.test(t)) return true
+      if (t.startsWith('[CHƯA DỊCH') || t.startsWith('[UNTRANSLATED')) return true
+      return false
+    }
     const willGenerate = allSel.filter(id => {
       const s = subs.find(x => x.id === id)
-      return s && s.character_id
+      return s && s.character_id && charHasVoice[s.character_id] && !isUntranslated(s)
     })
-    const noChar = allSel.length - willGenerate.length
+    const noChar = allSel.filter(id => {
+      const s = subs.find(x => x.id === id)
+      return s && !s.character_id
+    }).length
+    const noVoice = allSel.filter(id => {
+      const s = subs.find(x => x.id === id)
+      return s && s.character_id && !charHasVoice[s.character_id]
+    }).length
+    const untranslated = allSel.filter(id => {
+      const s = subs.find(x => x.id === id)
+      return s && s.character_id && charHasVoice[s.character_id] && isUntranslated(s)
+    }).length
 
     if (!willGenerate.length) {
-      setInfo({
-        message: `Trong ${allSel.length} dòng đã chọn, không có dòng nào đã gán nhân vật.`,
-        variant: 'warning',
-      })
+      const parts: string[] = []
+      if (noChar > 0) parts.push(`${noChar} dòng chưa gán NV`)
+      if (noVoice > 0) parts.push(`${noVoice} dòng có NV nhưng NV chưa có voice`)
+      if (untranslated > 0) parts.push(`${untranslated} dòng chưa dịch (còn TQ/rỗng)`)
+      const msg = parts.length
+        ? `Không có dòng hợp lệ. ${parts.join('. ')}.`
+        : `Trong ${allSel.length} dòng đã chọn, không có dòng nào hợp lệ.`
+      setInfo({ message: msg, variant: 'warning' })
       return
     }
 
@@ -182,6 +275,8 @@ export default function DetailPanel() {
     const warnings: string[] = []
     if (existing > 0) warnings.push(`${existing} dòng đã có TTS — audio cũ sẽ bị GHI ĐÈ`)
     if (noChar > 0) warnings.push(`Bỏ qua ${noChar} dòng chưa gán nhân vật`)
+    if (noVoice > 0) warnings.push(`Bỏ qua ${noVoice} dòng có NV nhưng NV chưa có voice`)
+    if (untranslated > 0) warnings.push(`Bỏ qua ${untranslated} dòng chưa dịch (còn TQ/rỗng)`)
 
     setConfirmCfg({
       title: 'Tạo TTS cho mục đã chọn',

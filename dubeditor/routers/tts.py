@@ -171,6 +171,18 @@ async def do_generate(subtitle_id: int):
         if not text:
             raise RuntimeError(f"Sub {subtitle_id} không có text")
 
+        # v3.13 FIX: Phòng vệ kép — không TTS dòng còn ký tự Trung Quốc.
+        # Tránh trường hợp import SRT Trung mà chưa dịch, FE bypass filter →
+        # BE phát ra audio tiếng Trung. Detect: U+4E00–U+9FFF (CJK Unified
+        # Ideographs) hoặc placeholder "[CHƯA DỊCH...]".
+        import re as _re
+        if _re.search(r'[\u4e00-\u9fff]', text):
+            raise RuntimeError(
+                f"Sub {subtitle_id} còn ký tự Trung Quốc, chưa được dịch sang tiếng Việt"
+            )
+        if text.startswith("[CHƯA DỊCH") or text.startswith("[UNTRANSLATED"):
+            raise RuntimeError(f"Sub {subtitle_id} placeholder, chưa được dịch")
+
         # Resolve voice strategy:
         # Toggle ON  → mode theo emotion (qua emotion_to_mode 14→3)
         # Toggle OFF → luôn dùng mode "normal"

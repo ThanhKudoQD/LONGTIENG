@@ -82,7 +82,14 @@ interface EditorStore {
   setAutoTTS: (v: boolean) => void
 }
 
+// v3.13: 2 cờ tracking nguồn của setActiveSubId
+// - userSelectedUntil: dùng cho việc khác (vd. block video auto-seek track)
+// - _activeSubIsUserChange: dùng RIÊNG cho auto-sync resume — SET TRUE khi user click,
+//   reset FALSE NGAY trong subscribe handler sau khi đọc xong. Tránh trường hợp:
+//   user click sub 11 → 100ms sau video chạy tới sub 37 → flag time-based 1000ms
+//   vẫn TRUE → save 37 thay vì 11.
 let userSelectedUntil = 0
+let _activeSubIsUserChange = false
 
 const useStore = create<EditorStore>((set, get) => ({
   project: null,
@@ -124,6 +131,7 @@ const useStore = create<EditorStore>((set, get) => ({
   setActiveSubId: (id) => {
     const sub = get().subtitles.find(s => s.id === id)
     userSelectedUntil = Date.now() + 1000
+    _activeSubIsUserChange = true   // v3.13: subscribe sẽ đọc + reset
     set({
       activeSubId: id,
       selectedIds: new Set(id ? [id] : []),
@@ -133,12 +141,15 @@ const useStore = create<EditorStore>((set, get) => ({
 
   setActiveSubIdFromVideo: (id) => {
     if (get().activeSubId === id) return
+    // v3.13: KHÔNG set _activeSubIsUserChange — video chạy không phải user action
     set({ activeSubId: id })
   },
 
   toggleSelect: (id, multi = false, range = false, visibleIds?) => {
     const { selectedIds, subtitles, activeSubId } = get()
     const pool = visibleIds ?? subtitles.map(s => s.id)
+    // v3.13: mọi nhánh đều là user action → set flag
+    _activeSubIsUserChange = true
     if (range && activeSubId) {
       const a = pool.indexOf(activeSubId), b = pool.indexOf(id)
       const lo = Math.min(a, b), hi = Math.max(a, b)
@@ -222,6 +233,14 @@ const useStore = create<EditorStore>((set, get) => ({
   },
 
   loadProject: async (projectId) => {
+    // v3.13 FIX: Chỉ reset filter + activeSub khi ĐỔI project. Nếu loadProject
+    // được gọi lại với CÙNG projectId (vd. sau import SRT, sau upload video),
+    // GIỮ NGUYÊN filter + activeSub để không phá resume state.
+    // Trước đây: reset cả 2 → loadProject lần 2 ghi đè state vừa resume xong
+    // → auto-sync PATCH null lên DB → lần mở sau bị mất.
+    const currentProjectId = (useStore.getState().project as any)?.id
+    const sameProject = currentProjectId === projectId
+
     const [proj, subs, chars, vmRes] = await Promise.all([
       api.get(`/projects/${projectId}`).then(r => r.data),
       api.get(`/subtitles/project/${projectId}`).then(r => r.data),
@@ -231,30 +250,39 @@ const useStore = create<EditorStore>((set, get) => ({
         return {}
       }),
     ])
-    // vmRes là dict { "<char_id>": ["normal", "sad", ...] }
-    // Convert key sang number cho dễ dùng FE
     const vm: Record<number, string[]> = {}
     for (const [k, v] of Object.entries(vmRes || {})) {
       vm[Number(k)] = Array.isArray(v) ? (v as string[]) : []
     }
-    console.log('[Store] voiceModesByCharacter:', vm)
-    set({
-      project: proj,
-      subtitles: subs,
-      characters: chars,
-      voiceModesByCharacter: vm,
-      activeSubId: null,
-      selectedIds: new Set(),
-      // v3.4: reset filter khi đổi project (tránh filter chapter project A áp sang B)
-      filterText: '',
-      filterNoChar: false,
-      filterNoTTS: false,
-      filterOverlap: false,
-      filterCharIds: [],
-      filterChapterIds: [],
-      chapters: [],
-      overlapSubIds: new Set(),
-    })
+    console.log('[Store] voiceModesByCharacter:', vm, 'sameProject:', sameProject)
+
+    if (sameProject) {
+      // Cùng project (reload sau upload/import) — KHÔNG đụng tới filter/activeSub
+      set({
+        project: proj,
+        subtitles: subs,
+        characters: chars,
+        voiceModesByCharacter: vm,
+      })
+    } else {
+      // Đổi project — reset toàn bộ state filter/active để tránh leak từ project cũ
+      set({
+        project: proj,
+        subtitles: subs,
+        characters: chars,
+        voiceModesByCharacter: vm,
+        activeSubId: null,
+        selectedIds: new Set(),
+        filterText: '',
+        filterNoChar: false,
+        filterNoTTS: false,
+        filterOverlap: false,
+        filterCharIds: [],
+        filterChapterIds: [],
+        chapters: [],
+        overlapSubIds: new Set(),
+      })
+    }
   },
 }))
 
@@ -355,7 +383,14 @@ function matchVisible(s: Subtitle, f: VisibleFilters, chapterRanges: [number, nu
   if (f.filterOverlap && !f.overlapSubIds.has(s.id)) return false
   if (f.filterCharIds.length > 0 &&
       (!s.character_id || !f.filterCharIds.includes(s.character_id))) return false
-  if (chapterRanges.length > 0) {
+  // v3.4 FIX: nếu user ĐÃ chọn filter chapter mà chapterRanges rỗng
+  // (chapters chưa load xong trong store, hoặc chapter id không match)
+  // → coi như KHÔNG match (an toàn: không thấy gì còn hơn show toàn phim
+  //   khiến bulk TTS xử lý sai range).
+  // Trước đây: chỉ check khi chapterRanges.length > 0 → bug: bulk TTS chạy
+  // toàn phim trong khi user đang filter 1 chapter.
+  if (f.filterChapterIds.length > 0) {
+    if (chapterRanges.length === 0) return false
     const inRange = chapterRanges.some(([lo, hi]) => s.index >= lo && s.index <= hi)
     if (!inRange) return false
   }
@@ -430,6 +465,11 @@ let _prevActiveSubId: number | null = null
 let _resumeApplied = false
 
 export function markResumeApplied() {
+  // v3.13 FIX: Clear pending sync timers + reset flag TRƯỚC khi mark applied.
+  if (_filterSyncTimer) { clearTimeout(_filterSyncTimer); _filterSyncTimer = null }
+  if (_activeSubSyncTimer) { clearTimeout(_activeSubSyncTimer); _activeSubSyncTimer = null }
+  _activeSubIsUserChange = false   // resume gọi setActiveSubId nhưng KHÔNG phải user click
+
   _resumeApplied = true
   // Sync ngay value hiện tại làm baseline (không gọi API)
   const s = useStore.getState()
@@ -442,8 +482,9 @@ export function markResumeApplied() {
 }
 
 function _patchProject(pid: number, body: Record<string, any>) {
+  console.log('[Resume Sync] PATCH project', pid, body)
   return api.patch(`/projects/${pid}`, body).catch((e) => {
-    console.warn('[Resume] PATCH project failed:', e?.message)
+    console.warn('[Resume Sync] PATCH project failed:', e?.message)
   })
 }
 
@@ -458,6 +499,7 @@ useStore.subscribe((state) => {
     _lastSyncedFilterKey = ''
     _lastSyncedActiveIndex = undefined
     _resumeApplied = false    // chờ Editor restore xong
+    _activeSubIsUserChange = false   // v3.13: reset flag
     if (_filterSyncTimer) { clearTimeout(_filterSyncTimer); _filterSyncTimer = null }
     if (_activeSubSyncTimer) { clearTimeout(_activeSubSyncTimer); _activeSubSyncTimer = null }
     return
@@ -467,6 +509,7 @@ useStore.subscribe((state) => {
   if (!_resumeApplied) {
     _prevFilterChapterIds = state.filterChapterIds
     _prevActiveSubId = state.activeSubId
+    _activeSubIsUserChange = false   // v3.13: clear flag nếu set trong lúc chưa resume
     return
   }
 
@@ -479,24 +522,35 @@ useStore.subscribe((state) => {
       if (_filterSyncTimer) clearTimeout(_filterSyncTimer)
       _filterSyncTimer = setTimeout(() => {
         _lastSyncedFilterKey = key
+        console.log('[Resume Sync] Filter changed → saving:', ids)
         _patchProject(pid, { last_filter_chapter_ids: ids.length ? ids : null })
       }, 500)
     }
   }
 
   // Active sub changed?
+  // v3.13 FIX: Chỉ save khi user vừa CLICK chọn sub. Dùng flag boolean
+  // _activeSubIsUserChange (set bởi setActiveSubId/toggleSelect, KHÔNG set bởi
+  // setActiveSubIdFromVideo) — reset NGAY trong handler này sau khi đọc, tránh
+  // bug click sub A → 100ms sau video chạy tới sub B → flag time-based vẫn
+  // TRUE → save B thay vì A.
   if (state.activeSubId !== _prevActiveSubId) {
     _prevActiveSubId = state.activeSubId
-    const sub = state.activeSubId
-      ? state.subtitles.find(s => s.id === state.activeSubId)
-      : null
-    const idx = sub ? sub.index : null
-    if (idx !== _lastSyncedActiveIndex) {
-      if (_activeSubSyncTimer) clearTimeout(_activeSubSyncTimer)
-      _activeSubSyncTimer = setTimeout(() => {
-        _lastSyncedActiveIndex = idx
-        _patchProject(pid, { last_subtitle_index: idx })
-      }, 1500)
+    const wasUserSelect = _activeSubIsUserChange
+    _activeSubIsUserChange = false   // reset NGAY sau khi đọc
+    if (wasUserSelect) {
+      const sub = state.activeSubId
+        ? state.subtitles.find(s => s.id === state.activeSubId)
+        : null
+      const idx = sub ? sub.index : null
+      if (idx !== _lastSyncedActiveIndex) {
+        if (_activeSubSyncTimer) clearTimeout(_activeSubSyncTimer)
+        _activeSubSyncTimer = setTimeout(() => {
+          _lastSyncedActiveIndex = idx
+          console.log('[Resume Sync] Active sub changed → saving index:', idx)
+          _patchProject(pid, { last_subtitle_index: idx })
+        }, 1500)
+      }
     }
   }
 })

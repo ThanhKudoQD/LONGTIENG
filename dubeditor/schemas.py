@@ -182,6 +182,9 @@ class ProjectOut(ProjectBase):
     # v3: TTS toggle
     use_emotion_voice:  bool               = False
     tts_voice_mode:     Optional[str]      = None
+    # v3.9: Resume editor state — restore filter + active sub khi mở lại project
+    last_filter_chapter_ids: Optional[list[int]] = None
+    last_subtitle_index:     Optional[int]       = None
     class Config:
         from_attributes = True
 

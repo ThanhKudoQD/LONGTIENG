@@ -719,7 +719,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     return result
   }, [visible, chapters, filterChapterIds])
 
-  const HEADER_H = 44
+  const HEADER_H = 56
   const SUB_H    = 88
 
   const virt = useVirtualizer({
@@ -740,6 +740,17 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const itemsRef = useRef(items)
   itemsRef.current = items
 
+  // v3.13: lần scroll ĐẦU TIÊN sau khi mount/load project — dùng instant
+  // (behavior 'auto'), từ lần thứ 2 mới smooth. Lý do: khi resume mở lại
+  // dự án ở sub #300, user muốn thấy sub đó NGAY chứ không phải đợi smooth
+  // animation từ đầu phim.
+  const firstScrollDoneRef = useRef(false)
+  // v3.13 FIX: reset flag khi đổi project (component không remount khi
+  // navigate giữa projects → ref vẫn true → smooth scroll)
+  useEffect(() => {
+    firstScrollDoneRef.current = false
+  }, [project?.id])
+
   useEffect(() => {
     if (!activeSubId) return
     // Tìm item index trong items (có thể là sub trong chapter expanded)
@@ -757,10 +768,19 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     const itemBottom = itemTop + itemSize
     const scrollTop = parent.scrollTop
     const viewHeight = parent.clientHeight
+
+    // v3.13: lần đầu mount → scroll instant ngay tới giữa view
+    const behavior: ScrollBehavior = firstScrollDoneRef.current ? 'smooth' : 'auto'
+    if (!firstScrollDoneRef.current) {
+      // Lần đầu: luôn scroll tới sub (cả khi đã in view) để dramastic placement
+      parent.scrollTo({ top: Math.max(0, itemTop - viewHeight * 0.4), behavior })
+      firstScrollDoneRef.current = true
+      return
+    }
     if (itemBottom > scrollTop + viewHeight * 0.7) {
-      parent.scrollTo({ top: itemTop - viewHeight * 0.5, behavior: 'smooth' })
+      parent.scrollTo({ top: itemTop - viewHeight * 0.5, behavior })
     } else if (itemTop < scrollTop) {
-      parent.scrollTo({ top: itemTop - SUB_H, behavior: 'smooth' })
+      parent.scrollTo({ top: itemTop - SUB_H, behavior })
     }
   }, [activeSubId])
 
@@ -884,33 +904,53 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
             const statusIcon = ch.status === 'done' ? '✓'
               : ch.status === 'in_progress' ? '▶'
               : '○'
+            const statusText = ch.status === 'done' ? 'Xong'
+              : ch.status === 'in_progress' ? 'Đang làm'
+              : 'Chưa làm'
+            const totalLines = ch.end_sub_index - ch.start_sub_index + 1
             return (
               <div key={`h-${ch.id}`}
                 onClick={() => onToggleChapter && onToggleChapter(ch.id)}
-                className="absolute left-0 right-0 cursor-pointer select-none flex items-center gap-2 px-3 border-b-2 hover:opacity-90 transition-opacity"
+                className="absolute left-0 right-0 cursor-pointer select-none border-b-2 hover:bg-slate-700/40 transition-colors"
                 style={{
                   top: vi.start,
                   height: vi.size,
                   background: '#1E293B',
                   borderBottomColor: statusColor,
+                  borderLeft: `3px solid ${statusColor}`,
                   zIndex: 5,
                 }}>
-                <span className="text-white/70 text-[14px] font-mono w-4">
-                  {it.collapsed ? '▶' : '▼'}
-                </span>
-                <span className="text-white font-bold text-[14px]">{ch.name}</span>
-                <span className="text-white/50 text-[11px] font-mono">
-                  ({ch.start_sub_index}-{ch.end_sub_index})
-                </span>
-                <span className="ml-auto flex items-center gap-2">
-                  <span className="text-white/60 text-[11px] tabular-nums">
-                    {it.count}{it.collapsed ? '' : '/' + (ch.end_sub_index - ch.start_sub_index + 1)} dòng
+                {/* Row 1: caret + title (cho phép truncate ellipsis) + status badge */}
+                <div className="flex items-center gap-2 px-3 pt-2 min-w-0">
+                  <span className="text-white/70 text-[12px] font-mono w-3 flex-shrink-0">
+                    {it.collapsed ? '▶' : '▼'}
                   </span>
-                  <span className="text-[11px] font-bold px-2 py-0.5 rounded"
-                    style={{ background: statusColor + '30', color: statusColor }}>
-                    {statusIcon} {ch.status === 'done' ? 'Xong' : ch.status === 'in_progress' ? 'Đang làm' : 'Chưa làm'}
+                  <span
+                    className="text-white font-bold text-[13px] flex-1 min-w-0 truncate"
+                    title={ch.name}
+                  >
+                    {ch.name}
                   </span>
-                </span>
+                  <span
+                    className="text-[10px] font-bold px-2 py-0.5 rounded flex-shrink-0"
+                    style={{ background: statusColor + '30', color: statusColor }}
+                  >
+                    {statusIcon} {statusText}
+                  </span>
+                </div>
+                {/* Row 2: range + count (meta info — nhỏ hơn) */}
+                <div className="flex items-center gap-2 px-3 pb-1.5 mt-0.5">
+                  <span className="text-white/40 text-[10px] font-mono w-3 flex-shrink-0" />
+                  <span className="text-white/40 text-[10.5px] font-mono">
+                    dòng {ch.start_sub_index}–{ch.end_sub_index}
+                  </span>
+                  <span className="text-white/30 text-[10px]">·</span>
+                  <span className="text-white/55 text-[10.5px] tabular-nums font-medium">
+                    {it.collapsed
+                      ? `${totalLines} dòng`
+                      : `${it.count}/${totalLines} dòng hiển thị`}
+                  </span>
+                </div>
               </div>
             )
           }

@@ -217,11 +217,15 @@ export default function CharSidebar({ visible }: Props) {
   }
 
   // ── Replace character voice ───────────────────────────────
-  const replaceChar = async (actor: VoxActor, role: VoxRole, alias: string, color: string) => {
+  // v3.13 FIX: KHÔNG đổi `name` của character khi swap voice. Bé gái → chọn voice
+  // "Bà 02" thì character vẫn giữ tên "Bé gái" (đó là speaker từ Stage 3), chỉ
+  // voice + avatar + color đổi theo voice mới.
+  // Trước đây: name bị overwrite thành alias/role.character_name → mất tên speaker.
+  const replaceChar = async (actor: VoxActor, role: VoxRole, _alias: string, color: string) => {
     if (!replacingCharId || !project) return
-    const charName = alias || role.character_name || actor.name
     await api.patch(`/characters/${replacingCharId}`, {
-      name: charName, color,
+      // name: KHÔNG gửi → BE giữ nguyên tên cũ
+      color,
       avatar: actor.avatar || '',
       voxcpm_role_id: role.id,
       voxcpm_actor_name: actor.name,
@@ -229,7 +233,9 @@ export default function CharSidebar({ visible }: Props) {
       audio: role.audio || '',
     })
     const updated = characters.map(c => c.id === replacingCharId ? {
-      ...c, name: charName, color,
+      ...c,
+      // name: GIỮ NGUYÊN (không spread name mới)
+      color,
       avatar: actor.avatar || '',
       voxcpm_role_id: role.id,
       voxcpm_actor_name: actor.name,

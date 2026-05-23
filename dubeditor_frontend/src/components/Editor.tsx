@@ -86,7 +86,26 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   const triggerAutoTTS = useCallback((subIds: number[]) => {
     if (!useStore.getState().autoTTS) return
     if (!subIds.length) return
-    for (const id of subIds) autoTTSBatchRef.current.add(id)
+    // v3.13 FIX: Filter — chỉ enqueue dòng có character VÀ character có voice
+    // VÀ đã dịch sang tiếng Việt (không còn ký tự TQ, không rỗng)
+    const state = useStore.getState()
+    const charHasVoice: Record<number, boolean> = {}
+    for (const c of state.characters) {
+      charHasVoice[c.id] = !!c.voxcpm_role_id
+    }
+    const CHINESE_RE = /[\u4e00-\u9fff]/
+    const validIds = subIds.filter(id => {
+      const s = state.subtitles.find(x => x.id === id)
+      if (!s || !s.character_id || !charHasVoice[s.character_id]) return false
+      // Skip chưa dịch (rỗng / còn TQ / placeholder)
+      const t = (s.text || '').trim()
+      if (!t) return false
+      if (CHINESE_RE.test(t)) return false
+      if (t.startsWith('[CHƯA DỊCH') || t.startsWith('[UNTRANSLATED')) return false
+      return true
+    })
+    if (!validIds.length) return
+    for (const id of validIds) autoTTSBatchRef.current.add(id)
     if (autoTTSScheduledRef.current) return
     autoTTSScheduledRef.current = true
     Promise.resolve().then(async () => {
@@ -252,12 +271,13 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   // v3.9: RESUME EDITOR STATE — restore filter + active sub khi mở lại project
   //
   // Workflow:
-  // 1. Đợi subtitles + chapters đã load xong.
-  // 2. Đọc project.last_filter_chapter_ids → intersect với chapters còn tồn tại.
-  // 3. Set filterChapterIds vào store (TRƯỚC khi set activeSubId để sub không bị hide).
-  // 4. Đọc project.last_subtitle_index → nếu sub còn tồn tại → setActiveSubId.
+  // 1. Đợi subtitles đã load xong (project + subtitles trong store).
+  // 2. Fetch chapters, SET VÀO STORE (quan trọng: matchVisible cần chapters để build range)
+  // 3. Đọc project.last_filter_chapter_ids → intersect với chapters còn tồn tại.
+  // 4. Set filterChapterIds vào store (TRƯỚC khi set activeSubId để sub không bị hide).
+  // 5. Đọc project.last_subtitle_index → nếu sub còn tồn tại → setActiveSubId.
   //    Nếu sub không còn → active sub đầu của filter (sau khi đã lọc) hoặc sub đầu phim.
-  // 5. Gọi markResumeApplied() để bật auto-sync filter/active → backend.
+  // 6. Gọi markResumeApplied() để bật auto-sync filter/active → backend.
   //
   // didResumeRef = pid đã resume xong → tránh chạy lại. Reset khi đổi project.
   const didResumeRef = useRef<number | null>(null)
@@ -272,17 +292,28 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
     didResumeRef.current = project.id
 
     ;(async () => {
+      console.log('[Resume] Start for project', project.id,
+                  'last_filter_chapter_ids:', project.last_filter_chapter_ids,
+                  'last_subtitle_index:', project.last_subtitle_index)
       try {
         // Lấy danh sách chapter hiện tại của project
         const r = await api.get(`/chapters/project/${projectId}`)
-        const chapters: any[] = r.data || []
+        const fetchedChapters: any[] = r.data || []
+        console.log('[Resume] Fetched', fetchedChapters.length, 'chapters')
+
+        // v3.13 FIX: Set chapters vào store NGAY — để matchVisible build được range
+        // (trước đây chỉ set ở reloadChapters effect riêng → race với set filterChapterIds)
+        useStore.getState().setChapters(fetchedChapters)
+        setChapters(fetchedChapters)  // local state cũng update để Editor render đồng bộ
 
         // ── 1) RESTORE FILTER ──────────────────────────────────────────
         const savedIds: number[] = Array.isArray(project.last_filter_chapter_ids)
           ? project.last_filter_chapter_ids
           : []
-        const existingChapterIds = new Set(chapters.map(c => c.id))
+        const existingChapterIds = new Set(fetchedChapters.map(c => c.id))
         const validIds = savedIds.filter(id => existingChapterIds.has(id))
+        console.log('[Resume] Filter chapter IDs — saved:', savedIds,
+                    'valid:', validIds)
         // Set filter (nếu validIds rỗng → clear filter = hiện all)
         useStore.getState().setFilterChapterIds(validIds)
 
@@ -291,6 +322,8 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
         const savedIdx = project.last_subtitle_index
         if (savedIdx != null) {
           targetSub = subtitles.find(s => s.index === savedIdx)
+          console.log('[Resume] Active sub — saved index:', savedIdx,
+                      'found:', targetSub ? `id=${targetSub.id}` : 'NOT FOUND')
         }
         if (!targetSub) {
           // Sub đã mất → fallback:
@@ -298,7 +331,7 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
           // b) Không filter → sub đầu phim
           if (validIds.length > 0) {
             // Tìm chapter còn lại đầu tiên, lấy start_sub_index
-            const targetChapter = chapters
+            const targetChapter = fetchedChapters
               .filter(c => validIds.includes(c.id))
               .sort((a, b) => a.sort_order - b.sort_order)[0]
             if (targetChapter) {
@@ -308,6 +341,8 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
             }
           }
           if (!targetSub) targetSub = subtitles[0]
+          console.log('[Resume] Fallback active sub:',
+                      targetSub ? `id=${targetSub.id} index=${targetSub.index}` : 'NONE')
         }
         if (targetSub) {
           useStore.getState().setActiveSubId(targetSub.id)
@@ -316,8 +351,14 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
         console.warn('[Resume] failed:', e)
       } finally {
         // BẬT auto-sync — kể cả khi resume fail (để các thao tác sau vẫn ghi DB)
-        // Đợi 1 tick để mọi setState ở trên flush xong, rồi mới mark applied
-        setTimeout(() => { markResumeApplied() }, 50)
+        // v3.13 FIX: Tăng timeout 50ms → 200ms để chắc chắn mọi setState flush xong
+        // (subscribe của zustand đọc state mới → set baseline _lastSyncedFilterKey
+        // và _lastSyncedActiveIndex; nếu flush chưa xong, baseline có thể sai và
+        // sẽ ghi đè trở lại giá trị cũ).
+        setTimeout(() => {
+          markResumeApplied()
+          console.log('[Resume] Done, auto-sync enabled')
+        }, 200)
       }
     })()
   }, [project?.id, subtitles.length, projectId])

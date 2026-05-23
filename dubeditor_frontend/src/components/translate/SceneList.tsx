@@ -857,11 +857,20 @@ function SubtitleDualRow({ sub, projectId, hasIssue, onUpdate }: {
   async function switchVariant(v: 1 | 2) {
     try {
       const res = await translateApi.selectVariant(projectId, sub.id, v)
+      // v3.13 FIX: Đổi variant = đổi text active → clear audio cũ (tránh audio lệch text)
+      // + nếu sub đã có character → dispatch event auto-TTS
       onUpdate({
         text: res.text,
         variant_selected: v,
         cps_value: res.cps_value,
+        tts_done: false,
+        audio_path: null,
       })
+      if (sub.character_id) {
+        window.dispatchEvent(new CustomEvent('subs_assigned', {
+          detail: { subtitle_ids: [sub.id] },
+        }))
+      }
     } catch (e) {
       console.warn(e)
     }

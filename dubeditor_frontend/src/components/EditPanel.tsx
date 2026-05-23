@@ -165,6 +165,13 @@ export default function EditPanel() {
         tts_done: false,
         audio_path: null,
       })
+      // v3.13 FIX: Switch variant đã đổi text active → cần regenerate TTS.
+      // Dispatch event để Editor batch enqueue (chỉ khi autoTTS BẬT + đã có nhân vật).
+      if (sub.character_id) {
+        window.dispatchEvent(new CustomEvent('subs_assigned', {
+          detail: { subtitle_ids: [sub.id] },
+        }))
+      }
     } catch (e) {
       console.warn('switch variant failed', e)
     }
