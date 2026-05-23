@@ -400,6 +400,43 @@ class SelectVariantRequest(BaseModel):
     variant:        Literal[1, 2]
 
 
+# ─── v3.13: Retranslate 1 CHUNK ──────────────────────────────────────────────
+
+class RetranslateChunkRequest(TranslateConfig):
+    """Dịch lại 1 chunk cụ thể.
+
+    Kế thừa TranslateConfig để dùng lại logic build_pipeline_config + per-stage
+    model/thinking + variant_mode.
+
+    mode:
+      - 'all':           dịch lại TOÀN BỘ dòng trong chunk (ghi đè text_v1/v2 mọi dòng)
+      - 'errors_only':   chỉ ghi đè những dòng có needs_review=True, text_v1 rỗng,
+                         còn ký tự TQ, hoặc bắt đầu bằng '[CHƯA DỊCH'.
+                         AI vẫn nhận FULL chunk để có context, nhưng chỉ những dòng
+                         lỗi mới được save vào DB.
+    """
+    chunk_id:       int
+    mode:           Literal["all", "errors_only"] = "all"
+
+
+class RetranslateChunkResponse(BaseModel):
+    """Kết quả dịch lại 1 chunk."""
+    ok:                  bool
+    chunk_id:            int
+    mode:                str
+    lines_in_chunk:      int          # tổng số dòng trong chunk
+    lines_targeted:      int          # số dòng dự định ghi đè (theo mode)
+    lines_updated:       int          # số dòng AI trả về và đã save DB
+    lines_v2:            int          # số dòng có text_v2
+    lines_still_error:   int          # sau retry, còn bao nhiêu dòng lỗi
+    cost_usd:            float = 0.0
+    tokens_in:           int = 0
+    tokens_out:          int = 0
+    cached_tokens:       int = 0
+    duration_ms:         int = 0
+    error:               Optional[str] = None
+
+
 class BibleOut(BaseModel):
     """Bible content cho FE."""
     id:               int
@@ -453,6 +490,9 @@ class ChunkOut(BaseModel):
     scene_count:    int = 0
     arc_title:      Optional[str] = None
     arc_tone:       Optional[str] = None
+    # v3.13: Retranslate per chunk
+    error_message:      Optional[str] = None  # Lỗi gần nhất khi dịch chunk này
+    lines_with_errors:  int = 0               # Số dòng cần dịch lại (needs_review / rỗng / còn TQ)
 
 
 class StoryArcOut(BaseModel):

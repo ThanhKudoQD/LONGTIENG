@@ -43,7 +43,11 @@ from stages.stage0_normalize import run_stage0_normalize, Stage0Report
 from stages.stage1_bible import run_stage1_bible, run_stage1a_only, run_stage1b_only
 from stages.stage2_scenes import run_stage2_chunks
 from stages.stage3_speaker import run_stage3_speaker
-from stages.stage4_translate import run_stage4_translate
+from stages.stage4_translate import (
+    run_stage4_translate,
+    process_one_chunk,        # v3.13: dịch lại 1 chunk
+    load_prompt as load_stage_prompt,
+)
 from stages.stage5_polish import run_stage5_polish
 
 # DubEditor imports
@@ -1171,6 +1175,244 @@ class TranslateRunner:
         await self._emit("translate_done", 85,
                          f"Translate OK: {translated} dòng, {variants} variants")
         return translation_map
+
+    # ─── v3.13: Dịch lại 1 chunk ────────────────────────────────
+    async def run_translate_chunk(self,
+                                   chunk_id: int,
+                                   mode: str = "all") -> dict:
+        """Dịch lại 1 chunk cụ thể.
+
+        Quy trình:
+        1. Load Bible + ChunkMap + SpeakerMap từ DB (không gọi LLM)
+        2. Tìm V3Chunk tương ứng (match qua start_line/end_line)
+        3. Nếu mode='errors_only': tính các line index cần ghi đè
+        4. Gọi process_one_chunk (reuse Stage 4 logic — KHÔNG đụng pipeline)
+        5. Filter result theo mode rồi save_translations_to_db
+        6. Update Chunk.status + error_message
+
+        Trả về dict tương thích RetranslateChunkResponse.
+        """
+        import time as _time
+        import re as _re
+        import httpx as _httpx
+
+        t_start = _time.time()
+        tokens_in_before = self.tracker.total_tokens_in
+        tokens_out_before = self.tracker.total_tokens_out
+        cached_before = self.tracker.total_cached_tokens
+        cost_before = self.tracker.total_cost_usd
+
+        # 1. Load chunk DB
+        db_chunk = self.db.query(DBChunk).filter(
+            DBChunk.id == chunk_id,
+            DBChunk.project_id == self.project_id,
+        ).first()
+        if not db_chunk:
+            raise ValueError(f"Chunk {chunk_id} không tồn tại trong project {self.project_id}")
+
+        # 2. Mark đang chạy
+        db_chunk.status = "translating"
+        db_chunk.error_message = None
+        self.db.commit()
+
+        await self._emit("retranslate_chunk", 0,
+                         f"Bắt đầu dịch lại chunk #{db_chunk.chunk_index} "
+                         f"(dòng {db_chunk.start_line}-{db_chunk.end_line}, mode={mode})")
+
+        try:
+            # 3. Load context
+            bible = self._bible or load_active_bible_from_db(self.db, self.project_id)
+            if not bible:
+                raise ValueError("Project chưa có Bible. Chạy Stage 1 trước.")
+
+            chunk_map = load_chunks_from_db(self.db, self.project_id)
+            if not chunk_map.chunks:
+                raise ValueError("Project chưa có Chunks. Chạy Stage 2 trước.")
+
+            speaker_map = load_speaker_map_from_db(self.db, self.project_id)
+
+            entries = self._load_subtitles_as_entries()
+            entries_by_idx = {e.index: e for e in entries}
+
+            # 4. Tìm V3Chunk match (qua range — chuẩn hơn match index)
+            target_v3chunk = None
+            for c in chunk_map.chunks:
+                if c.r[0] == db_chunk.start_line and c.r[1] == db_chunk.end_line:
+                    target_v3chunk = c
+                    break
+            if not target_v3chunk:
+                raise ValueError(
+                    f"Không match V3Chunk với DB chunk (range "
+                    f"{db_chunk.start_line}-{db_chunk.end_line}). "
+                    f"DB có thể đã out-of-sync với pipeline state."
+                )
+
+            # 5. Tính dòng cần ghi đè
+            lines_in_chunk = db_chunk.end_line - db_chunk.start_line + 1
+            target_indices: Optional[set[int]] = None  # None = ghi đè tất cả
+
+            if mode == "errors_only":
+                # Query subs trong chunk có lỗi
+                _chinese_re = _re.compile(r'[\u4e00-\u9fff]')
+                subs_in_chunk = self.db.query(Subtitle).filter(
+                    Subtitle.project_id == self.project_id,
+                    Subtitle.index >= db_chunk.start_line,
+                    Subtitle.index <= db_chunk.end_line,
+                ).all()
+                target_indices = set()
+                for s in subs_in_chunk:
+                    txt = (s.text_v1 or "").strip()
+                    has_zh = bool(_chinese_re.search(txt)) if txt else False
+                    placeholder = txt.startswith("[CHƯA DỊCH") or txt.startswith("[UNTRANSLATED")
+                    is_noise = bool(getattr(s, 'is_noise', False))
+                    # Noise lines không cần retry
+                    if is_noise:
+                        continue
+                    # Error conditions
+                    if not txt or has_zh or placeholder or s.needs_review:
+                        target_indices.add(s.index)
+
+                if not target_indices:
+                    db_chunk.status = "done"
+                    db_chunk.error_message = None
+                    self.db.commit()
+                    await self._emit("retranslate_chunk_done", 100,
+                                     "Không có dòng nào cần dịch lại")
+                    return {
+                        "ok": True,
+                        "chunk_id": chunk_id,
+                        "mode": mode,
+                        "lines_in_chunk": lines_in_chunk,
+                        "lines_targeted": 0,
+                        "lines_updated": 0,
+                        "lines_v2": 0,
+                        "lines_still_error": 0,
+                        "cost_usd": 0.0,
+                        "tokens_in": 0,
+                        "tokens_out": 0,
+                        "cached_tokens": 0,
+                        "duration_ms": int((_time.time() - t_start) * 1000),
+                    }
+
+            lines_targeted = len(target_indices) if target_indices is not None else lines_in_chunk
+
+            await self._emit("retranslate_chunk", 20,
+                             f"Đang gọi LLM (sẽ ghi đè {lines_targeted}/{lines_in_chunk} dòng)...")
+
+            # 6. Gọi process_one_chunk — reuse Stage 4 logic
+            prompt_template = load_stage_prompt("translate_chunk", self.config)
+            sem = asyncio.Semaphore(1)
+
+            # Cài LLM observer để log calls (giống pipeline run)
+            self._install_llm_observer()
+            try:
+                async with _httpx.AsyncClient() as client:
+                    chunk_result = await process_one_chunk(
+                        target_v3chunk, bible, entries, entries_by_idx, speaker_map,
+                        prompt_template, self.config, self.tracker, client, sem,
+                    )
+            finally:
+                self._uninstall_llm_observer()
+
+            if not chunk_result:
+                # AI không trả được dòng nào — coi như fail
+                raise RuntimeError("LLM không trả về dòng dịch nào (chunk_result rỗng)")
+
+            await self._emit("retranslate_chunk", 70,
+                             f"LLM trả về {len(chunk_result)} dòng, đang lưu DB...")
+
+            # 7. Filter theo mode rồi save
+            if target_indices is not None:
+                chunk_result = {
+                    k: v for k, v in chunk_result.items()
+                    if k in target_indices
+                }
+
+            save_translations_to_db(self.db, self.project_id, chunk_result, bible)
+            lines_updated = len(chunk_result)
+            lines_v2 = sum(1 for v in chunk_result.values() if v.get("text_v2"))
+
+            # 8. Check còn dòng lỗi không (sau khi save)
+            _chinese_re = _re.compile(r'[\u4e00-\u9fff]')
+            subs_after = self.db.query(Subtitle).filter(
+                Subtitle.project_id == self.project_id,
+                Subtitle.index >= db_chunk.start_line,
+                Subtitle.index <= db_chunk.end_line,
+            ).all()
+            lines_still_error = 0
+            for s in subs_after:
+                if getattr(s, 'is_noise', False):
+                    continue
+                txt = (s.text_v1 or "").strip()
+                if not txt or _chinese_re.search(txt) or s.needs_review:
+                    lines_still_error += 1
+
+            # 9. Update chunk status
+            if lines_still_error == 0:
+                db_chunk.status = "done"
+                db_chunk.error_message = None
+            else:
+                # Vẫn có dòng lỗi, nhưng không phải lỗi pipeline → status = translated (partial)
+                db_chunk.status = "translated"
+                db_chunk.error_message = f"Còn {lines_still_error} dòng cần review"
+            self.db.commit()
+
+            # 10. Stats
+            tokens_in = self.tracker.total_tokens_in - tokens_in_before
+            tokens_out = self.tracker.total_tokens_out - tokens_out_before
+            cached_tokens = self.tracker.total_cached_tokens - cached_before
+            cost_usd = self.tracker.total_cost_usd - cost_before
+            duration_ms = int((_time.time() - t_start) * 1000)
+
+            await self._emit("retranslate_chunk_done", 100,
+                             f"Dịch lại chunk #{db_chunk.chunk_index} OK: "
+                             f"{lines_updated} dòng cập nhật, {lines_still_error} còn lỗi")
+
+            return {
+                "ok": True,
+                "chunk_id": chunk_id,
+                "mode": mode,
+                "lines_in_chunk": lines_in_chunk,
+                "lines_targeted": lines_targeted,
+                "lines_updated": lines_updated,
+                "lines_v2": lines_v2,
+                "lines_still_error": lines_still_error,
+                "cost_usd": round(cost_usd, 6),
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "cached_tokens": cached_tokens,
+                "duration_ms": duration_ms,
+            }
+
+        except asyncio.CancelledError:
+            db_chunk.status = "error"
+            db_chunk.error_message = "Bị hủy bởi user"
+            self.db.commit()
+            raise
+        except Exception as e:
+            err_msg = str(e)[:500]
+            logger.exception(f"[retranslate_chunk] chunk_id={chunk_id} failed")
+            db_chunk.status = "error"
+            db_chunk.error_message = err_msg
+            self.db.commit()
+            await self._emit("retranslate_chunk_error", 100, f"Lỗi: {err_msg}")
+            duration_ms = int((_time.time() - t_start) * 1000)
+            return {
+                "ok": False,
+                "chunk_id": chunk_id,
+                "mode": mode,
+                "lines_in_chunk": db_chunk.end_line - db_chunk.start_line + 1,
+                "lines_targeted": 0,
+                "lines_updated": 0,
+                "lines_v2": 0,
+                "lines_still_error": 0,
+                "cost_usd": 0.0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cached_tokens": 0,
+                "duration_ms": duration_ms,
+                "error": err_msg,
+            }
 
     async def run_polish(self) -> PolishReport:
         """Stage 5 — TẠM DISABLE.

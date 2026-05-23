@@ -205,11 +205,32 @@ export interface Chunk {
   title: string
   start_line: number
   end_line: number
-  status: 'pending' | 'speaker' | 'translated' | 'done' | 'error'
+  status: 'pending' | 'speaker' | 'translated' | 'translating' | 'done' | 'error'
   line_count: number
   scene_count: number
   arc_title?: string | null
   arc_tone?: string | null
+  // v3.13: Retranslate per chunk
+  error_message?: string | null
+  lines_with_errors?: number
+}
+
+// v3.13: Response của POST /translate/retranslate-chunk
+export interface RetranslateChunkResult {
+  ok: boolean
+  chunk_id: number
+  mode: 'all' | 'errors_only'
+  lines_in_chunk: number
+  lines_targeted: number
+  lines_updated: number
+  lines_v2: number
+  lines_still_error: number
+  cost_usd: number
+  tokens_in: number
+  tokens_out: number
+  cached_tokens: number
+  duration_ms: number
+  error?: string | null
 }
 
 export interface Scene {

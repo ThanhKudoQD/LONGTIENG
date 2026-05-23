@@ -24,6 +24,8 @@ interface Props {
   arcs: StoryArc[]
   issues: PolishIssue[]
   onIssuesUpdate: () => void
+  // v3.13: refresh chunks (gọi sau khi retranslate xong để cập nhật status + lines_with_errors)
+  onChunksRefresh?: () => void
 }
 
 // ─── Emotion → tag ngắn cho sidebar ──────────────────────────────────────────
@@ -55,12 +57,47 @@ function emoBadgeClass(emotion: string): string {
   return m[emotion] || m.neutral
 }
 
+// v3.13: Badge cho chunk status
+function chunkStatusBadge(status: string): { label: string; cls: string } | null {
+  switch (status) {
+    case 'error':
+      return {
+        label: '❌ Lỗi',
+        cls: 'bg-red-50 text-red-700 border-red-300 dark:bg-red-900/40 dark:text-red-300 dark:border-red-700',
+      }
+    case 'translating':
+      return {
+        label: '⏳ Đang dịch',
+        cls: 'bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700',
+      }
+    case 'translated':
+      // Translated nhưng có thể còn lỗi — chỉ show khi có lines_with_errors
+      return null
+    case 'done':
+      return null
+    default:
+      return null
+  }
+}
+
 export default function ChunkList({
-  projectId, chunks, scenes, arcs, issues, onIssuesUpdate,
+  projectId, chunks, scenes, arcs, issues, onIssuesUpdate, onChunksRefresh,
 }: Props) {
   const [selectedChunkId, setSelectedChunkId] = useState<number | null>(null)
-  const [filter, setFilter] = useState<'all' | 'hook' | 'peak' | 'issue'>('all')
+  const [filter, setFilter] = useState<'all' | 'hook' | 'peak' | 'issue' | 'error'>('all')
   const [arcFilter, setArcFilter] = useState<number | null>(null)
+
+  // v3.13: Retranslate chunk state
+  const [retranslateModalFor, setRetranslateModalFor] = useState<Chunk | null>(null)
+  const [retranslatingChunkId, setRetranslatingChunkId] = useState<number | null>(null)
+  const [retranslateResult, setRetranslateResult] = useState<{
+    chunk_id: number
+    ok: boolean
+    message: string
+    cost_usd?: number
+    lines_updated?: number
+    lines_still_error?: number
+  } | null>(null)
 
   const issuesByChunk = useMemo(() => {
     const map: Record<number, PolishIssue[]> = {}
@@ -136,6 +173,15 @@ export default function ChunkList({
   if (filter === 'hook') filteredChunks = filteredChunks.filter(c => hookChunkIds.has(c.id))
   if (filter === 'peak') filteredChunks = filteredChunks.filter(c => peakChunkIds.has(c.id))
   if (filter === 'issue') filteredChunks = filteredChunks.filter(c => (issuesByChunk[c.id]?.length || 0) > 0)
+  // v3.13: filter chunks lỗi
+  if (filter === 'error') filteredChunks = filteredChunks.filter(c =>
+    c.status === 'error' || (c.lines_with_errors || 0) > 0
+  )
+
+  // v3.13: đếm chunks lỗi để hiện chip
+  const errorChunkCount = chunks.filter(c =>
+    c.status === 'error' || (c.lines_with_errors || 0) > 0
+  ).length
 
   const totalIssues = issues.filter(i => !i.resolved).length
   const selectedChunk = selectedChunkId ? chunks.find(c => c.id === selectedChunkId) : null
@@ -162,6 +208,11 @@ export default function ChunkList({
             {totalIssues > 0 && (
               <FilterChip active={filter === 'issue'} onClick={() => setFilter('issue')} variant="warn">
                 ⚠ Vấn đề ({totalIssues})
+              </FilterChip>
+            )}
+            {errorChunkCount > 0 && (
+              <FilterChip active={filter === 'error'} onClick={() => setFilter('error')} variant="warn">
+                ❌ Chunks lỗi ({errorChunkCount})
               </FilterChip>
             )}
           </div>
@@ -193,6 +244,8 @@ export default function ChunkList({
               issueCount={issuesByChunk[c.id]?.length || 0}
               selected={selectedChunkId === c.id}
               onClick={() => setSelectedChunkId(c.id)}
+              isRetranslating={retranslatingChunkId === c.id}
+              onRetranslate={() => setRetranslateModalFor(c)}
             />
           ))}
         </div>
@@ -218,9 +271,138 @@ export default function ChunkList({
                 .filter(c => c.arc_index === selectedChunk.arc_index)
                 .findIndex(c => c.id === selectedChunk.id) + 1
             }
+            isRetranslating={retranslatingChunkId === selectedChunk.id}
+            onRetranslate={() => setRetranslateModalFor(selectedChunk)}
           />
         )}
       </div>
+
+      {/* v3.13: Retranslate Chunk Modal */}
+      {retranslateModalFor && (
+        <RetranslateChunkModal
+          chunk={retranslateModalFor}
+          projectId={projectId}
+          onClose={() => setRetranslateModalFor(null)}
+          onStart={async (mode) => {
+            const targetChunk = retranslateModalFor
+            setRetranslatingChunkId(targetChunk.id)
+            setRetranslateModalFor(null)
+            setRetranslateResult(null)
+            try {
+              // v3.13: Đọc config từ localStorage 'translate_config_v3' (cùng nguồn với ConfigPanel)
+              const raw = localStorage.getItem('translate_config_v3')
+              const cfg: any = raw ? JSON.parse(raw) : {}
+              const provider: 'gemini' | 'openai' | 'deepseek' = cfg.provider || 'gemini'
+              const apiKey: string = cfg.api_keys?.[provider] || ''
+              const modelStage4: string = cfg.model_stage4 || ''
+              const thinkingStage4: boolean | undefined =
+                cfg.thinking_stage4 === undefined ? undefined : !!cfg.thinking_stage4
+              const variantMode: 'off' | 'important_only' | 'always' =
+                cfg.variant_mode || 'important_only'
+              const chunkOverlap: number =
+                typeof cfg.chunk_overlap === 'number' ? cfg.chunk_overlap : 30
+              const cacheEnabled: boolean =
+                cfg.cache_enabled === undefined ? true : !!cfg.cache_enabled
+
+              if (!apiKey) {
+                setRetranslateResult({
+                  chunk_id: targetChunk.id,
+                  ok: false,
+                  message: 'Chưa có API key cho provider ' + provider +
+                           '. Vào tab Translate, set key + config rồi thử lại.',
+                })
+                setRetranslatingChunkId(null)
+                return
+              }
+
+              // Build payload — gửi cả TranslateConfig fields (BE kế thừa) + chunk-specific
+              const payload: any = {
+                chunk_id: targetChunk.id,
+                mode,
+                // API + provider keys (gửi cả 3 để BE hỗ trợ mix-provider)
+                api_key: apiKey,
+                api_key_gemini: cfg.api_keys?.gemini || '',
+                api_key_openai: cfg.api_keys?.openai || '',
+                api_key_deepseek: cfg.api_keys?.deepseek || '',
+                provider,
+                // Stage 4 model/thinking
+                model_stage4: modelStage4 || undefined,
+                thinking_stage4: thinkingStage4,
+                // Variant + chunk options
+                variant_mode: variantMode,
+                chunk_overlap: chunkOverlap,
+                cache_enabled: cacheEnabled,
+              }
+
+              const res = await translateApi.retranslateChunk(projectId, payload)
+
+              const msg = res.ok
+                ? `OK — cập nhật ${res.lines_updated} dòng${
+                    res.lines_still_error
+                      ? `, còn ${res.lines_still_error} dòng cần review`
+                      : ''
+                  } (${(res.duration_ms / 1000).toFixed(1)}s)`
+                : `Lỗi: ${res.error || 'unknown'}`
+
+              setRetranslateResult({
+                chunk_id: targetChunk.id,
+                ok: res.ok,
+                message: msg,
+                cost_usd: res.cost_usd,
+                lines_updated: res.lines_updated,
+                lines_still_error: res.lines_still_error,
+              })
+
+              // Refresh chunks list + issues
+              if (onChunksRefresh) onChunksRefresh()
+              onIssuesUpdate()
+            } catch (e: any) {
+              const errMsg = e?.response?.data?.detail || e?.message || 'Lỗi không xác định'
+              setRetranslateResult({
+                chunk_id: targetChunk.id,
+                ok: false,
+                message: `Lỗi: ${errMsg}`,
+              })
+            } finally {
+              setRetranslatingChunkId(null)
+            }
+          }}
+        />
+      )}
+
+      {/* v3.13: Toast kết quả */}
+      {retranslateResult && (
+        <div className="fixed bottom-4 right-4 z-50 max-w-md">
+          <div className={`rounded-lg shadow-lg border-2 px-4 py-3 ${
+            retranslateResult.ok
+              ? 'bg-green-50 border-green-300 text-green-800 dark:bg-green-900/80 dark:border-green-700 dark:text-green-100'
+              : 'bg-red-50 border-red-300 text-red-800 dark:bg-red-900/80 dark:border-red-700 dark:text-red-100'
+          }`}>
+            <div className="flex items-start gap-2">
+              <span className="text-lg">{retranslateResult.ok ? '✅' : '❌'}</span>
+              <div className="flex-1">
+                <div className="text-sm font-medium">
+                  Dịch lại Chunk #{retranslateResult.chunk_id}
+                </div>
+                <div className="text-[12px] mt-1 opacity-90">
+                  {retranslateResult.message}
+                </div>
+                {retranslateResult.ok && retranslateResult.cost_usd !== undefined && (
+                  <div className="text-[11px] mt-1 opacity-70 font-mono">
+                    Cost: ${retranslateResult.cost_usd.toFixed(4)}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => setRetranslateResult(null)}
+                className="text-current opacity-60 hover:opacity-100 leading-none px-1"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -250,7 +432,10 @@ function FilterChip({ active, onClick, children, variant = 'normal' }: {
   )
 }
 
-function ChunkSidebarRow({ chunk, indexNum, emotion, isHook, isPeak, issueCount, selected, onClick }: {
+function ChunkSidebarRow({
+  chunk, indexNum, emotion, isHook, isPeak, issueCount, selected, onClick,
+  isRetranslating, onRetranslate,
+}: {
   chunk: Chunk
   indexNum: number
   emotion: string
@@ -259,56 +444,103 @@ function ChunkSidebarRow({ chunk, indexNum, emotion, isHook, isPeak, issueCount,
   issueCount: number
   selected: boolean
   onClick: () => void
+  isRetranslating?: boolean
+  onRetranslate?: () => void
 }) {
+  const statusBadge = chunkStatusBadge(chunk.status)
+  const linesErr = chunk.lines_with_errors || 0
+  // Hiện badge "X lỗi dòng" nếu có lỗi mà status không phải error/translating
+  const showLinesErrBadge = linesErr > 0 && chunk.status !== 'error' && !isRetranslating
+
   return (
-    <button
-      onClick={onClick}
-      className={`w-full text-left border-b-2 border-zinc-200 dark:border-zinc-800 px-3 py-3 transition-all ${
+    <div
+      className={`relative w-full text-left border-b-2 border-zinc-200 dark:border-zinc-800 px-3 py-3 transition-all ${
         selected
           ? 'bg-white dark:bg-zinc-900 border-l-[4px] border-l-blue-500 shadow-sm'
           : 'border-l-[4px] border-l-transparent hover:bg-white dark:hover:bg-zinc-900'
-      }`}
+      } ${isRetranslating ? 'opacity-60' : ''}`}
     >
-      {/* Row 1: # range + badges */}
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <span className="text-[12px] font-mono font-semibold text-zinc-600 dark:text-zinc-400 flex-shrink-0">
-          #{indexNum}
-        </span>
-        <span className="text-[12px] font-mono font-semibold text-zinc-500 dark:text-zinc-500">
-          L{chunk.start_line}-{chunk.end_line}
-        </span>
-        <div className="flex-1" />
-        {isHook && (
-          <span className="text-[11px] px-1.5 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700 font-bold">
-            🎯
+      <button onClick={onClick} className="w-full text-left">
+        {/* Row 1: # range + badges */}
+        <div className="flex items-center gap-1.5 mb-1.5 flex-wrap">
+          <span className="text-[12px] font-mono font-semibold text-zinc-600 dark:text-zinc-400 flex-shrink-0">
+            #{indexNum}
           </span>
-        )}
-        {isPeak && (
-          <span className="text-[11px] px-1.5 py-0.5 rounded border bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-900/40 dark:text-rose-300 dark:border-rose-700 font-bold">
-            🔥
+          <span className="text-[12px] font-mono font-semibold text-zinc-500 dark:text-zinc-500">
+            L{chunk.start_line}-{chunk.end_line}
           </span>
-        )}
-        <span className={`text-[11px] px-2 py-0.5 rounded border font-bold ${emoBadgeClass(emotion)}`}>
-          {EMOTION_SHORT[emotion] || emotion}
-        </span>
-        {issueCount > 0 && (
-          <span className="text-[11px] px-1.5 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700 font-bold">
-            ⚠ {issueCount}
+          <div className="flex-1" />
+          {isHook && (
+            <span className="text-[11px] px-1.5 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700 font-bold">
+              🎯
+            </span>
+          )}
+          {isPeak && (
+            <span className="text-[11px] px-1.5 py-0.5 rounded border bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-900/40 dark:text-rose-300 dark:border-rose-700 font-bold">
+              🔥
+            </span>
+          )}
+          <span className={`text-[11px] px-2 py-0.5 rounded border font-bold ${emoBadgeClass(emotion)}`}>
+            {EMOTION_SHORT[emotion] || emotion}
           </span>
-        )}
-      </div>
+          {issueCount > 0 && (
+            <span className="text-[11px] px-1.5 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700 font-bold">
+              ⚠ {issueCount}
+            </span>
+          )}
+        </div>
 
-      {/* Row 2: title — to + đậm */}
-      <div className="text-[14px] font-semibold text-zinc-900 dark:text-zinc-100 leading-snug line-clamp-2">
-        {chunk.title || `Chunk ${chunk.chunk_index + 1}`}
-      </div>
-    </button>
+        {/* Row 2: title */}
+        <div className="text-[14px] font-semibold text-zinc-900 dark:text-zinc-100 leading-snug line-clamp-2">
+          {chunk.title || `Chunk ${chunk.chunk_index + 1}`}
+        </div>
+
+        {/* v3.13: Row 3 — status / error badges + nút retry */}
+        {(statusBadge || showLinesErrBadge || isRetranslating) && (
+          <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+            {isRetranslating && (
+              <span className="text-[11px] px-2 py-0.5 rounded border bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700 font-medium animate-pulse">
+                ⏳ Đang dịch lại...
+              </span>
+            )}
+            {!isRetranslating && statusBadge && (
+              <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${statusBadge.cls}`}>
+                {statusBadge.label}
+              </span>
+            )}
+            {!isRetranslating && showLinesErrBadge && (
+              <span className="text-[11px] px-1.5 py-0.5 rounded border bg-orange-50 text-orange-700 border-orange-300 dark:bg-orange-900/40 dark:text-orange-300 dark:border-orange-700 font-medium">
+                {linesErr} dòng cần review
+              </span>
+            )}
+          </div>
+        )}
+      </button>
+
+      {/* Nút retranslate — tách riêng để không trigger onClick của row */}
+      {onRetranslate && !isRetranslating && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            onRetranslate()
+          }}
+          className="absolute top-2 right-2 text-[11px] px-2 py-1 rounded border bg-white dark:bg-zinc-800 border-zinc-300 dark:border-zinc-700 hover:bg-blue-50 dark:hover:bg-blue-900/40 hover:border-blue-400 dark:hover:border-blue-600 text-zinc-600 dark:text-zinc-300 hover:text-blue-700 dark:hover:text-blue-300 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+          title="Dịch lại chunk này"
+          style={{ opacity: selected ? 1 : undefined }}
+        >
+          🔄
+        </button>
+      )}
+    </div>
   )
 }
 
 // ─── Main detail ───────────────────────────────────────────────────────────
 
-function ChunkDetail({ projectId, chunk, scenes, arc, issues, onIssuesUpdate, chunkPosInArc }: {
+function ChunkDetail({
+  projectId, chunk, scenes, arc, issues, onIssuesUpdate, chunkPosInArc,
+  isRetranslating, onRetranslate,
+}: {
   projectId: number
   chunk: Chunk
   scenes: Scene[]
@@ -316,6 +548,8 @@ function ChunkDetail({ projectId, chunk, scenes, arc, issues, onIssuesUpdate, ch
   issues: PolishIssue[]
   onIssuesUpdate: () => void
   chunkPosInArc: number
+  isRetranslating?: boolean
+  onRetranslate?: () => void
 }) {
   const [subs, setSubs] = useState<Subtitle[]>([])
   const [loading, setLoading] = useState(false)
@@ -332,7 +566,7 @@ function ChunkDetail({ projectId, chunk, scenes, arc, issues, onIssuesUpdate, ch
       })
       .catch(e => console.error('Load subs failed', e))
       .finally(() => setLoading(false))
-  }, [chunk.id, projectId])
+  }, [chunk.id, projectId, isRetranslating])  // v3.13: reload sau khi retranslate xong
 
   const issueLineSet = useMemo(() => new Set(issues.map(i => i.line_index)), [issues])
   const visible = showOnlyIssues
@@ -345,13 +579,16 @@ function ChunkDetail({ projectId, chunk, scenes, arc, issues, onIssuesUpdate, ch
     if (uniqueEmotions[uniqueEmotions.length - 1] !== e) uniqueEmotions.push(e)
   }
 
+  const statusBadge = chunkStatusBadge(chunk.status)
+  const linesErr = chunk.lines_with_errors || 0
+
   return (
     <div className="p-5 space-y-4 max-w-6xl">
 
       {/* HEADER CARD */}
       <div className="bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 shadow-sm overflow-hidden">
         {/* Header strip */}
-        <div className="px-5 py-2.5 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/70 flex items-center gap-3">
+        <div className="px-5 py-2.5 border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/60 dark:bg-zinc-900/70 flex items-center gap-3 flex-wrap">
           <span className="text-[11px] font-bold text-zinc-500 uppercase tracking-wider">
             Scene #{chunkPosInArc}
           </span>
@@ -363,13 +600,54 @@ function ChunkDetail({ projectId, chunk, scenes, arc, issues, onIssuesUpdate, ch
           <span className="text-[11px] text-zinc-500">
             {chunk.line_count} lines
           </span>
+
+          {/* v3.13: status + lines error badges */}
+          {isRetranslating && (
+            <span className="text-[11px] px-2 py-0.5 rounded-md border bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-700 font-medium animate-pulse">
+              ⏳ Đang dịch lại...
+            </span>
+          )}
+          {!isRetranslating && statusBadge && (
+            <span className={`text-[11px] px-2 py-0.5 rounded-md border font-medium ${statusBadge.cls}`}>
+              {statusBadge.label}
+            </span>
+          )}
+          {!isRetranslating && linesErr > 0 && (
+            <span className="text-[11px] px-2 py-0.5 rounded-md border bg-orange-50 text-orange-700 border-orange-300 dark:bg-orange-900/40 dark:text-orange-300 dark:border-orange-700 font-medium">
+              {linesErr} dòng cần review
+            </span>
+          )}
+
           <div className="flex-1" />
+
           {issues.length > 0 && (
             <span className="text-[11px] px-2 py-0.5 rounded-md border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-800 font-medium">
               ⚠ {issues.length} vấn đề
             </span>
           )}
+
+          {/* v3.13: Nút retranslate chunk */}
+          {onRetranslate && (
+            <button
+              onClick={onRetranslate}
+              disabled={isRetranslating}
+              className="text-[12px] px-3 py-1 rounded-md border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/70 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
+              title="Dịch lại chunk này"
+            >
+              🔄 Dịch lại chunk
+            </button>
+          )}
         </div>
+
+        {/* v3.13: Error message banner */}
+        {chunk.error_message && !isRetranslating && (
+          <div className="px-5 py-2 bg-red-50 dark:bg-red-900/30 border-b border-red-200 dark:border-red-800">
+            <div className="text-[12px] text-red-700 dark:text-red-300 flex items-start gap-2">
+              <span className="font-bold">⚠ Lỗi dịch gần nhất:</span>
+              <span className="font-mono text-[11px]">{chunk.error_message}</span>
+            </div>
+          </div>
+        )}
 
         {/* Title + emotion chain */}
         <div className="p-5">
@@ -685,6 +963,153 @@ function SubtitleDualRow({ sub, projectId, hasIssue, onUpdate }: {
           ) : (
             <span className="text-[12px] text-zinc-400 italic">(không có)</span>
           )}
+        </div>
+      </div>
+    </div>
+  )
+}
+// ─── v3.13: Retranslate Chunk Modal ─────────────────────────────────────────
+
+function RetranslateChunkModal({
+  chunk, projectId, onClose, onStart,
+}: {
+  chunk: Chunk
+  projectId: number
+  onClose: () => void
+  onStart: (mode: 'all' | 'errors_only') => void
+}) {
+  const [mode, setMode] = useState<'all' | 'errors_only'>(
+    (chunk.lines_with_errors || 0) > 0 ? 'errors_only' : 'all'
+  )
+
+  const linesErr = chunk.lines_with_errors || 0
+  const totalLines = chunk.line_count
+
+  // Estimate cost rất sơ bộ
+  // Stage 4 trung bình ~50 tokens out / dòng, ~80 tokens input / dòng (chưa cache)
+  // Cache hit (giả định Bible cached): chỉ tính phần variable + output
+  // Gemini Pro: $1.25/M in, $10/M out → ~$0.0006/dòng full
+  const linesToProcess = mode === 'errors_only' ? linesErr : totalLines
+  const estCost = (linesToProcess * 0.0006).toFixed(3)
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white dark:bg-zinc-900 rounded-xl shadow-2xl max-w-lg w-full border border-zinc-200 dark:border-zinc-800"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800">
+          <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+            <span className="text-blue-500">🔄</span>
+            Dịch lại chunk
+          </h3>
+          <div className="text-[12px] text-zinc-500 dark:text-zinc-400 mt-1">
+            Chunk #{chunk.chunk_index + 1}: <strong>{chunk.title || '(không tên)'}</strong>
+            <span className="text-zinc-400 mx-1">·</span>
+            <span className="font-mono">Dòng {chunk.start_line}–{chunk.end_line}</span>
+            <span className="text-zinc-400 mx-1">·</span>
+            {totalLines} dòng
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="p-5 space-y-3">
+          <div className="text-[13px] text-zinc-700 dark:text-zinc-300 font-medium mb-2">
+            Chế độ:
+          </div>
+
+          {/* Mode: errors_only */}
+          <label className={`block p-3 rounded-lg border-2 cursor-pointer transition-all ${
+            mode === 'errors_only'
+              ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/30'
+              : 'border-zinc-200 dark:border-zinc-700 hover:border-zinc-300 dark:hover:border-zinc-600'
+          } ${linesErr === 0 ? 'opacity-50' : ''}`}>
+            <input
+              type="radio"
+              name="mode"
+              value="errors_only"
+              checked={mode === 'errors_only'}
+              onChange={() => setMode('errors_only')}
+              disabled={linesErr === 0}
+              className="mr-2"
+            />
+            <span className="font-medium text-[13px] text-zinc-900 dark:text-zinc-100">
+              Chỉ dịch lại dòng lỗi
+            </span>
+            <div className="text-[12px] text-zinc-600 dark:text-zinc-400 mt-1 ml-5">
+              {linesErr > 0 ? (
+                <>
+                  Sẽ ghi đè <strong>{linesErr}</strong> dòng có lỗi (rỗng, còn TQ, hoặc cần review).
+                  AI vẫn nhận full chunk làm context.
+                </>
+              ) : (
+                <span className="italic">Không có dòng lỗi trong chunk này.</span>
+              )}
+            </div>
+          </label>
+
+          {/* Mode: all */}
+          <label className={`block p-3 rounded-lg border-2 cursor-pointer transition-all ${
+            mode === 'all'
+              ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/30'
+              : 'border-zinc-200 dark:border-zinc-700 hover:border-zinc-300 dark:hover:border-zinc-600'
+          }`}>
+            <input
+              type="radio"
+              name="mode"
+              value="all"
+              checked={mode === 'all'}
+              onChange={() => setMode('all')}
+              className="mr-2"
+            />
+            <span className="font-medium text-[13px] text-zinc-900 dark:text-zinc-100">
+              Dịch lại toàn bộ chunk
+            </span>
+            <div className="text-[12px] text-zinc-600 dark:text-zinc-400 mt-1 ml-5">
+              Ghi đè <strong>{totalLines}</strong> dòng (kể cả các dòng đã dịch OK).
+              Dùng khi muốn cải thiện chất lượng cả chunk.
+            </div>
+          </label>
+
+          {/* Estimate */}
+          <div className="mt-4 px-3 py-2 rounded-md bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 text-[12px] text-zinc-600 dark:text-zinc-400">
+            <div className="flex items-center justify-between">
+              <span>Sẽ xử lý:</span>
+              <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200">
+                {linesToProcess} dòng
+              </span>
+            </div>
+            <div className="flex items-center justify-between mt-1">
+              <span>Cost ước tính:</span>
+              <span className="font-mono font-semibold text-zinc-800 dark:text-zinc-200">
+                ~${estCost}
+              </span>
+            </div>
+            <div className="text-[11px] text-zinc-500 mt-1 italic">
+              (Dùng config + API key đã set ở tab Translate)
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-zinc-200 dark:border-zinc-800 flex items-center justify-end gap-2 bg-zinc-50/60 dark:bg-zinc-900/60">
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-md border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 text-[13px] font-medium"
+          >
+            Hủy
+          </button>
+          <button
+            onClick={() => onStart(mode)}
+            disabled={mode === 'errors_only' && linesErr === 0}
+            className="px-4 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-[13px] font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            🔄 Bắt đầu dịch lại
+          </button>
         </div>
       </div>
     </div>

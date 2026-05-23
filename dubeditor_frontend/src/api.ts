@@ -2,6 +2,7 @@ import axios from 'axios'
 import type {
   Bible, Scene, StoryArc, Chunk, PolishIssue,
   TranslateStatus, TranslateConfig, RetranslateResult,
+  RetranslateChunkResult,
   CleanedSubtitle, ScanResult, Stage0RunResult,
   ApiKeys, ModelPreset, ModelPresetInput,
 } from './types'
@@ -141,6 +142,21 @@ export const translateApi = {
       tokens_in: number
       tokens_out: number
     }>(`/projects/${pid}/translate/retranslate-batch`, payload).then(r => r.data),
+
+  // v3.13: Retranslate 1 CHUNK
+  retranslateChunk: (pid: number, payload: {
+    chunk_id: number
+    mode: 'all' | 'errors_only'
+    api_key: string
+    provider?: 'gemini' | 'openai' | 'deepseek'
+    // Có thể truyền full TranslateConfig (model per-stage, thinking, variant_mode...)
+    // Backend kế thừa TranslateConfig nên mọi field config đều được nhận.
+    [key: string]: any
+  }) =>
+    api.post<RetranslateChunkResult>(
+      `/projects/${pid}/translate/retranslate-chunk`,
+      payload
+    ).then(r => r.data),
 
   // v3: chọn variant cho 1 dòng
   selectVariant: (pid: number, subtitleId: number, variant: 1 | 2) =>

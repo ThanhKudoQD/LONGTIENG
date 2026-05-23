@@ -543,6 +543,7 @@ export default function TranslatePage({
             arcs={arcs}
             issues={issues}
             onIssuesUpdate={() => translateApi.listIssues(projectId, { resolved: false }).then(setIssues)}
+            onChunksRefresh={refreshChunks}
           />
         )}
 

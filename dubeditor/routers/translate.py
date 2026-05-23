@@ -23,6 +23,8 @@ Endpoints:
   POST /dub/api/projects/{pid}/polish-issues/{id}/dismiss
 
   POST /dub/api/projects/{pid}/translate/retranslate → dịch lại 1 dòng
+  POST /dub/api/projects/{pid}/translate/retranslate-batch → dịch lại 1-5 dòng
+  POST /dub/api/projects/{pid}/translate/retranslate-chunk → dịch lại 1 chunk (v3.13)
 
   GET  /dub/api/translate/genre-packs                → list packs available
 """
@@ -47,6 +49,7 @@ from dubeditor.models import (
 from dubeditor.schemas import (
     TranslateStartRequest, TranslateStageRequest, RetranslateRequest,
     RetranslateBatchRequest, RetranslateBatchResponse, RetranslateBatchLineOut,
+    RetranslateChunkRequest, RetranslateChunkResponse,
     SelectVariantRequest,
     BibleOut, SceneOut, StoryArcOut, PolishIssueOut, ChunkOut,
     TranslateStatusOut,
@@ -161,7 +164,8 @@ def _db_scene_to_out(s: DBScene) -> SceneOut:
 
 
 def _db_chunk_to_out(c: DBChunk, scene_count: int = 0,
-                    arc_title: str = "", arc_tone: str = "") -> ChunkOut:
+                    arc_title: str = "", arc_tone: str = "",
+                    lines_with_errors: int = 0) -> ChunkOut:
     return ChunkOut(
         id=c.id,
         project_id=c.project_id,
@@ -175,6 +179,8 @@ def _db_chunk_to_out(c: DBChunk, scene_count: int = 0,
         scene_count=scene_count,
         arc_title=arc_title,
         arc_tone=arc_tone,
+        error_message=c.error_message,
+        lines_with_errors=lines_with_errors,
     )
 
 
@@ -1553,11 +1559,115 @@ def _build_dummy_config_for_genre_pack():
     return default_config()
 
 
+# ─── v3.13: Retranslate 1 CHUNK ──────────────────────────────────────────────
+
+@router.post("/projects/{pid}/translate/retranslate-chunk",
+             response_model=RetranslateChunkResponse)
+async def retranslate_chunk(pid: int, req: RetranslateChunkRequest,
+                             db: Session = Depends(get_db)):
+    """Dịch lại 1 chunk cụ thể.
+
+    Hai mode:
+    - 'all':         dịch lại toàn bộ dòng trong chunk (ghi đè text_v1, text_v2,
+                     emotion, intensity của mọi dòng — kể cả dòng đã OK)
+    - 'errors_only': chỉ ghi đè những dòng có needs_review=True, text_v1 rỗng,
+                     còn ký tự TQ, hoặc placeholder '[CHƯA DỊCH]'.
+                     AI vẫn nhận FULL chunk làm context để dịch tốt hơn.
+
+    Endpoint chạy đồng bộ (sync) vì 1 chunk ~250-400 dòng chỉ tốn ~20-40 giây.
+    Nếu muốn cancel, dùng /translate/cancel (sẽ huỷ task active đầu tiên).
+
+    Trả về stats chi tiết: tokens, cost USD, số dòng updated/còn lỗi.
+    """
+    _get_project(db, pid)
+
+    # Conflict check: không cho retranslate khi pipeline đang chạy
+    if pid in _active_runners:
+        raise HTTPException(409,
+            "Pipeline đang chạy cho project này. "
+            "Hủy pipeline (POST /translate/cancel) trước khi dịch lại chunk."
+        )
+
+    # Build pipeline config + validate API key
+    cfg = build_pipeline_config(req)
+    if not cfg.api_key and not (
+        cfg.api_key_gemini or cfg.api_key_openai or cfg.api_key_deepseek
+    ):
+        raise HTTPException(400, "Thiếu api_key")
+
+    # Validate chunk_id
+    db_chunk = db.query(DBChunk).filter(
+        DBChunk.id == req.chunk_id,
+        DBChunk.project_id == pid,
+    ).first()
+    if not db_chunk:
+        raise HTTPException(404, f"Chunk {req.chunk_id} không tồn tại")
+
+    # Setup runner — dùng SessionLocal riêng để không xung đột với request session
+    bg_db = SessionLocal()
+
+    async def on_progress(stage: str, progress: float, message: str, detail):
+        await _publish_progress(pid, stage, progress, message, detail)
+
+    async def on_llm_call(payload: dict):
+        await _publish_llm_call(pid, payload)
+
+    runner = TranslateRunner(bg_db, pid, cfg,
+                              on_progress=on_progress,
+                              on_llm_call=on_llm_call)
+
+    # Đăng ký vào active runners để cancel có hiệu lực
+    _active_runners[pid] = runner
+
+    async def task_coro():
+        return await runner.run_translate_chunk(req.chunk_id, mode=req.mode)
+
+    task_obj = asyncio.create_task(task_coro())
+    _active_tasks[pid] = task_obj
+
+    try:
+        result = await task_obj
+    except asyncio.CancelledError:
+        result = {
+            "ok": False,
+            "chunk_id": req.chunk_id,
+            "mode": req.mode,
+            "lines_in_chunk": db_chunk.end_line - db_chunk.start_line + 1,
+            "lines_targeted": 0,
+            "lines_updated": 0,
+            "lines_v2": 0,
+            "lines_still_error": 0,
+            "error": "Bị hủy",
+        }
+    finally:
+        _active_runners.pop(pid, None)
+        _active_tasks.pop(pid, None)
+        bg_db.close()
+
+    # Pad các field thiếu (trường hợp error path)
+    return RetranslateChunkResponse(
+        ok=result.get("ok", False),
+        chunk_id=result.get("chunk_id", req.chunk_id),
+        mode=result.get("mode", req.mode),
+        lines_in_chunk=result.get("lines_in_chunk", 0),
+        lines_targeted=result.get("lines_targeted", 0),
+        lines_updated=result.get("lines_updated", 0),
+        lines_v2=result.get("lines_v2", 0),
+        lines_still_error=result.get("lines_still_error", 0),
+        cost_usd=result.get("cost_usd", 0.0),
+        tokens_in=result.get("tokens_in", 0),
+        tokens_out=result.get("tokens_out", 0),
+        cached_tokens=result.get("cached_tokens", 0),
+        duration_ms=result.get("duration_ms", 0),
+        error=result.get("error"),
+    )
+
+
 # ─── Chunks (v3 — 3 tầng arc/chunk/scene) ────────────────────────────────────
 
 @router.get("/projects/{pid}/chunks", response_model=list[ChunkOut])
 def list_chunks(pid: int, db: Session = Depends(get_db)):
-    """List chunks của project, kèm arc info."""
+    """List chunks của project, kèm arc info + số dòng cần dịch lại."""
     _get_project(db, pid)
     chunks = db.query(DBChunk).filter(
         DBChunk.project_id == pid
@@ -1567,15 +1677,41 @@ def list_chunks(pid: int, db: Session = Depends(get_db)):
     ).all()
     arc_by_idx = {a.arc_index: a for a in arcs}
 
+    # v3.13: compute lines_with_errors per chunk (1 query gộp thay vì N+1)
+    import re as _re
+    _chinese_re = _re.compile(r'[\u4e00-\u9fff]')
+    all_subs = db.query(Subtitle).filter(
+        Subtitle.project_id == pid
+    ).all()
+    errors_by_chunk_range: dict[tuple[int, int], int] = {}
+    # Map index → chunk range để aggregate
+    chunk_ranges = [(c.start_line, c.end_line) for c in chunks]
+    for s in all_subs:
+        if getattr(s, 'is_noise', False):
+            continue
+        txt = (s.text_v1 or "").strip()
+        has_zh = bool(_chinese_re.search(txt)) if txt else False
+        placeholder = txt.startswith("[CHƯA DỊCH") or txt.startswith("[UNTRANSLATED")
+        is_error = (not txt) or has_zh or placeholder or s.needs_review
+        if not is_error:
+            continue
+        # Tìm chunk range chứa index này
+        for rng in chunk_ranges:
+            if rng[0] <= s.index <= rng[1]:
+                errors_by_chunk_range[rng] = errors_by_chunk_range.get(rng, 0) + 1
+                break
+
     result = []
     for c in chunks:
         arc = arc_by_idx.get(c.arc_index)
         scene_count = db.query(DBScene).filter(DBScene.chunk_id == c.id).count()
+        lines_with_errors = errors_by_chunk_range.get((c.start_line, c.end_line), 0)
         result.append(_db_chunk_to_out(
             c,
             scene_count=scene_count,
             arc_title=arc.title if arc else "",
             arc_tone=arc.emotional_tone if arc else "",
+            lines_with_errors=lines_with_errors,
         ))
     return result
 
