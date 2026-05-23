@@ -40,7 +40,7 @@ from models import (
     Character as V3Character,
 )
 from stages.stage0_normalize import run_stage0_normalize, Stage0Report
-from stages.stage1_bible import run_stage1_bible
+from stages.stage1_bible import run_stage1_bible, run_stage1a_only, run_stage1b_only
 from stages.stage2_scenes import run_stage2_chunks
 from stages.stage3_speaker import run_stage3_speaker
 from stages.stage4_translate import run_stage4_translate
@@ -602,7 +602,9 @@ def build_pipeline_config(req) -> PipelineConfig:
     # ── v3.5: Per-stage model + thinking ──────────────────────────────
     # Ưu tiên hơn tier cũ. Stage runner gọi config.models.get_model_for("stageN")
     # tự fallback về tier nếu per-stage field rỗng.
-    for stage_key in ("stage0", "stage1", "stage2", "stage3", "stage4", "stage5", "retranslate"):
+    # v3: thêm stage1a + stage1b (Bible split). Stage1 legacy vẫn được forward.
+    for stage_key in ("stage0", "stage1", "stage1a", "stage1b",
+                       "stage2", "stage3", "stage4", "stage5", "retranslate"):
         model_attr = f"model_{stage_key}"
         think_attr = f"thinking_{stage_key}"
         if hasattr(req, model_attr):
@@ -743,6 +745,11 @@ class TranslateRunner:
         """Stage 0 — Chuẩn hóa phụ đề (chạy trước Stage 1).
 
         Scan dòng khả nghi → gửi AI Flash → apply remove/clean → cập nhật DB.
+
+        v3 FIX: chỉ save 1 lần — qua callback `on_cluster_done`. Không save lại
+        ở cuối vì sau khi remove + reindex, line_index gốc trong report.decisions
+        đã trỏ sai (vd dòng 8 gốc đã bị xóa → "8" giờ là dòng 9 gốc → save lại
+        sẽ xóa nhầm dòng 9 → BUG NHÂN ĐÔI).
         """
         await self._emit("normalize", 0, "Stage 0: Chuẩn hóa phụ đề...")
         self._check_cancelled()
@@ -760,12 +767,15 @@ class TranslateRunner:
 
         await self._emit("normalize_scan", 1, f"Scan {len(entries)} dòng...")
 
-        # Callback checkpoint per cluster — update DB ngay
+        # Track xem callback đã save chưa — để tránh save 2 lần (gây nhân đôi remove)
+        callback_saved = {"done": False}
+
         async def on_cluster_done(update_map: dict):
             if not update_map:
                 return
             try:
                 self._save_normalize_updates(update_map)
+                callback_saved["done"] = True
             except Exception as e:
                 logger.warning(f"[Stage 0] checkpoint save failed: {e}")
 
@@ -775,25 +785,29 @@ class TranslateRunner:
         )
         self._check_cancelled()
 
-        # Final save (full apply, idempotent)
-        await self._emit("normalize_save", 4, "Lưu kết quả chuẩn hóa...")
-        full_updates = {}
-        for d in report.decisions:
-            if d.action == "remove":
-                full_updates[d.line_index] = {
-                    "action": "remove",
-                    "is_noise": True,
-                    "new_text": "",
-                    "reason": d.reason,
-                }
-            elif d.action == "clean":
-                full_updates[d.line_index] = {
-                    "action": "clean",
-                    "is_noise": False,
-                    "new_text": d.new_text or "",
-                    "reason": d.reason,
-                }
-        self._save_normalize_updates(full_updates)
+        # v3 FIX: CHỈ save lại nếu callback chưa chạy (vd. update_map rỗng nhưng
+        # report có decisions vì lý do nào đó). KHÔNG save lại nếu callback đã làm,
+        # vì sau reindex thì line_index trong report.decisions đã sai.
+        if not callback_saved["done"]:
+            await self._emit("normalize_save", 4, "Lưu kết quả chuẩn hóa...")
+            full_updates = {}
+            for d in report.decisions:
+                if d.action == "remove":
+                    full_updates[d.line_index] = {
+                        "action": "remove",
+                        "is_noise": True,
+                        "new_text": "",
+                        "reason": d.reason,
+                    }
+                elif d.action == "clean":
+                    full_updates[d.line_index] = {
+                        "action": "clean",
+                        "is_noise": False,
+                        "new_text": d.new_text or "",
+                        "reason": d.reason,
+                    }
+            if full_updates:
+                self._save_normalize_updates(full_updates)
 
         await self._emit("normalize_done", 5, report.summary)
         return report
@@ -902,7 +916,19 @@ class TranslateRunner:
 
         # v3.11: callback save partial Bible (cast + glossary) NGAY sau khi 1A xong.
         # Nếu 1B bị cancel → cast/glossary đã có trong DB, không phải chạy lại 1A.
+        # v3 GUARD: KHÔNG save partial nếu cast rỗng (AI có thể đã lỗi tạm thời) →
+        # tránh ghi đè Bible cũ đang có cast hợp lệ.
         async def _on_cast_done(cast: V3Cast, glossary: V3Glossary):
+            if not cast.characters:
+                logger.warning(
+                    f"[Stage 1] SKIP partial save — cast rỗng "
+                    f"({len(glossary.terms)} terms parsed). "
+                    f"Sẽ chờ Bible đầy đủ ở cuối Stage 1."
+                )
+                await self._emit("bible_1a_saved", 12,
+                                 f"1A: 0 nhân vật, {len(glossary.terms)} thuật ngữ "
+                                 f"(KHÔNG lưu partial — chờ 1B)")
+                return
             try:
                 # Tạo Bible tạm với world rỗng để save partial
                 empty_world = V3World(
@@ -943,6 +969,119 @@ class TranslateRunner:
                          f"Bible OK: {len(bible.cast.characters)} nhân vật, "
                          f"{len(bible.world.arcs)} arcs, "
                          f"{len(bible.glossary.terms)} terms")
+        return bible
+
+    # ─── Stage 1 SPLIT: 1A và 1B độc lập ────────────────────
+
+    async def run_bible_1a(self) -> V3Bible:
+        """Stage 1A độc lập — chỉ chạy Cast + Glossary.
+
+        Lưu Bible với world rỗng (placeholder). Nếu Bible đã có sẵn (vd. user đã
+        chạy 1B trước rồi quay lại chạy lại 1A), giữ world cũ.
+        """
+        await self._emit("bible_1a", 0, "Stage 1A: Trích xuất nhân vật + thuật ngữ...")
+        self._check_cancelled()
+        self._save_status("running", 0.0)
+
+        entries = self._load_subtitles_as_entries()
+        if not entries:
+            raise ValueError("Project không có subtitles")
+
+        await self._emit("bible_1a", 5, f"1A: Trích xuất nhân vật ({len(entries)} dòng)...")
+
+        cast, glossary = await run_stage1a_only(entries, self.config, self.tracker)
+        self._check_cancelled()
+
+        if not cast.characters:
+            logger.warning(
+                f"[Stage 1A] Cast rỗng — KHÔNG save Bible. "
+                f"({len(glossary.terms)} terms parsed nhưng cast=[])"
+            )
+            await self._emit("bible_1a_done", 20,
+                             f"1A: 0 nhân vật (KHÔNG lưu). "
+                             f"{len(glossary.terms)} thuật ngữ parse được nhưng AI lỗi.")
+            # Vẫn return Bible với cast rỗng để FE biết — nhưng không save DB
+            return V3Bible(
+                cast=cast,
+                world=V3World(genre=[], genre_id="other", era="", tone="", plot="", arcs=[]),
+                glossary=glossary,
+                model_used=self.config.models.get_model_for("stage1a"),
+            )
+
+        # Giữ world cũ nếu Bible đã tồn tại
+        existing = load_active_bible_from_db(self.db, self.project_id)
+        if existing and existing.world and existing.world.arcs:
+            world = existing.world
+            logger.info(f"[Stage 1A] Giữ world cũ ({len(world.arcs)} arcs) từ Bible v{existing}")
+        else:
+            world = V3World(genre=[], genre_id="other", era="", tone="", plot="", arcs=[])
+
+        bible = V3Bible(
+            cast=cast,
+            world=world,
+            glossary=glossary,
+            model_used=self.config.models.get_model_for("stage1a"),
+        )
+
+        await self._emit("bible_1a_saved", 15, "Lưu Cast + Glossary...")
+        save_bible_to_db(self.db, self.project_id, bible, self.tracker)
+        self._bible = bible
+
+        await self._emit("bible_1a_done", 20,
+                         f"Stage 1A xong: {len(cast.characters)} nhân vật, "
+                         f"{len(glossary.terms)} thuật ngữ")
+        return bible
+
+    async def run_bible_1b(self) -> V3Bible:
+        """Stage 1B độc lập — chỉ chạy World + Arcs.
+
+        BẮT BUỘC đã có Bible với cast từ 1A. Nếu chưa có → raise lỗi
+        hướng dẫn user chạy 1A trước.
+        """
+        await self._emit("bible_1b", 0, "Stage 1B: Trích xuất bối cảnh + arcs...")
+        self._check_cancelled()
+        self._save_status("running", 0.0)
+
+        # Load Bible hiện tại để lấy cast
+        existing = load_active_bible_from_db(self.db, self.project_id)
+        if not existing or not existing.cast or not existing.cast.characters:
+            raise ValueError(
+                "Stage 1B cần Cast từ 1A. Hãy chạy Stage 1A trước để trích xuất nhân vật."
+            )
+
+        entries = self._load_subtitles_as_entries()
+        if not entries:
+            raise ValueError("Project không có subtitles")
+
+        await self._emit("bible_1b", 5,
+                         f"1B: Trích xuất World + Arcs "
+                         f"(dùng {len(existing.cast.characters)} nhân vật từ 1A)...")
+
+        world = await run_stage1b_only(entries, existing.cast, self.config, self.tracker)
+        self._check_cancelled()
+
+        # Tạo Bible mới: giữ cast + glossary cũ, update world
+        bible = V3Bible(
+            cast=existing.cast,
+            world=world,
+            glossary=existing.glossary,
+            model_used=self.config.models.get_model_for("stage1b"),
+        )
+
+        await self._emit("bible_1b_saved", 15, "Lưu World + Arcs...")
+        save_bible_to_db(self.db, self.project_id, bible, self.tracker)
+        self._bible = bible
+
+        # AUTO SYNC: StoryArc → Chapter (Editor)
+        try:
+            created = sync_arcs_to_chapters(self.db, self.project_id)
+            logger.info(f"[Pipeline] Auto-synced {created} chapters from arcs (1B)")
+        except Exception as e:
+            logger.warning(f"[Pipeline] sync_arcs_to_chapters failed: {e}")
+
+        await self._emit("bible_1b_done", 20,
+                         f"Stage 1B xong: {len(world.arcs)} arcs, "
+                         f"genre={world.genre_id}")
         return bible
 
     async def run_chunks(self, bible: Optional[V3Bible] = None) -> V3ChunkMap:
@@ -1112,7 +1251,10 @@ class TranslateRunner:
     # ─── Full pipeline ──────────────────────────────────────
 
     async def run_full(self):
-        """Chạy đủ pipeline (Stage 0-4). Stage 5 hiện đang disabled."""
+        """Chạy đủ pipeline (Stage 0-4). Stage 5 hiện đang disabled.
+
+        v3: Stage 1 tách thành 1A + 1B chạy tuần tự để consistent với split mode.
+        """
         self._install_llm_observer()
         try:
             self._save_status("running", 0.0)
@@ -1122,7 +1264,11 @@ class TranslateRunner:
                 await self.run_normalize()
                 self._check_cancelled()
 
-            await self.run_bible()
+            # Stage 1A + 1B — chạy lần lượt
+            await self.run_bible_1a()
+            self._check_cancelled()
+
+            await self.run_bible_1b()
             self._check_cancelled()
 
             await self.run_chunks()
@@ -1155,13 +1301,21 @@ class TranslateRunner:
     # ─── Stage runner (cho UI gọi 1 stage) ─────────────────
 
     async def run_stage(self, stage: str):
-        """Chạy 1 stage cụ thể (resume from middle)."""
+        """Chạy 1 stage cụ thể (resume from middle).
+
+        v3: Hỗ trợ thêm 'bible_1a' và 'bible_1b' (tách độc lập).
+        Stage 'bible' (legacy) vẫn chạy combined cho backward compat.
+        """
         self._install_llm_observer()
         try:
             if stage == "normalize":
                 return await self.run_normalize()
             elif stage == "bible":
                 return await self.run_bible()
+            elif stage == "bible_1a":
+                return await self.run_bible_1a()
+            elif stage == "bible_1b":
+                return await self.run_bible_1b()
             elif stage in ("chunks", "scenes"):
                 return await self.run_chunks()
             elif stage == "speaker":

@@ -280,21 +280,25 @@ class TranslateConfig(BaseModel):
     # ── v3.5: Per-stage model + thinking ────────────────────────────────
     # Frontend ConfigPanel mới gửi các field này, mỗi stage 1 model độc lập.
     # Empty string / None → fallback về tier cũ (heavy/medium/light) tương ứng.
-    model_stage0:      Optional[str] = None    # Stage 0 Chuẩn hóa
-    model_stage1:      Optional[str] = None    # Stage 1 Bible (Cast+Glossary+World+Arcs)
-    model_stage2:      Optional[str] = None    # Stage 2 Chunks + Scenes
-    model_stage3:      Optional[str] = None    # Stage 3 Speaker
-    model_stage4:      Optional[str] = None    # Stage 4 Translate ⭐
-    model_stage5:      Optional[str] = None    # Stage 5 Retry
-    model_retranslate: Optional[str] = None    # Retranslate trong editor
+    model_stage0:       Optional[str] = None    # Stage 0 Chuẩn hóa
+    model_stage1:       Optional[str] = None    # Stage 1 LEGACY combined (vẫn giữ backward compat)
+    model_stage1a:      Optional[str] = None    # Stage 1A Cast + Glossary (v3 split)
+    model_stage1b:      Optional[str] = None    # Stage 1B World + Arcs (v3 split)
+    model_stage2:       Optional[str] = None    # Stage 2 Chunks + Scenes
+    model_stage3:       Optional[str] = None    # Stage 3 Speaker
+    model_stage4:       Optional[str] = None    # Stage 4 Translate ⭐
+    model_stage5:       Optional[str] = None    # Stage 5 Retry
+    model_retranslate:  Optional[str] = None    # Retranslate trong editor
 
-    thinking_stage0:      Optional[bool] = None
-    thinking_stage1:      Optional[bool] = None
-    thinking_stage2:      Optional[bool] = None
-    thinking_stage3:      Optional[bool] = None
-    thinking_stage4:      Optional[bool] = None
-    thinking_stage5:      Optional[bool] = None
-    thinking_retranslate: Optional[bool] = None
+    thinking_stage0:       Optional[bool] = None
+    thinking_stage1:       Optional[bool] = None
+    thinking_stage1a:      Optional[bool] = None
+    thinking_stage1b:      Optional[bool] = None
+    thinking_stage2:       Optional[bool] = None
+    thinking_stage3:       Optional[bool] = None
+    thinking_stage4:       Optional[bool] = None
+    thinking_stage5:       Optional[bool] = None
+    thinking_retranslate:  Optional[bool] = None
 
     project_type:  str = "short_drama"
     cps_max:       Optional[float] = None      # None = dùng preset của project_type
@@ -326,7 +330,17 @@ class TranslateStartRequest(TranslateConfig):
 
 class TranslateStageRequest(TranslateConfig):
     """Chạy chỉ 1 stage cụ thể (debug)."""
-    stage: Literal["normalize", "bible", "scenes", "chunks", "speaker", "translate", "polish"]
+    stage: Literal[
+        "normalize",
+        "bible",
+        "bible_1a",
+        "bible_1b",
+        "scenes",
+        "chunks",
+        "speaker",
+        "translate",
+        "polish",
+    ]
 
 
 class RetranslateRequest(BaseModel):
@@ -474,6 +488,11 @@ class TranslateStatusOut(BaseModel):
     current_stage:    Optional[str] = None
     progress:         float = 0.0
     has_bible:        bool = False
+    # v3: cast + world tracking riêng để FE biết 1A xong nhưng 1B chưa
+    has_cast:         bool = False       # Bible có ≥1 nhân vật → coi là 1A xong
+    has_world:        bool = False       # Bible có ≥1 arc → coi là 1B xong
+    cast_count:       int = 0            # số nhân vật trong Bible
+    world_arcs_count: int = 0            # số arcs trong Bible.world
     chunk_count:      int = 0       # v3
     scene_count:      int = 0
     speaker_assigned_count: int = 0
@@ -488,6 +507,11 @@ class TranslateStatusOut(BaseModel):
     # v3.2: Stage 0 normalize stats
     cleaned_count:    int = 0       # dòng đã được Stage 0 sửa (is_cleaned=True)
     removed_count:    int = 0       # dòng đã bị Stage 0 đánh dấu noise
+    # v3: marker Stage 0 đã chạy (dù có thể không sửa/xóa gì)
+    stage0_ran:       bool = False
+    # v3: resume — next_stage là stage chưa xong, can_resume = đang dở dang
+    next_stage:       Optional[str] = None
+    can_resume:       bool = False
 
 
 class CleanedSubtitleOut(BaseModel):

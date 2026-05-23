@@ -165,6 +165,7 @@ export interface BibleCast { characters: BibleCharacter[] }
 
 export interface BibleWorld {
   genre: string[]                        // ['đô thị', 'tổng tài', ...]
+  genre_id?: string                      // v3: 'do_thi' | 'co_dai' | ... | 'other'
   era: string                            // hiện đại | cổ đại | dân quốc | tương lai
   tone: string
   plot: string
@@ -273,6 +274,11 @@ export interface TranslateStatus {
   current_stage?: string | null
   progress: number
   has_bible: boolean
+  // v3: Bible split — 1A (cast) và 1B (world) độc lập
+  has_cast?: boolean                     // Bible có ≥ 1 nhân vật
+  has_world?: boolean                    // Bible có ≥ 1 arc
+  cast_count?: number                    // số nhân vật trong Bible
+  world_arcs_count?: number              // số arcs
   chunk_count: number                    // v3
   scene_count: number
   speaker_assigned_count: number
@@ -287,6 +293,7 @@ export interface TranslateStatus {
   // v3.2: Stage 0 normalize
   cleaned_count?: number                 // số dòng đã được Stage 0 sửa
   removed_count?: number                 // số dòng đã bị Stage 0 đánh dấu noise
+  stage0_ran?: boolean                   // v3: Stage 0 đã chạy chưa (kể cả không sửa gì)
   // v3.9: Resume support
   next_stage?: string | null             // stage tiếp theo cần chạy nếu muốn resume
   can_resume?: boolean                   // có data dở dang để tiếp tục không
@@ -385,7 +392,9 @@ export interface TranslateConfig {
   // ── v3.5: Per-stage model + thinking ────────────────────────────────
   // Mỗi stage có model riêng. Empty/null → backend fallback về tier cũ.
   model_stage0?: string | null
-  model_stage1?: string | null
+  model_stage1?: string | null              // LEGACY combined — vẫn gửi để backward compat
+  model_stage1a?: string | null             // v3 split: 1A Cast + Glossary
+  model_stage1b?: string | null             // v3 split: 1B World + Arcs
   model_stage2?: string | null
   model_stage3?: string | null
   model_stage4?: string | null
@@ -393,6 +402,8 @@ export interface TranslateConfig {
   model_retranslate?: string | null
   thinking_stage0?: boolean | null
   thinking_stage1?: boolean | null
+  thinking_stage1a?: boolean | null
+  thinking_stage1b?: boolean | null
   thinking_stage2?: boolean | null
   thinking_stage3?: boolean | null
   thinking_stage4?: boolean | null

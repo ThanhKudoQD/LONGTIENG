@@ -272,7 +272,8 @@ async def _process_chunk_inner(
         model=config.models.get_model_for("stage3"),
         api_key=config.get_api_key_for(config.models.get_model_for("stage3")),
         temperature=0.2,
-        max_output=12000,
+        # v3 FIX: tránh MAX_TOKENS — cap_max_output tự giới hạn theo model
+        max_output=65536,
         json_mode=True,
         thinking=config.models.get_thinking_for("stage3"),
         max_retries=config.concurrency.retry_max,

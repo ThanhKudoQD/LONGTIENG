@@ -78,29 +78,46 @@ class ModelConfig:
     # Nếu rỗng ("") → resolve về tier tương ứng bên trên (heavy/medium/light)
     # Helpers `get_model_for(stage)` + `get_thinking_for(stage)` bên dưới
     # sẽ tự fallback nên các stage runner không cần biết về fields này.
-    model_stage0:      str = ""   # Chuẩn hóa phụ đề        (fallback: light)
-    model_stage1:      str = ""   # Bible Cast+Glossary+World (fallback: heavy)
-    model_stage2:      str = ""   # Chunks + Scenes          (fallback: medium)
-    model_stage3:      str = ""   # Speaker                  (fallback: medium)
-    model_stage4:      str = ""   # Translate (task chính)   (fallback: heavy)
-    model_stage5:      str = ""   # Retry dòng thiếu         (fallback: light)
-    model_retranslate: str = ""   # Retranslate trong editor (fallback: heavy)
+    model_stage0:       str = ""   # Chuẩn hóa phụ đề          (fallback: light)
+    model_stage1:       str = ""   # Bible LEGACY combined     (fallback: heavy) — vẫn giữ cho backward compat
+    model_stage1a:      str = ""   # Bible 1A Cast + Glossary  (fallback: stage1 → heavy)
+    model_stage1b:      str = ""   # Bible 1B World + Arcs     (fallback: stage1 → heavy)
+    model_stage2:       str = ""   # Chunks + Scenes           (fallback: medium)
+    model_stage3:       str = ""   # Speaker                   (fallback: medium)
+    model_stage4:       str = ""   # Translate (task chính)    (fallback: heavy)
+    model_stage5:       str = ""   # Retry dòng thiếu          (fallback: light)
+    model_retranslate:  str = ""   # Retranslate trong editor  (fallback: heavy)
 
     # Thinking per-stage — None = dùng default tier
-    thinking_stage0:      Optional[bool] = None
-    thinking_stage1:      Optional[bool] = None
-    thinking_stage2:      Optional[bool] = None
-    thinking_stage3:      Optional[bool] = None
-    thinking_stage4:      Optional[bool] = None
-    thinking_stage5:      Optional[bool] = None
-    thinking_retranslate: Optional[bool] = None
+    thinking_stage0:       Optional[bool] = None
+    thinking_stage1:       Optional[bool] = None
+    thinking_stage1a:      Optional[bool] = None
+    thinking_stage1b:      Optional[bool] = None
+    thinking_stage2:       Optional[bool] = None
+    thinking_stage3:       Optional[bool] = None
+    thinking_stage4:       Optional[bool] = None
+    thinking_stage5:       Optional[bool] = None
+    thinking_retranslate:  Optional[bool] = None
 
     # ── Resolvers ─────────────────────────────────────────────────────
     def get_model_for(self, stage: str) -> str:
-        """Trả model cho stage: 'stage0'..'stage5'|'retranslate'.
+        """Trả model cho stage: 'stage0'..'stage5'|'stage1a'|'stage1b'|'retranslate'.
 
         Per-stage field rỗng → fallback tier mặc định.
+        Stage1a/1b rỗng → fallback về stage1 (legacy) → fallback heavy.
         """
+        # 1a/1b: nếu có giá trị riêng dùng nó, nếu không fallback về stage1
+        if stage == "stage1a":
+            v = self.model_stage1a
+            if v and v.strip():
+                return v.strip()
+            stage = "stage1"  # fallback chain
+        elif stage == "stage1b":
+            v = self.model_stage1b
+            if v and v.strip():
+                return v.strip()
+            stage = "stage1"  # fallback chain
+
         per_stage = {
             "stage0":      (self.model_stage0,      self.light),
             "stage1":      (self.model_stage1,      self.heavy),
@@ -116,7 +133,19 @@ class ModelConfig:
         return v.strip() if v and v.strip() else fallback
 
     def get_thinking_for(self, stage: str) -> bool:
-        """Trả thinking flag cho stage. None → fallback tier mặc định."""
+        """Trả thinking flag cho stage. None → fallback tier mặc định.
+
+        Stage1a/1b None → fallback về stage1 → fallback heavy_thinking.
+        """
+        if stage == "stage1a":
+            if self.thinking_stage1a is not None:
+                return bool(self.thinking_stage1a)
+            stage = "stage1"
+        elif stage == "stage1b":
+            if self.thinking_stage1b is not None:
+                return bool(self.thinking_stage1b)
+            stage = "stage1"
+
         per_stage = {
             "stage0":      (self.thinking_stage0,      self.light_thinking),
             "stage1":      (self.thinking_stage1,      self.heavy_thinking),

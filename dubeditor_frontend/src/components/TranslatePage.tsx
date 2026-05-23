@@ -35,6 +35,19 @@ import ProgressLog from './translate/ProgressLog'
 
 type Tab = 'overview' | 'bible' | 'cleaned' | 'scenes' | 'subtitles' | 'issues' | 'logs'
 
+// v3: Map next_stage code → label hiển thị (module scope để SSE closure dùng ổn định)
+const NEXT_STAGE_LABEL: Record<string, string> = {
+  normalize: 'Stage 0 (Chuẩn hóa)',
+  bible_1a:  'Stage 1A (Cast + Glossary)',
+  bible_1b:  'Stage 1B (World + Arcs)',
+  bible:     'Stage 1 (Bible — legacy combined)',
+  chunks:    'Stage 2 (Chunks + Scenes)',
+  scenes:    'Stage 2 (Chunks + Scenes)',
+  speaker:   'Stage 3 (Speaker)',
+  translate: 'Stage 4 (Translate ⭐)',
+  polish:    'Stage 5 (Polish)',
+}
+
 export default function TranslatePage({
   projectId, onBack,
 }: { projectId: number; onBack: () => void }) {
@@ -57,6 +70,11 @@ export default function TranslatePage({
   const [currentMessage, setCurrentMessage] = useState('')
   const [isRunning, setIsRunning] = useState(false)
   const sseCloseRef = useRef<(() => void) | null>(null)
+
+  // v3: auto-chain — khi true, sau khi 1 stage xong (event 'done') sẽ tự chạy
+  // stage tiếp theo dựa trên status.next_stage. Tắt khi pipeline xong/lỗi/cancel.
+  const autoChainRef = useRef(false)
+  const lastConfigRef = useRef<TranslateConfig | null>(null)
 
   // ─── Load initial data ────────────────────────────────────────────────────
 
@@ -114,18 +132,49 @@ export default function TranslatePage({
 
         if (msg.stage === 'done') {
           setIsRunning(false)
-          refreshAll()
+          // v3: auto-chain — refresh status rồi chạy stage tiếp theo nếu còn
+          ;(async () => {
+            await refreshAll()
+            if (autoChainRef.current && lastConfigRef.current) {
+              try {
+                const st = await translateApi.getStatus(projectId)
+                if (st.next_stage) {
+                  setCurrentMessage(`Auto-chain: chuyển sang ${NEXT_STAGE_LABEL[st.next_stage] || st.next_stage}...`)
+                  setIsRunning(true)
+                  await translateApi.runStage(projectId, {
+                    ...lastConfigRef.current,
+                    stage: st.next_stage,
+                  })
+                } else {
+                  autoChainRef.current = false
+                  setCurrentMessage('✅ Pipeline hoàn tất toàn bộ!')
+                }
+              } catch (e: any) {
+                console.error('[auto-chain] failed:', e)
+                autoChainRef.current = false
+                setCurrentMessage(`Auto-chain lỗi: ${e?.message || e}`)
+              }
+            }
+          })()
         } else if (msg.stage === 'error' || msg.stage === 'cancelled') {
           setIsRunning(false)
+          // Tắt auto-chain khi có lỗi/cancel
+          autoChainRef.current = false
           refreshStatus()
         }
 
         // Auto-refresh key data when corresponding stage completes
-        if (msg.stage === 'bible_done') refreshBible()
+        // v3: thêm event 1A/1B
+        if (msg.stage === 'bible_done'
+            || msg.stage === 'bible_1a_done' || msg.stage === 'bible_1a_saved'
+            || msg.stage === 'bible_1b_done' || msg.stage === 'bible_1b_saved') {
+          refreshBible()
+        }
         if (msg.stage === 'chunks_done' || msg.stage === 'scenes_done') refreshChunks()
         if (msg.stage === 'speaker_done' || msg.stage === 'translate_done')
           refreshStatus()
         if (msg.stage === 'polish_done') refreshAll()
+        if (msg.stage === 'normalize_done') refreshStatus()
       },
       (call) => {
         setLlmCalls(prev => [...prev.slice(-99), call])
@@ -204,55 +253,50 @@ export default function TranslatePage({
     return detail?.message || e?.message || 'Unknown error'
   }
 
+  // v3: thứ tự stages để auto-chain — sau khi stage hiện tại xong, refresh status
+  // và xem next_stage còn không → chạy tiếp đến hết.
+  // (NEXT_STAGE_LABEL ở module scope phía trên)
+
+  /** v3: Auto-chain — chạy từ stage hiện tại đến hết pipeline.
+   * Mỗi lần một stage xong (SSE 'done' event), TranslatePage sẽ refresh status
+   * và auto trigger stage tiếp theo qua effect bên dưới.
+   */
   async function handleStart(config: TranslateConfig) {
     try {
-      // v3.9: nếu có data dở dang (Bible/Chunks/Speaker đã chạy 1 phần) → hỏi
-      // user muốn TIẾP TỤC TỪ STAGE TIẾP THEO hay CHẠY LẠI TOÀN BỘ
-      if (status?.can_resume && status?.next_stage && status.status !== 'running') {
-        const nextStage = status.next_stage
-        const stageLabel: Record<string, string> = {
-          bible: 'Stage 1 (Bible)',
-          chunks: 'Stage 2 (Chunks + Scenes)',
-          speaker: 'Stage 3 (Speaker)',
-          translate: 'Stage 4 (Translate)',
-        }
-        const label = stageLabel[nextStage] || `Stage "${nextStage}"`
-        const choice = window.confirm(
-          `Pipeline đang dở dang. Có dữ liệu của các stage trước đã chạy xong.\n\n` +
-          `▶ OK = TIẾP TỤC từ ${label} (giữ dữ liệu cũ, tiết kiệm tiền)\n` +
-          `▶ Cancel = CHẠY LẠI TOÀN BỘ từ đầu (xóa Bible + Chunks + Translations)`
+      // Đã chạy xong toàn bộ → hỏi reset
+      if (status && !status.next_stage && status.status !== 'running') {
+        const reallyRestart = window.confirm(
+          'Pipeline đã hoàn tất toàn bộ.\n\n' +
+          'Bạn muốn CHẠY LẠI từ đầu? (Bible + Chunks + Translations sẽ bị XÓA)'
         )
-        if (choice) {
-          // Tiếp tục từ next_stage
-          return handleRunStage(config, nextStage)
-        } else {
-          // User muốn chạy lại từ đầu → confirm 1 lần nữa vì hành động phá huỷ
-          const reallyReset = window.confirm(
-            'Bạn chắc chắn muốn chạy lại từ đầu?\n\nToàn bộ Bible + Chunks + Translations sẽ bị XÓA.'
-          )
-          if (!reallyReset) return
-          try {
-            await translateApi.reset(projectId)
-            await refreshAll()
-            setProgressEvents([])
-            setLlmCalls([])
-            setCurrentMessage('Đã reset, bắt đầu chạy lại từ đầu...')
-          } catch (e: any) {
-            alert(`Reset failed: ${e?.response?.data?.detail || e.message}`)
-            return
-          }
-          // Fall through xuống start full pipeline phía dưới
+        if (!reallyRestart) return
+        try {
+          await translateApi.reset(projectId)
+          await refreshAll()
+          setProgressEvents([])
+          setLlmCalls([])
+          setCurrentMessage('Đã reset, bắt đầu chạy lại từ đầu...')
+        } catch (e: any) {
+          alert(`Reset failed: ${e?.response?.data?.detail || e.message}`)
+          return
         }
+        // Sau reset, status sẽ refresh → next_stage = 'normalize' → fall through
       }
 
-      setProgressEvents([])
-      setLlmCalls([])
-      setCurrentMessage('Khởi động...')
+      // Auto-chain: bật flag để effect tự chain các stage kế tiếp
+      autoChainRef.current = true
+      lastConfigRef.current = config
+
+      // Lấy stage cần chạy
+      const nextStage = (status?.next_stage) || 'normalize'
+
+      setCurrentMessage(`Auto-chain: bắt đầu từ ${NEXT_STAGE_LABEL[nextStage] || nextStage}...`)
       setIsRunning(true)
       setShowConfig(false)
-      await translateApi.start(projectId, config)
-      setTab('logs')  // chuyển tab Logs để xem realtime
+      await translateApi.runStage(projectId, { ...config, stage: nextStage })
+      setTab('logs')
     } catch (e: any) {
+      autoChainRef.current = false
       alert(`Start failed:\n\n${_extractError(e)}`)
       setIsRunning(false)
     }
@@ -260,9 +304,10 @@ export default function TranslatePage({
 
   async function handleRunStage(config: TranslateConfig, stage: string) {
     try {
-      // v3.9: KHÔNG clear progressEvents/llmCalls khi run-stage —
-      // log cũ vẫn quý giá để debug; UI sẽ append event mới phía sau.
-      setCurrentMessage(`Khởi động stage ${stage}...`)
+      // Manual run 1 stage → KHÔNG auto-chain (chỉ chạy stage user yêu cầu)
+      autoChainRef.current = false
+      lastConfigRef.current = config
+      setCurrentMessage(`Khởi động ${NEXT_STAGE_LABEL[stage] || stage}...`)
       setIsRunning(true)
       setShowConfig(false)
       await translateApi.runStage(projectId, { ...config, stage })
@@ -326,7 +371,19 @@ export default function TranslatePage({
   }
 
   const stageDoneIcon = (stage: string) => {
-    if (stage === 'normalize') return (status?.cleaned_count ?? 0) > 0 || (status?.removed_count ?? 0) > 0 ? '✅' : '⚪'
+    // v3 FIX: Stage 0 — không chỉ dựa vào cleaned/removed (AI có thể quyết định
+    // keep hết), mà còn check progressEvents có 'normalize_done' không.
+    if (stage === 'normalize') {
+      const stage0Done = (status?.stage0_ran ?? false)
+        || (status?.cleaned_count ?? 0) > 0
+        || (status?.removed_count ?? 0) > 0
+        || progressEvents.some(e => e.stage === 'normalize_done')
+      return stage0Done ? '✅' : '⚪'
+    }
+    // v3: Bible split — 1A có cast, 1B có world
+    if (stage === 'bible_1a') return (status?.has_cast ?? false) ? '✅' : '⚪'
+    if (stage === 'bible_1b') return (status?.has_world ?? false) ? '✅' : '⚪'
+    // Legacy 'bible' — vẫn dùng has_bible
     if (stage === 'bible')     return status?.has_bible ? '✅' : '⚪'
     if (stage === 'scenes')    return (status?.scene_count ?? 0) > 0 ? '✅' : '⚪'
     if (stage === 'chunks')    return (status?.chunk_count ?? 0) > 0 ? '✅' : '⚪'
@@ -366,13 +423,21 @@ export default function TranslatePage({
             <button
               onClick={() => setShowConfig(true)}
               className="btn-primary"
-              title={status?.can_resume
-                ? `Có dữ liệu dở dang. Bấm để chọn tiếp tục hoặc chạy lại từ đầu.`
-                : "Bắt đầu pipeline 5 stage"}
+              title={
+                status?.next_stage
+                  ? `Tiếp tục từ ${NEXT_STAGE_LABEL[status.next_stage] || status.next_stage} → chạy hết pipeline`
+                  : status?.status === 'done'
+                  ? 'Pipeline đã xong toàn bộ. Bấm để reset + chạy lại từ đầu.'
+                  : 'Bắt đầu pipeline (auto-chain từ stage hiện tại đến hết)'
+              }
             >
-              {status?.can_resume ? '▶ Tiếp tục / Chạy lại' : '▶ Bắt đầu'}
+              {status?.next_stage
+                ? `▶ Tiếp tục từ ${NEXT_STAGE_LABEL[status.next_stage]?.replace(/Stage\s+/, '') || status.next_stage}`
+                : status?.can_resume === false && (status?.translated_count ?? 0) > 0
+                ? '▶ Chạy lại từ đầu'
+                : '▶ Bắt đầu'}
             </button>
-            {(status?.has_bible || (status?.scene_count ?? 0) > 0) && (
+            {(status?.has_bible || (status?.scene_count ?? 0) > 0 || (status?.stage0_ran ?? false)) && (
               <button onClick={handleReset} className="btn text-zinc-500"
                 title="Xóa Bible + Chunks + Translations + Logs">
                 ↻ Reset
@@ -601,15 +666,21 @@ function Overview({ project, status, bible, chunks, scenes, arcs, issues, stageD
         <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-widest mb-3">
           Pipeline (v3)
         </div>
-        <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
+        <div className="grid grid-cols-3 md:grid-cols-7 gap-2">
           <StageCard icon={stageDoneIcon('normalize')} title="0. Chuẩn hóa"
             desc={
               (status?.cleaned_count ?? 0) > 0 || (status?.removed_count ?? 0) > 0
                 ? `${status?.cleaned_count ?? 0} sửa · ${status?.removed_count ?? 0} bỏ`
-                : 'Làm sạch phụ đề'
+                : (status?.stage0_ran ? 'Đã chạy · phụ đề sạch' : 'Làm sạch phụ đề')
             } />
-          <StageCard icon={stageDoneIcon('bible')} title="1. Bible"
-            desc={bible ? `${bible.cast.characters.length} nhân vật · ${bible.glossary.terms?.length || 0} thuật ngữ` : 'Phân tích phim'} />
+          <StageCard icon={stageDoneIcon('bible_1a')} title="1A. Cast"
+            desc={status?.has_cast
+              ? `${status?.cast_count ?? bible?.cast.characters.length ?? 0} nhân vật · ${bible?.glossary.terms?.length || 0} thuật ngữ`
+              : 'Trích nhân vật'} />
+          <StageCard icon={stageDoneIcon('bible_1b')} title="1B. World"
+            desc={status?.has_world
+              ? `${status?.world_arcs_count ?? bible?.world.arcs?.length ?? 0} arcs · ${bible?.world.genre_id || 'other'}`
+              : 'Bối cảnh + arcs'} />
           <StageCard icon={stageDoneIcon('chunks')} title="2. Chunks"
             desc={`${chunks.length} chunks · ${arcs.length} arcs · ${scenes.length} scenes`} />
           <StageCard icon={stageDoneIcon('speaker')} title="3. Speaker"

@@ -339,7 +339,9 @@ async def process_one_chunk(
             model=config.models.get_model_for("stage4"),
             api_key=config.get_api_key_for(config.models.get_model_for("stage4")),
             temperature=0.4,
-            max_output=16000,
+            # v3 FIX: chunk 300 dòng × 2 bản dịch × 80 token = 48K. 16K cũ quá ít,
+            # đặc biệt khi thinking=True. Set max — cap_max_output tự giới hạn.
+            max_output=65536,
             json_mode=True,
             thinking=config.models.get_thinking_for("stage4"),
             max_retries=config.concurrency.retry_max,

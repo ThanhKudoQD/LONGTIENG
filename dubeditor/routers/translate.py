@@ -257,6 +257,37 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         tokens_in += s.tokens_in or 0
         tokens_out += s.tokens_out or 0
 
+    # v3: parse cast + world từ active Bible để biết 1A / 1B đã chạy chưa
+    cast_count = 0
+    world_arcs_count = 0
+    has_cast = False
+    has_world = False
+    if active_bible:
+        try:
+            cast_obj = json.loads(active_bible.cast_json or "{}")
+            cast_count = len(cast_obj.get("characters", []) or [])
+            has_cast = cast_count > 0
+        except Exception:
+            pass
+        try:
+            world_obj = json.loads(active_bible.world_json or "{}")
+            world_arcs_count = len(world_obj.get("arcs", []) or [])
+            has_world = world_arcs_count > 0
+        except Exception:
+            pass
+
+    # v3: Stage 0 đã chạy chưa — check qua pipeline events trong DB
+    # (kể cả khi không sửa dòng nào, miễn là có event 'normalize_done')
+    stage0_ran = False
+    try:
+        from dubeditor.models import PipelineEvent
+        stage0_ran = db.query(PipelineEvent).filter(
+            PipelineEvent.project_id == pid,
+            PipelineEvent.stage.in_(("normalize_done", "normalize_save")),
+        ).first() is not None
+    except Exception:
+        pass
+
     # v3.9: Resume — xác định stage tiếp theo cần chạy
     # Logic: dựa vào artifacts có sẵn trong DB, không phải translate_status string
     # (vì status có thể là 'cancelled' hoặc 'error' khi dở dang)
@@ -265,16 +296,18 @@ def get_status(pid: int, db: Session = Depends(get_db)):
     is_running_now = (p.translate_status == "running")
 
     if not is_running_now:
-        # Đếm xem stage nào đã có data:
-        has_bible_done = bool(active_bible)
+        # v3: pipeline tách Stage 1 thành 1A (cast) + 1B (world)
         has_chunks_done = chunk_count > 0
         has_speaker_done = speaker_assigned > 0
         has_translate_done = translated > 0
 
         # Xác định stage tiếp theo (chronological order)
-        # Stage 0 normalize không tính vào resume — luôn rerun đầu pipeline
-        if not has_bible_done:
-            next_stage = "bible"
+        if not stage0_ran:
+            next_stage = "normalize"
+        elif not has_cast:
+            next_stage = "bible_1a"
+        elif not has_world:
+            next_stage = "bible_1b"
         elif not has_chunks_done:
             next_stage = "chunks"
         elif not has_speaker_done:
@@ -286,9 +319,10 @@ def get_status(pid: int, db: Session = Depends(get_db)):
             next_stage = None
 
         # can_resume = đang dở giữa pipeline (có ít nhất 1 stage xong, chưa xong hết)
-        any_done = has_bible_done or has_chunks_done or has_speaker_done or has_translate_done
-        all_done = (has_bible_done and has_chunks_done and
-                    has_speaker_done and has_translate_done)
+        any_done = (stage0_ran or has_cast or has_world or has_chunks_done
+                    or has_speaker_done or has_translate_done)
+        all_done = (stage0_ran and has_cast and has_world and has_chunks_done
+                    and has_speaker_done and has_translate_done)
         can_resume = any_done and (not all_done)
 
     return TranslateStatusOut(
@@ -297,6 +331,10 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         current_stage=None,
         progress=p.translate_progress or 0.0,
         has_bible=bool(active_bible),
+        has_cast=has_cast,
+        has_world=has_world,
+        cast_count=cast_count,
+        world_arcs_count=world_arcs_count,
         chunk_count=chunk_count,
         scene_count=scene_count,
         speaker_assigned_count=speaker_assigned,
@@ -310,6 +348,7 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         error_message=p.translate_error,
         cleaned_count=cleaned_count,
         removed_count=removed_count,
+        stage0_ran=stage0_ran,
         next_stage=next_stage,
         can_resume=can_resume,
     )

@@ -229,7 +229,8 @@ async def _process_arc_inner(
         model=config.models.get_model_for("stage2"),
         api_key=config.get_api_key_for(config.models.get_model_for("stage2")),
         temperature=0.3,
-        max_output=8000,
+        # v3 FIX: tránh MAX_TOKENS với thinking — cap_max_output tự giới hạn theo model
+        max_output=65536,
         json_mode=True,
         thinking=config.models.get_thinking_for("stage2"),
         max_retries=config.concurrency.retry_max,

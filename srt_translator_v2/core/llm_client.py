@@ -49,6 +49,16 @@ def detect_provider(model: str) -> Provider:
 # ─────────────────────────────────────────────────────────────────
 
 def cap_max_output(max_output: int, model: str) -> int:
+    """Cap max_output theo giới hạn thực tế của từng model.
+
+    Số liệu cập nhật theo doc chính thức (May 2026):
+    - Gemini 2.5 / 3.x: 65536 max output
+    - GPT-5 / o-series: 32768 (reasoning models)
+    - GPT-4o / 4o-mini: 16384
+    - GPT-4: 8192, GPT-3.5 / 4-turbo: 4096
+    - DeepSeek V4 (Flash & Pro): up to 65536 (doc nói 384K nhưng cap ở 65536 cho ổn định)
+    - DeepSeek V3 / legacy: 8192
+    """
     m = model.lower()
     if "gpt-4o-mini" in m or "gpt-4o" in m:
         return min(max_output, 16384)
@@ -60,9 +70,9 @@ def cap_max_output(max_output: int, model: str) -> int:
         return min(max_output, 4096)
     if m.startswith(("o1", "o3", "o4", "gpt-5")):
         return min(max_output, 32768)
-    # DeepSeek V4 — context 1M, max output 384K (thực tế cap ở 8192 cho ổn định)
+    # DeepSeek V4 (Flash & Pro) — doc nói 384K, cap ở 65536 cho ổn định + tránh chunk lớn bị cắt
     if "deepseek-v4" in m or "deepseek-reasoner" in m:
-        return min(max_output, 8192)
+        return min(max_output, 65536)
     if "deepseek" in m:
         return min(max_output, 8192)
     # Gemini 3.x
@@ -161,6 +171,32 @@ async def call_gemini(req: LLMRequest, client: httpx.AsyncClient) -> LLMResponse
     if req.json_mode:
         payload["generationConfig"]["responseMimeType"] = "application/json"
 
+    # v3 DEBUG: log toàn bộ payload TRƯỚC khi POST (mask prompt text, giữ mọi config khác)
+    try:
+        import copy
+        _dbg_payload = copy.deepcopy(payload)
+        # Mask prompt text trong contents để không log toàn bộ prompt
+        for c in _dbg_payload.get("contents", []):
+            for p in c.get("parts", []):
+                if "text" in p:
+                    p["text"] = f"<masked {len(p['text'])} chars>"
+        # Mask system instruction nếu có
+        if "systemInstruction" in _dbg_payload:
+            for p in _dbg_payload["systemInstruction"].get("parts", []):
+                if "text" in p:
+                    p["text"] = f"<masked {len(p['text'])} chars>"
+        # Mask URL key
+        _dbg_url_safe = url.split("?key=")[0] + "?key=" + (
+            "***" + (req.api_key[-6:] if req.api_key and len(req.api_key) > 6 else "EMPTY")
+        )
+        logger.info(
+            f"[GEMINI REQUEST] url={_dbg_url_safe}, "
+            f"model={req.model}, "
+            f"payload={json.dumps(_dbg_payload, ensure_ascii=False)}"
+        )
+    except Exception as _dbg_e:
+        logger.debug(f"[GEMINI debug log failed]: {_dbg_e}")
+
     headers = {"Content-Type": "application/json"}
     t0 = time.time()
     r = await client.post(url, json=payload, headers=headers, timeout=req.timeout)
@@ -234,6 +270,21 @@ async def call_openai_compat(req: LLMRequest, client: httpx.AsyncClient,
         "Content-Type": "application/json",
         "Authorization": f"Bearer {req.api_key}",
     }
+
+    # v3 DEBUG: log toàn bộ payload TRƯỚC khi POST (mask prompt text, giữ mọi config)
+    try:
+        import copy
+        _dbg_payload = copy.deepcopy(payload)
+        for m in _dbg_payload.get("messages", []):
+            if "content" in m and isinstance(m["content"], str):
+                m["content"] = f"<masked {len(m['content'])} chars>"
+        logger.info(
+            f"[OPENAI/DEEPSEEK REQUEST] url={url}, "
+            f"api_key={'***' + req.api_key[-6:] if req.api_key and len(req.api_key) > 6 else ('EMPTY' if not req.api_key else req.api_key)}, "
+            f"payload={json.dumps(_dbg_payload, ensure_ascii=False)}"
+        )
+    except Exception as _dbg_e:
+        logger.debug(f"[OPENAI/DEEPSEEK debug log failed]: {_dbg_e}")
 
     t0 = time.time()
     r = await client.post(url, json=payload, headers=headers, timeout=req.timeout)
@@ -397,6 +448,9 @@ def _notify_observer(req: LLMRequest, resp: Optional[LLMResponse],
 def parse_json_response(text: str, default: Optional[dict | list] = None) -> dict | list:
     """
     Parse JSON từ output LLM, có fallback cho output không sạch.
+
+    v3 PARTIAL RECOVERY: nếu JSON bị cắt giữa chừng (MAX_TOKENS), thử extract
+    các object hoàn chỉnh bên trong (vd. lấy decisions/translations đã parse được).
     """
     text = text.strip()
 
@@ -427,6 +481,64 @@ def parse_json_response(text: str, default: Optional[dict | list] = None) -> dic
         return json.loads(fixed)
     except json.JSONDecodeError:
         pass
+
+    # v3 PARTIAL RECOVERY: JSON bị cắt → cố lấy các object hoàn chỉnh bên trong.
+    # Áp dụng khi default là dict chứa array (vd {"decisions": []}, {"translations": []}).
+    # Strategy:
+    #  1. Tìm key của array (decisions/translations/items/...) trong text
+    #  2. Match từng object hoàn chỉnh {...} cân bằng dấu ngoặc
+    #  3. Trả lại dict với array chứa các object recovered
+    if isinstance(default, dict):
+        for arr_key in default.keys():
+            arr_marker = f'"{arr_key}"'
+            if arr_marker not in text:
+                continue
+            arr_start = text.index(arr_marker) + len(arr_marker)
+            bracket_idx = text.find("[", arr_start)
+            if bracket_idx < 0:
+                continue
+            after_bracket = text[bracket_idx + 1:]
+
+            # Extract từng object {...} cân bằng dấu ngoặc, có ý thức về string
+            # (để tránh đếm { } bên trong "text": "..." )
+            objs: list = []
+            depth = 0
+            start = -1
+            in_string = False
+            escape = False
+            for i, ch in enumerate(after_bracket):
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0 and start >= 0:
+                        obj_str = after_bracket[start:i + 1]
+                        try:
+                            objs.append(json.loads(obj_str))
+                        except json.JSONDecodeError:
+                            pass
+                        start = -1
+            if objs:
+                logger.warning(
+                    f"[JSON] Recovered {len(objs)} partial {arr_key!r} objects "
+                    f"from truncated/malformed response."
+                )
+                result = dict(default)
+                result[arr_key] = objs
+                return result
 
     if default is not None:
         logger.warning(f"[JSON] Failed to parse, using default. Preview: {text[:200]}")

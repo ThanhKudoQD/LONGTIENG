@@ -261,12 +261,14 @@ async def run_stage0_normalize(
     # Stage0Config.model giữ để backward compat (cũ); per-stage model là cách mới.
     model = config.stage0.model or config.models.get_model_for("stage0")
 
+    # v3 FIX: max_output 8000/16000 vẫn ít với phim dài + thinking enabled.
+    # Set max (Gemini 2.5 cap=65536) — cap_max_output tự giới hạn theo model.
     req = LLMRequest(
         prompt=prompt,
         model=model,
         api_key=config.get_api_key_for(model),
         temperature=0.2,
-        max_output=8000,
+        max_output=65536,
         json_mode=True,
         thinking=config.models.get_thinking_for("stage0"),
         max_retries=config.concurrency.retry_max,
@@ -276,6 +278,16 @@ async def run_stage0_normalize(
         try:
             resp = await call_llm(req, client=client, stage_tag="0_normalize")
             tracker.add("0_normalize", resp)
+
+            # v3 GUARD: cảnh báo nếu AI bị cắt vì MAX_TOKENS — JSON có thể malformed
+            finish = getattr(resp, "finish_reason", "") or ""
+            if finish.upper() in ("MAX_TOKENS", "LENGTH"):
+                logger.warning(
+                    f"[Stage 0] Response BỊ CẮT (finish_reason={finish!r}, "
+                    f"tokens_out={resp.tokens_out}). "
+                    f"Sẽ cố parse partial — có thể thiếu một số decisions."
+                )
+
             data = parse_json_response(resp.text, default={"decisions": []})
         except Exception as e:
             logger.error(f"[Stage 0] AI call failed: {e}. Default keep all.")
