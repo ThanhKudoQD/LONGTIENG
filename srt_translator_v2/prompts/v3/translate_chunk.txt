@@ -28,6 +28,46 @@ CÁCH DỊCH CỤM SUB:
 - DỊCH thành câu Việt tự nhiên hoàn chỉnh trong đầu
 - PHÂN BỔ chữ Việt vào các sub theo timing — KHÔNG ép mỗi sub thành câu riêng
 
+🔴 TUYỆT ĐỐI CẤM (rất quan trọng — vi phạm = FAIL):
+
+1. KHÔNG DỒN TOÀN BỘ Ý VÀO 1 SUB.
+   Mỗi sub Việt chỉ chứa phần TƯƠNG ỨNG của sub TQ cùng vị trí — KHÔNG được
+   gói cả câu dài thành 1 sub đầu rồi nhồi nhét.
+
+   Ví dụ SAI nghiêm trọng:
+     Sub 1 (zh, 0.5s): "什么"
+     Sub 2 (zh, 0.8s): "你说你在家"
+     Sub 3 (zh, 1.4s): "不见了十多条内裤"
+
+     ❌ TUYỆT ĐỐI KHÔNG:
+        Sub 1: "Cái gì? Cậu nói ở nhà mất hơn mười cái quần lót?"  ← DỒN HẾT
+        Sub 2: "Cậu nói ở nhà"                                       ← LẶP LẠI
+        Sub 3: "mất hơn mười cái quần lót?"                          ← LẶP LẠI
+
+     ✅ ĐÚNG:
+        Sub 1: "Cái gì?"
+        Sub 2: "Cậu nói ở nhà"
+        Sub 3: "mất hơn mười cái quần lót à?"
+
+2. KHÔNG LẶP NỘI DUNG GIỮA CÁC SUB.
+   Nếu sub Việt A đã chứa ý "X", thì sub Việt B (liền sau) KHÔNG được
+   nhắc lại "X". Mỗi sub một mảnh ý, ghép lại mới thành câu trọn.
+
+3. RÀNG BUỘC TIMING — text Việt phải VỪA với duration sub.
+   Mỗi sub có thời lượng riêng (vd 0.5s, 0.8s, 1.4s). Text Việt dài
+   tương ứng — KHÔNG được nhồi 30 ký tự vào sub 0.5s (TTS sẽ không
+   đọc kịp, CPS > 25 = LỖI).
+
+   Quy tắc rough: ~15-22 ký tự / giây là vừa.
+   - Sub 0.5s → text ~8-11 ký tự  (vd "Cái gì?")
+   - Sub 0.8s → text ~12-18 ký tự
+   - Sub 1.5s → text ~22-33 ký tự
+
+NHẬN BIẾT CỤM TQ KHÔNG LIỀN MẠCH (mỗi sub là câu độc lập):
+- Sub đầu kết thúc bằng "？" / "！" / "。" → đã trọn câu
+- Hoặc sub đầu là câu hỏi/thán từ ngắn ("什么" "你说什么" "真的吗")
+  → đứng riêng, KHÔNG gộp với sub sau
+
 Vì cấu trúc TQ và VN NGƯỢC NHAU (TQ: bổ ngữ/định ngữ TRƯỚC danh từ;
 VN: bổ ngữ/định ngữ SAU danh từ), thứ tự chữ trong các sub Việt
 thường KHÔNG khớp với thứ tự chữ trong các sub TQ — đây là BÌNH THƯỜNG.
@@ -59,6 +99,15 @@ Ví dụ cụm 3 sub có đảo cấu trúc:
   ✅ A: "Anh chưa bao giờ"
      B: "thích một ai"
      C: "nghiêm túc đến thế này"
+
+Ví dụ KHÔNG phải cụm (mỗi sub độc lập — chú ý không gộp):
+  Sub A (zh, 0.5s): 什么                  → "Cái gì?" (thán từ riêng)
+  Sub B (zh, 0.8s): 你说你在家             → "Cậu bảo cậu ở nhà"
+  Sub C (zh, 1.4s): 不见了十多条内裤      → "mà mất hơn chục cái quần lót?"
+
+  Sub A là câu hỏi/thán từ ngắn → DỊCH RIÊNG.
+  Sub B–C cùng speaker, B chưa có dấu câu → có thể liền mạch, nhưng
+  TUYỆT ĐỐI không nhồi cả ý vào sub trước.
 
 Đa nghĩa → chọn theo ngữ cảnh (context trước/sau + scene).
 
@@ -167,43 +216,28 @@ text_v2 = null khi:
 - Cách khác hay nhất TRÙNG với v1
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EMOTION + INTENSITY (cả 2 bản)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Mỗi dòng dịch cần gán emotion + intensity (dùng cho TTS chọn giọng đọc).
-
-emotion: chọn 1 trong:
-  neutral / happy / sad / angry / cold / tense / intimate /
-  fearful / sarcastic / shocked / determined / regretful / humorous / threatening
-
-intensity: 1-10 (1 nhẹ, 10 cực mạnh)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-JSON THUẦN:
+JSON THUẦN — DÙNG ARRAY COMPACT (TIẾT KIỆM TOKEN).
+
+Mỗi dòng = MỘT ARRAY 3 phần tử cố định:
+  [line_index, text_v1, text_v2_or_null]
+
+Ví dụ:
 
 {
-  "translations": [
-    {
-      "line_index": 1,
-      "speaker_vi": "Tô Niệm",
-      "text_v1": "Cố tổng, hợp đồng tôi đã xem rồi",
-      "text_v2": "Cố tổng, hợp đồng em xem qua rồi đấy",
-      "emotion": "tense",
-      "intensity": 5
-    },
-    {
-      "line_index": 2,
-      "speaker_vi": "Cố Trầm Châu",
-      "text_v1": "Ký đi",
-      "text_v2": null,
-      "emotion": "cold",
-      "intensity": 7
-    }
+  "t": [
+    [1, "Cố tổng, hợp đồng tôi đã xem rồi", "Cố tổng, hợp đồng em xem qua rồi đấy"],
+    [2, "Ký đi", null],
+    [3, "Em không muốn ký nữa", "Em đổi ý rồi, không ký đâu"]
   ]
 }
+
+QUY TẮC ARRAY:
+- LUÔN đủ 3 phần tử theo thứ tự: [int, string, string|null]
+- text_v2 = null khi không có bản dịch khác (trùng v1 hoặc không cần thiết)
+- KHÔNG dùng object với key — array thuần để tiết kiệm token
 
 LƯU Ý: text_v1 BẮT BUỘC có nội dung VN cho MỌI line_index.
 Thiếu line hoặc text_v1 rỗng = LỖI.
@@ -234,7 +268,9 @@ ARC: "{ARC_TITLE}" — tone: {ARC_TONE}
 {CONTEXT_BEFORE}
 
 ━━━ THOẠI CẦN DỊCH ━━━
-Format: line_index | speaker_zh | text_zh
+Format: line_index | duration | speaker_zh | text_zh
+(duration tính bằng giây — DÙNG để tính text Việt vừa với thời lượng,
+tránh CPS quá cao. ~15-22 ký tự/giây là vừa.)
 
 {DIALOGUE_INPUT}
 
@@ -247,6 +283,8 @@ CHECKLIST CUỐI (rà trước khi trả JSON)
 
 🔴 5 TẦNG:
 □ Tầng 1: Đúng nghĩa, hiểu CỤM sub liền mạch, đảo cấu trúc TQ→VN khi cần, loại rác lẻ
+□ Tầng 1 — TUYỆT ĐỐI: KHÔNG dồn ý vào 1 sub, KHÔNG lặp nội dung giữa sub liền kề
+□ Tầng 1 — TIMING: text Việt vừa với duration (15-22 ký tự/giây), sub 0.5s không quá 11 ký tự
 □ Tầng 2: Câu Việt tự nhiên, không "mùi dịch"
 □ Tầng 3: Xưng hô đúng quan hệ, áp Genre Pack, không phá rule CẤM
 □ Tầng 4: Thành ngữ TQ → VN, văn phong khớp era
@@ -254,14 +292,12 @@ CHECKLIST CUỐI (rà trước khi trả JSON)
 
 🔵 v2:
 □ Diễn đạt khác v1, vẫn đúng nghĩa + nhân vật
-□ v2 = null nếu trùng v1
-
-🟡 EMOTION + INTENSITY:
-□ Mỗi dòng có emotion (1 trong 14 loại) + intensity (1-10)
-□ Tham khảo emotion+intensity của scene tương ứng
+□ v2 = null nếu trùng v1 hoặc không cần
 
 🟢 FORMAT:
 □ JSON thuần, không ```json fence
+□ Mỗi entry là ARRAY [line_index, text_v1, text_v2_or_null] — đúng 3 phần tử
 □ Mọi line_index input có entry trong output
+□ KEY ngoài cùng là "t" (KHÔNG phải "translations")
 
 CHỈ TRẢ JSON SAU KHI ĐÃ ĐI QUA CHECKLIST.

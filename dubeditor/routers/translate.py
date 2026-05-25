@@ -263,11 +263,13 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         tokens_in += s.tokens_in or 0
         tokens_out += s.tokens_out or 0
 
-    # v3: parse cast + world từ active Bible để biết 1A / 1B đã chạy chưa
+    # v3: parse cast + world + glossary từ active Bible để biết 1A.1 / 1A.2 / 1B đã chạy chưa
     cast_count = 0
     world_arcs_count = 0
+    glossary_count = 0
     has_cast = False
     has_world = False
+    has_glossary = False
     if active_bible:
         try:
             cast_obj = json.loads(active_bible.cast_json or "{}")
@@ -279,6 +281,12 @@ def get_status(pid: int, db: Session = Depends(get_db)):
             world_obj = json.loads(active_bible.world_json or "{}")
             world_arcs_count = len(world_obj.get("arcs", []) or [])
             has_world = world_arcs_count > 0
+        except Exception:
+            pass
+        try:
+            glossary_obj = json.loads(active_bible.glossary_json or "{}")
+            glossary_count = len(glossary_obj.get("terms", []) or [])
+            has_glossary = glossary_count > 0
         except Exception:
             pass
 
@@ -339,8 +347,10 @@ def get_status(pid: int, db: Session = Depends(get_db)):
         has_bible=bool(active_bible),
         has_cast=has_cast,
         has_world=has_world,
+        has_glossary=has_glossary,
         cast_count=cast_count,
         world_arcs_count=world_arcs_count,
+        glossary_count=glossary_count,
         chunk_count=chunk_count,
         scene_count=scene_count,
         speaker_assigned_count=speaker_assigned,

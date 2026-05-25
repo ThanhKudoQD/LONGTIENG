@@ -298,8 +298,10 @@ export interface TranslateStatus {
   // v3: Bible split — 1A (cast) và 1B (world) độc lập
   has_cast?: boolean                     // Bible có ≥ 1 nhân vật
   has_world?: boolean                    // Bible có ≥ 1 arc
+  has_glossary?: boolean                 // v3.14: Bible có ≥ 1 thuật ngữ
   cast_count?: number                    // số nhân vật trong Bible
   world_arcs_count?: number              // số arcs
+  glossary_count?: number                // v3.14: số thuật ngữ trong Bible
   chunk_count: number                    // v3
   scene_count: number
   speaker_assigned_count: number
@@ -414,7 +416,9 @@ export interface TranslateConfig {
   // Mỗi stage có model riêng. Empty/null → backend fallback về tier cũ.
   model_stage0?: string | null
   model_stage1?: string | null              // LEGACY combined — vẫn gửi để backward compat
-  model_stage1a?: string | null             // v3 split: 1A Cast + Glossary
+  model_stage1a?: string | null             // v3 split: 1A Cast + Glossary (LEGACY gộp)
+  model_stage1a_cast?: string | null        // v3.14: 1A.1 Cast riêng
+  model_stage1a_glossary?: string | null    // v3.14: 1A.2 Glossary riêng
   model_stage1b?: string | null             // v3 split: 1B World + Arcs
   model_stage2?: string | null
   model_stage3?: string | null
@@ -424,6 +428,8 @@ export interface TranslateConfig {
   thinking_stage0?: boolean | null
   thinking_stage1?: boolean | null
   thinking_stage1a?: boolean | null
+  thinking_stage1a_cast?: boolean | null         // v3.14
+  thinking_stage1a_glossary?: boolean | null     // v3.14
   thinking_stage1b?: boolean | null
   thinking_stage2?: boolean | null
   thinking_stage3?: boolean | null

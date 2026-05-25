@@ -159,6 +159,80 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
+
+    # v3.14: Xóa file vật lý kèm project (TTS audio + video + exports).
+    # Trước đây chỉ xóa row DB → orphan files trên disk.
+    import shutil
+    import logging
+    from sqlalchemy import text as sql_text
+    _logger = logging.getLogger(__name__)
+
+    # ── 1) Xóa explicit các bảng KHÔNG có relationship cascade ──
+    # Lý do: SQLite không enable foreign_keys pragma → ondelete="CASCADE"
+    # ở model KHÔNG hoạt động → orphan rows. Khi user tạo project mới có ID
+    # trùng (SQLite reuse ID nếu không AUTOINCREMENT) → load data cũ.
+    #
+    # Các bảng có FK → projects nhưng KHÔNG có relationship cascade ở Project model:
+    # - llm_calls          (logs)
+    # - pipeline_events    (logs)
+    # - removed_subtitles  (Stage 0 deleted lines)  ← bug user gặp
+    # - polish_issues      (Stage 5 issues)
+    try:
+        n1 = db.execute(
+            sql_text("DELETE FROM llm_calls WHERE project_id = :pid"),
+            {"pid": project_id}
+        ).rowcount
+        n2 = db.execute(
+            sql_text("DELETE FROM pipeline_events WHERE project_id = :pid"),
+            {"pid": project_id}
+        ).rowcount
+        n3 = db.execute(
+            sql_text("DELETE FROM removed_subtitles WHERE project_id = :pid"),
+            {"pid": project_id}
+        ).rowcount
+        n4 = db.execute(
+            sql_text("DELETE FROM polish_issues WHERE project_id = :pid"),
+            {"pid": project_id}
+        ).rowcount
+        _logger.info(
+            f"[Delete] Cleared logs for pid={project_id}: "
+            f"llm_calls={n1}, pipeline_events={n2}, "
+            f"removed_subtitles={n3}, polish_issues={n4}"
+        )
+    except Exception as e:
+        _logger.warning(f"[Delete] Failed to clear logs: {e}")
+
+    # ── 2) Thư mục audio TTS của project: data/projects/{pid}/ ──
+    project_dir = STORAGE / str(project_id)
+    if project_dir.exists():
+        try:
+            shutil.rmtree(project_dir)
+            _logger.info(f"[Delete] Removed project dir: {project_dir}")
+        except Exception as e:
+            _logger.warning(f"[Delete] Failed to remove {project_dir}: {e}")
+
+    # ── 3) Video file: data/projects/_videos/{uuid}.ext ──
+    if p.video_path:
+        try:
+            video_name = Path(p.video_path).name
+            video_file = VIDEO_DIR / video_name
+            if video_file.exists():
+                video_file.unlink()
+                _logger.info(f"[Delete] Removed video file: {video_file}")
+        except Exception as e:
+            _logger.warning(f"[Delete] Failed to remove video: {e}")
+
+    # ── 4) Export files: data/projects/_exports/{pid}_* ──
+    try:
+        for f in EXPORTS_DIR.glob(f"{project_id}_*"):
+            try:
+                f.unlink()
+                _logger.info(f"[Delete] Removed export file: {f}")
+            except Exception as e:
+                _logger.warning(f"[Delete] Failed to remove {f}: {e}")
+    except Exception as e:
+        _logger.warning(f"[Delete] Failed to scan exports: {e}")
+
     db.delete(p); db.commit()
     return {"ok": True}
 
@@ -175,6 +249,10 @@ async def upload_video(project_id: int, file: UploadFile = File(...), db: Sessio
 
     out_name = f"{uuid.uuid4()}{Path(file.filename).suffix}"
     out_path = VIDEO_DIR / out_name
+
+    # v3.14 FIX: Ensure VIDEO_DIR tồn tại (có thể bị xóa nếu user clear data thủ công
+    # hoặc deploy mới). Chỉ tạo 1 lần ở startup là không đủ.
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 
     total_size = int(file.size or 0)
     saved = 0

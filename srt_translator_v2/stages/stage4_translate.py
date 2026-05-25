@@ -1,10 +1,15 @@
 """
-Stage 4 — Translate (v3.2).
+Stage 4 — Translate (v3.14).
 
-Cải tiến v3.2:
-- Prompt 5 TẦNG (gộp 9 nguyên tắc cũ): đúng nghĩa / tự nhiên / tone-nhân vật / văn hóa-cảm xúc / không gộp
-- Inject GENRE PACK theo bible.world.genre_id (modern_ceo_romance/ancient_palace/...)
-- AI vẫn trả emotion + intensity (cần cho TTS chọn giọng); fallback từ scene nếu thiếu
+Cải tiến v3.14:
+- BỎ emotion + intensity khỏi output AI (tiết kiệm ~28% output token)
+- Output dạng ARRAY COMPACT [line_index, text_v1, text_v2_or_null] thay vì object
+- Key "t" thay "translations" (ngắn hơn cho cache prefix)
+- Backward-compat: parser vẫn đọc được format object cũ
+
+Trước đó (v3.2):
+- Prompt 5 TẦNG: đúng nghĩa / tự nhiên / tone-nhân vật / văn hóa-cảm xúc / không gộp
+- Inject GENRE PACK theo bible.world.genre_id
 - Câu Việt mượt, có ví dụ ❌→✅ cho tầng 2
 
 Stage 0 đã làm sạch SRT (set text="" cho dòng noise).
@@ -351,47 +356,56 @@ async def process_one_chunk(
             resp = await call_llm(req, client=client,
                                   stage_tag=f"4_translate_c{chunk.r[0]}")
             tracker.add("4_translate", resp)
-            data = parse_json_response(resp.text, default={"translations": []})
+            data = parse_json_response(resp.text, default={"t": []})
         except Exception as e:
             logger.warning(f"[Stage 4] Chunk {chunk.r[0]}-{chunk.r[1]} failed: {e}")
             return {}
 
         result = {}
         noise_count = 0
-        for t in data.get("translations", []) or []:
+
+        # v3.14: Format mới — array compact [line_index, text_v1, text_v2_or_null]
+        # Key: "t" (ngắn hơn "translations" để tiết kiệm cache prefix).
+        # Backward-compat: vẫn đọc được format cũ dạng object nếu AI trả nhầm.
+        items = data.get("t") or data.get("translations") or []
+
+        for entry in items:
             try:
-                line_idx = int(t.get("line_index", -1))
+                # Format mới: array
+                if isinstance(entry, list):
+                    if len(entry) < 2:
+                        continue
+                    line_idx = int(entry[0])
+                    text_v1_raw = entry[1] if len(entry) >= 2 else None
+                    text_v2_raw = entry[2] if len(entry) >= 3 else None
+                # Backward-compat: object format cũ
+                elif isinstance(entry, dict):
+                    line_idx = int(entry.get("line_index", -1))
+                    text_v1_raw = entry.get("text_v1")
+                    text_v2_raw = entry.get("text_v2")
+                else:
+                    continue
+
                 if line_idx < 1:
                     continue
                 if not (chunk.r[0] <= line_idx <= chunk.r[1]):
                     continue
 
-                text_v1_raw = t.get("text_v1")
-                text_v1 = (text_v1_raw or "").strip()
-                text_v2_raw = t.get("text_v2")
-                text_v2 = (text_v2_raw or "").strip() or None
+                text_v1 = (text_v1_raw or "").strip() if isinstance(text_v1_raw, str) else ""
+                text_v2 = None
+                if isinstance(text_v2_raw, str):
+                    text_v2 = text_v2_raw.strip() or None
 
-                # AI trả emotion + intensity trong output (cho TTS chọn giọng đọc).
-                # Nếu AI không trả (thiếu field) → fallback từ scene Stage 2 đã gán.
-                ai_emotion = t.get("emotion")
-                ai_intensity = t.get("intensity")
-
-                if ai_emotion is None or ai_intensity is None:
-                    # Fallback từ scene
-                    for sc in chunk.scenes:
-                        if sc.r[0] <= line_idx <= sc.r[1]:
-                            if ai_emotion is None:
-                                ai_emotion = sc.e
-                            if ai_intensity is None:
-                                ai_intensity = sc.intensity
-                            break
-
+                # v3.14: Bỏ emotion + intensity khỏi pipeline.
+                # Tiết kiệm ~28% output token.
+                # Default null trong DB → TTS tự fallback "normal" mode qua
+                # voice_modes.emotion_to_mode(None) → "normal".
                 result[line_idx] = {
-                    "speaker_vi": (t.get("speaker_vi") or "").strip(),
+                    "speaker_vi": "",   # không còn dùng (đã có từ Stage 3)
                     "text_v1": text_v1,
                     "text_v2": text_v2,
-                    "emotion": normalize_emotion(ai_emotion),
-                    "intensity": _clamp_intensity(ai_intensity),
+                    "emotion": None,
+                    "intensity": None,
                     "is_noise": False,
                 }
             except Exception as e:
@@ -421,8 +435,8 @@ def _clamp_intensity(val) -> int:
 def should_keep_variant(
     text_v1: Optional[str],
     text_v2: Optional[str],
-    emotion: str,
-    intensity: int,
+    emotion: Optional[str],
+    intensity: Optional[int],
     is_hook: bool,
     is_peak: bool,
     config: PipelineConfig,
@@ -433,6 +447,9 @@ def should_keep_variant(
     - off: bỏ tất cả v2
     - always: giữ tất cả v2 AI trả
     - important_only: chỉ giữ ở scene quan trọng / emotion mạnh
+
+    v3.14: emotion/intensity giờ có thể là None (Stage 4 không sinh nữa).
+    Fallback: dùng is_hook/is_peak từ Stage 2 — vẫn đủ tốt để quyết định.
     """
     if not text_v2 or text_v2 == text_v1:
         return False
@@ -447,9 +464,10 @@ def should_keep_variant(
     if not text_v1 or len(text_v1) < config.variant.min_chars:
         return False
 
-    if emotion in config.variant.important_emotions:
+    # v3.14: emotion/intensity có thể None → chỉ check khi có data
+    if emotion and emotion in config.variant.important_emotions:
         return True
-    if intensity >= config.variant.important_intensity_min:
+    if intensity is not None and intensity >= config.variant.important_intensity_min:
         return True
     if is_hook or is_peak:
         return True

@@ -38,7 +38,9 @@ type Tab = 'overview' | 'bible' | 'cleaned' | 'scenes' | 'subtitles' | 'issues' 
 // v3: Map next_stage code → label hiển thị (module scope để SSE closure dùng ổn định)
 const NEXT_STAGE_LABEL: Record<string, string> = {
   normalize: 'Stage 0 (Chuẩn hóa)',
-  bible_1a:  'Stage 1A (Cast + Glossary)',
+  bible_1a:  'Stage 1A (Cast + Glossary — legacy)',
+  bible_cast:     'Stage 1A (Cast)',
+  bible_glossary: 'Stage 1A.2 (Glossary)',
   bible_1b:  'Stage 1B (World + Arcs)',
   bible:     'Stage 1 (Bible — legacy combined)',
   chunks:    'Stage 2 (Chunks + Scenes)',
@@ -164,9 +166,11 @@ export default function TranslatePage({
         }
 
         // Auto-refresh key data when corresponding stage completes
-        // v3: thêm event 1A/1B
+        // v3: thêm event 1A/1B; v3.14: thêm bible_cast / bible_glossary
         if (msg.stage === 'bible_done'
             || msg.stage === 'bible_1a_done' || msg.stage === 'bible_1a_saved'
+            || msg.stage === 'bible_cast_done' || msg.stage === 'bible_cast_saved'
+            || msg.stage === 'bible_glossary_done' || msg.stage === 'bible_glossary_saved'
             || msg.stage === 'bible_1b_done' || msg.stage === 'bible_1b_saved') {
           refreshBible()
         }
@@ -382,6 +386,8 @@ export default function TranslatePage({
     }
     // v3: Bible split — 1A có cast, 1B có world
     if (stage === 'bible_1a') return (status?.has_cast ?? false) ? '✅' : '⚪'
+    if (stage === 'bible_cast') return (status?.has_cast ?? false) ? '✅' : '⚪'
+    if (stage === 'bible_glossary') return (status?.has_glossary ?? false) ? '✅' : '⚪'
     if (stage === 'bible_1b') return (status?.has_world ?? false) ? '✅' : '⚪'
     // Legacy 'bible' — vẫn dùng has_bible
     if (stage === 'bible')     return status?.has_bible ? '✅' : '⚪'
@@ -667,17 +673,21 @@ function Overview({ project, status, bible, chunks, scenes, arcs, issues, stageD
         <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-widest mb-3">
           Pipeline (v3)
         </div>
-        <div className="grid grid-cols-3 md:grid-cols-7 gap-2">
+        <div className="grid grid-cols-3 md:grid-cols-8 gap-2">
           <StageCard icon={stageDoneIcon('normalize')} title="0. Chuẩn hóa"
             desc={
               (status?.cleaned_count ?? 0) > 0 || (status?.removed_count ?? 0) > 0
                 ? `${status?.cleaned_count ?? 0} sửa · ${status?.removed_count ?? 0} bỏ`
                 : (status?.stage0_ran ? 'Đã chạy · phụ đề sạch' : 'Làm sạch phụ đề')
             } />
-          <StageCard icon={stageDoneIcon('bible_1a')} title="1A. Cast"
+          <StageCard icon={stageDoneIcon('bible_cast')} title="1A. Cast"
             desc={status?.has_cast
-              ? `${status?.cast_count ?? bible?.cast.characters.length ?? 0} nhân vật · ${bible?.glossary.terms?.length || 0} thuật ngữ`
+              ? `${status?.cast_count ?? bible?.cast.characters.length ?? 0} nhân vật`
               : 'Trích nhân vật'} />
+          <StageCard icon={stageDoneIcon('bible_glossary')} title="1A.2 Glossary"
+            desc={status?.has_glossary
+              ? `${status?.glossary_count ?? bible?.glossary.terms?.length ?? 0} thuật ngữ`
+              : 'Trích thuật ngữ'} />
           <StageCard icon={stageDoneIcon('bible_1b')} title="1B. World"
             desc={status?.has_world
               ? `${status?.world_arcs_count ?? bible?.world.arcs?.length ?? 0} arcs · ${bible?.world.genre_id || 'other'}`

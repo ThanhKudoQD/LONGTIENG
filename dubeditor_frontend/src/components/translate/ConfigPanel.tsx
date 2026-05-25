@@ -65,7 +65,7 @@ const MODELS: Record<'gemini' | 'openai' | 'deepseek', ModelOption[]> = {
 // Mỗi entry = 1 card trong UI. UI render 1 ModelSelector per stage độc lập.
 
 interface StageDef {
-  key: 'stage0' | 'stage1' | 'stage1a' | 'stage1b' | 'stage2' | 'stage3' | 'stage4' | 'stage5' | 'retranslate'
+  key: 'stage0' | 'stage1' | 'stage1a' | 'stage1a_cast' | 'stage1a_glossary' | 'stage1b' | 'stage2' | 'stage3' | 'stage4' | 'stage5' | 'retranslate'
   title: string             // Tiêu đề lớn — STAGE 1, STAGE 2…
   desc: string              // Mô tả ngắn nhiệm vụ của stage
   badgeColor: string        // Tailwind class cho badge
@@ -92,13 +92,22 @@ const STAGES: StageDef[] = [
     emptyLabel: '↪ Dùng model rẻ nhất (mặc định)',
   },
   {
-    key: 'stage1a',
-    title: 'STAGE 1A · Cast + Glossary',
-    desc: 'Trích nhân vật (Hán Việt) + thuật ngữ. Cần model mạnh cho tên chuẩn.',
+    key: 'stage1a_cast',
+    title: 'STAGE 1A.1 · Cast (Nhân vật)',
+    desc: 'Trích nhân vật + Hán Việt. CẦN MODEL MẠNH (model nhẹ dễ bị loop alias → MAX_TOKENS).',
     badgeColor: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
     defaultModel: { gemini: 'gemini-2.5-pro', openai: 'gpt-5', deepseek: 'deepseek-v4-pro' },
     defaultThinking: true,
     thinkingHint: 'Hán Việt chuẩn cần thinking — recommended bật',
+  },
+  {
+    key: 'stage1a_glossary',
+    title: 'STAGE 1A.2 · Glossary (Thuật ngữ)',
+    desc: 'Trích thuật ngữ + xưng hô. Output ngắn, model nhẹ OK.',
+    badgeColor: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
+    defaultModel: { gemini: 'gemini-2.5-flash', openai: 'gpt-5-mini', deepseek: 'deepseek-v4-flash' },
+    defaultThinking: false,
+    thinkingHint: 'Extract đơn giản — tắt là đủ',
   },
   {
     key: 'stage1b',
@@ -175,7 +184,9 @@ interface StoredConfig {
   // ── v3.5: per-stage model + thinking (UI mới) ───────────────────────
   model_stage0: string
   model_stage1: string
-  model_stage1a: string
+  model_stage1a: string                 // LEGACY — giữ backward-compat
+  model_stage1a_cast: string            // v3.14: 1A.1 Cast riêng
+  model_stage1a_glossary: string        // v3.14: 1A.2 Glossary riêng
   model_stage1b: string
   model_stage2: string
   model_stage3: string
@@ -184,7 +195,9 @@ interface StoredConfig {
   model_retranslate: string
   thinking_stage0: boolean
   thinking_stage1: boolean
-  thinking_stage1a: boolean
+  thinking_stage1a: boolean                // LEGACY
+  thinking_stage1a_cast: boolean           // v3.14
+  thinking_stage1a_glossary: boolean       // v3.14
   thinking_stage1b: boolean
   thinking_stage2: boolean
   thinking_stage3: boolean
@@ -239,6 +252,13 @@ function loadStored(): StoredConfig {
         // 1B mặc định nhẹ hơn (như tier medium) — nếu không có medium thì dùng cùng 1A
         parsed.model_stage1b = parsed.model_medium || parsed.model_stage1
       }
+      // v3.14 migration: tách stage1a cũ → stage1a_cast (heavy) + stage1a_glossary (medium)
+      if (parsed.model_stage1a && !parsed.model_stage1a_cast) {
+        parsed.model_stage1a_cast = parsed.model_stage1a
+      }
+      if (!parsed.model_stage1a_glossary) {
+        parsed.model_stage1a_glossary = parsed.model_medium || parsed.model_stage1a || ''
+      }
       if (typeof parsed.heavy_thinking === 'boolean' && parsed.thinking_stage1 === undefined) {
         parsed.thinking_stage1      = parsed.heavy_thinking
         parsed.thinking_stage4      = parsed.translate_thinking ?? parsed.heavy_thinking
@@ -252,6 +272,11 @@ function loadStored(): StoredConfig {
       if (typeof parsed.thinking_stage1 === 'boolean' && parsed.thinking_stage1a === undefined) {
         parsed.thinking_stage1a = parsed.thinking_stage1
         parsed.thinking_stage1b = false  // 1B nhẹ — không cần thinking
+      }
+      // v3.14: migrate thinking_stage1a → cast/glossary
+      if (typeof parsed.thinking_stage1a === 'boolean' && parsed.thinking_stage1a_cast === undefined) {
+        parsed.thinking_stage1a_cast = parsed.thinking_stage1a
+        parsed.thinking_stage1a_glossary = false  // glossary task nhẹ
       }
       return { ...defaultStored(), ...parsed }
     }
@@ -279,7 +304,11 @@ function defaultStored(): StoredConfig {
     model_stage0:      get('stage0', 'gemini'),
     // Stage 1 legacy combined — KHÔNG còn UI nhưng giữ cho backward compat
     model_stage1:      'gemini-2.5-pro',
-    model_stage1a:     get('stage1a', 'gemini'),
+    // Stage 1A legacy gộp — KHÔNG còn UI sau v3.14, giữ làm fallback
+    model_stage1a:     'gemini-2.5-pro',
+    // v3.14: tách 1A.1 Cast + 1A.2 Glossary riêng
+    model_stage1a_cast:     get('stage1a_cast', 'gemini'),
+    model_stage1a_glossary: get('stage1a_glossary', 'gemini'),
     model_stage1b:     get('stage1b', 'gemini'),
     model_stage2:      get('stage2', 'gemini'),
     model_stage3:      get('stage3', 'gemini'),
@@ -288,7 +317,9 @@ function defaultStored(): StoredConfig {
     model_retranslate: get('retranslate', 'gemini'),
     thinking_stage0:      STAGES.find(s => s.key === 'stage0')!.defaultThinking,
     thinking_stage1:      true,  // legacy
-    thinking_stage1a:     STAGES.find(s => s.key === 'stage1a')!.defaultThinking,
+    thinking_stage1a:     true,  // legacy gộp
+    thinking_stage1a_cast:     STAGES.find(s => s.key === 'stage1a_cast')!.defaultThinking,
+    thinking_stage1a_glossary: STAGES.find(s => s.key === 'stage1a_glossary')!.defaultThinking,
     thinking_stage1b:     STAGES.find(s => s.key === 'stage1b')!.defaultThinking,
     thinking_stage2:      STAGES.find(s => s.key === 'stage2')!.defaultThinking,
     thinking_stage3:      STAGES.find(s => s.key === 'stage3')!.defaultThinking,
@@ -337,27 +368,32 @@ export default function ConfigPanel({
   const [translateThinking, setTranslateThinking] = useState(stored.translate_thinking)
 
   // ── v3.5: per-stage state ──────────────────────────────────────────
+  // v3.14: stage1a (legacy gộp) không còn UI nhưng giữ trong state để save backward-compat
   const [stageModels, setStageModels] = useState<Record<StageDef['key'], string>>({
-    stage0:      stored.model_stage0,
-    stage1:      stored.model_stage1,
-    stage1a:     stored.model_stage1a,
-    stage1b:     stored.model_stage1b,
-    stage2:      stored.model_stage2,
-    stage3:      stored.model_stage3,
-    stage4:      stored.model_stage4,
-    stage5:      stored.model_stage5,
-    retranslate: stored.model_retranslate,
+    stage0:            stored.model_stage0,
+    stage1:            stored.model_stage1,
+    stage1a:           stored.model_stage1a,                  // LEGACY
+    stage1a_cast:      stored.model_stage1a_cast,             // v3.14
+    stage1a_glossary:  stored.model_stage1a_glossary,         // v3.14
+    stage1b:           stored.model_stage1b,
+    stage2:            stored.model_stage2,
+    stage3:            stored.model_stage3,
+    stage4:            stored.model_stage4,
+    stage5:            stored.model_stage5,
+    retranslate:       stored.model_retranslate,
   })
   const [stageThinking, setStageThinking] = useState<Record<StageDef['key'], boolean>>({
-    stage0:      stored.thinking_stage0,
-    stage1:      stored.thinking_stage1,
-    stage1a:     stored.thinking_stage1a,
-    stage1b:     stored.thinking_stage1b,
-    stage2:      stored.thinking_stage2,
-    stage3:      stored.thinking_stage3,
-    stage4:      stored.thinking_stage4,
-    stage5:      stored.thinking_stage5,
-    retranslate: stored.thinking_retranslate,
+    stage0:            stored.thinking_stage0,
+    stage1:            stored.thinking_stage1,
+    stage1a:           stored.thinking_stage1a,               // LEGACY
+    stage1a_cast:      stored.thinking_stage1a_cast,          // v3.14
+    stage1a_glossary:  stored.thinking_stage1a_glossary,      // v3.14
+    stage1b:           stored.thinking_stage1b,
+    stage2:            stored.thinking_stage2,
+    stage3:            stored.thinking_stage3,
+    stage4:            stored.thinking_stage4,
+    stage5:            stored.thinking_stage5,
+    retranslate:       stored.thinking_retranslate,
   })
   const setStageModel = (key: StageDef['key'], v: string) =>
     setStageModels(prev => ({ ...prev, [key]: v }))
@@ -400,6 +436,8 @@ export default function ConfigPanel({
       model_stage0:      stageModels.stage0,
       model_stage1:      stageModels.stage1,
       model_stage1a:     stageModels.stage1a,
+      model_stage1a_cast:     stageModels.stage1a_cast,        // v3.14
+      model_stage1a_glossary: stageModels.stage1a_glossary,    // v3.14
       model_stage1b:     stageModels.stage1b,
       model_stage2:      stageModels.stage2,
       model_stage3:      stageModels.stage3,
@@ -409,6 +447,8 @@ export default function ConfigPanel({
       thinking_stage0:      stageThinking.stage0,
       thinking_stage1:      stageThinking.stage1,
       thinking_stage1a:     stageThinking.stage1a,
+      thinking_stage1a_cast:     stageThinking.stage1a_cast,         // v3.14
+      thinking_stage1a_glossary: stageThinking.stage1a_glossary,     // v3.14
       thinking_stage1b:     stageThinking.stage1b,
       thinking_stage2:      stageThinking.stage2,
       thinking_stage3:      stageThinking.stage3,
@@ -505,6 +545,8 @@ export default function ConfigPanel({
       model_stage0:      stageModels.stage0.trim() || null,
       model_stage1:      stageModels.stage1.trim() || null,
       model_stage1a:     stageModels.stage1a.trim() || null,
+      model_stage1a_cast:     stageModels.stage1a_cast.trim() || null,         // v3.14
+      model_stage1a_glossary: stageModels.stage1a_glossary.trim() || null,     // v3.14
       model_stage1b:     stageModels.stage1b.trim() || null,
       model_stage2:      stageModels.stage2.trim() || null,
       model_stage3:      stageModels.stage3.trim() || null,
@@ -514,6 +556,8 @@ export default function ConfigPanel({
       thinking_stage0:      stageThinking.stage0,
       thinking_stage1:      stageThinking.stage1,
       thinking_stage1a:     stageThinking.stage1a,
+      thinking_stage1a_cast:     stageThinking.stage1a_cast,           // v3.14
+      thinking_stage1a_glossary: stageThinking.stage1a_glossary,       // v3.14
       thinking_stage1b:     stageThinking.stage1b,
       thinking_stage2:      stageThinking.stage2,
       thinking_stage3:      stageThinking.stage3,
@@ -575,6 +619,7 @@ export default function ConfigPanel({
   const hasBible = status?.has_bible
   const hasCast = (status?.has_cast ?? false)
   const hasWorld = (status?.has_world ?? false)
+  const hasGlossary = (status?.has_glossary ?? false)   // v3.14
   const hasChunks = (status?.chunk_count ?? 0) > 0
   const hasSpeaker = (status?.speaker_assigned_count ?? 0) > 0
   const hasTranslated = (status?.translated_count ?? 0) > 0
@@ -672,6 +717,9 @@ export default function ConfigPanel({
                   stage1:      p.model_stage1      || '',
                   // v3 split: 1A và 1B nếu preset có thì lấy, không thì fallback stage1 cũ
                   stage1a:     (p as any).model_stage1a || p.model_stage1 || prev.stage1a,
+                  // v3.14: cast/glossary lấy từ preset (nếu có), fallback stage1a → stage1
+                  stage1a_cast:     (p as any).model_stage1a_cast || (p as any).model_stage1a || p.model_stage1 || prev.stage1a_cast,
+                  stage1a_glossary: (p as any).model_stage1a_glossary || (p as any).model_stage1a || p.model_stage1 || prev.stage1a_glossary,
                   stage1b:     (p as any).model_stage1b || p.model_stage1 || prev.stage1b,
                   stage2:      p.model_stage2      || '',
                   stage3:      p.model_stage3      || '',
@@ -986,9 +1034,10 @@ export default function ConfigPanel({
           <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-widest mb-2">
             Hoặc chạy 1 stage cụ thể (resume / debug)
           </div>
-          <div className="grid grid-cols-7 gap-2">
+          <div className="grid grid-cols-8 gap-2">
             <StageButton onClick={() => handleRunStage('normalize')} done={hasNormalized}>0. Chuẩn hóa</StageButton>
-            <StageButton onClick={() => handleRunStage('bible_1a')} done={hasCast}>1A. Cast</StageButton>
+            <StageButton onClick={() => handleRunStage('bible_cast')} done={hasCast}>1A. Cast</StageButton>
+            <StageButton onClick={() => handleRunStage('bible_glossary')} done={hasGlossary}>1A.2 Glossary</StageButton>
             <StageButton onClick={() => handleRunStage('bible_1b')} done={hasWorld} disabled={!hasCast}>1B. World</StageButton>
             <StageButton onClick={() => handleRunStage('chunks')} done={hasChunks} disabled={!hasBible}>2. Chunks</StageButton>
             <StageButton onClick={() => handleRunStage('speaker')} done={hasSpeaker} disabled={!hasChunks}>3. Speaker</StageButton>

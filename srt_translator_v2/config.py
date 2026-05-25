@@ -80,7 +80,12 @@ class ModelConfig:
     # sẽ tự fallback nên các stage runner không cần biết về fields này.
     model_stage0:       str = ""   # Chuẩn hóa phụ đề          (fallback: light)
     model_stage1:       str = ""   # Bible LEGACY combined     (fallback: heavy) — vẫn giữ cho backward compat
-    model_stage1a:      str = ""   # Bible 1A Cast + Glossary  (fallback: stage1 → heavy)
+    model_stage1a:      str = ""   # Bible 1A LEGACY (cast+glossary gộp) (fallback: stage1 → heavy)
+    # v3.14: TÁCH stage1a thành 2 sub-stage để gán model riêng:
+    # - 1A.1 Cast: cần model heavy (Hán Việt chuẩn, output dài, risk loop)
+    # - 1A.2 Glossary: model nhẹ OK (output ngắn, ít risk)
+    model_stage1a_cast:     str = ""   # 1A.1 Cast    (fallback: stage1a → stage1 → heavy)
+    model_stage1a_glossary: str = ""   # 1A.2 Glossary (fallback: stage1a → stage1 → heavy)
     model_stage1b:      str = ""   # Bible 1B World + Arcs     (fallback: stage1 → heavy)
     model_stage2:       str = ""   # Chunks + Scenes           (fallback: medium)
     model_stage3:       str = ""   # Speaker                   (fallback: medium)
@@ -92,6 +97,9 @@ class ModelConfig:
     thinking_stage0:       Optional[bool] = None
     thinking_stage1:       Optional[bool] = None
     thinking_stage1a:      Optional[bool] = None
+    # v3.14: TÁCH stage1a thinking riêng cho cast/glossary
+    thinking_stage1a_cast:     Optional[bool] = None
+    thinking_stage1a_glossary: Optional[bool] = None
     thinking_stage1b:      Optional[bool] = None
     thinking_stage2:       Optional[bool] = None
     thinking_stage3:       Optional[bool] = None
@@ -101,11 +109,24 @@ class ModelConfig:
 
     # ── Resolvers ─────────────────────────────────────────────────────
     def get_model_for(self, stage: str) -> str:
-        """Trả model cho stage: 'stage0'..'stage5'|'stage1a'|'stage1b'|'retranslate'.
+        """Trả model cho stage: 'stage0'..'stage5'|'stage1a'|'stage1a_cast'|'stage1a_glossary'|'stage1b'|'retranslate'.
 
         Per-stage field rỗng → fallback tier mặc định.
+        Stage1a_cast/glossary rỗng → fallback về stage1a → stage1 → heavy.
         Stage1a/1b rỗng → fallback về stage1 (legacy) → fallback heavy.
         """
+        # v3.14: stage1a_cast / stage1a_glossary → stage1a → stage1 → heavy
+        if stage == "stage1a_cast":
+            v = self.model_stage1a_cast
+            if v and v.strip():
+                return v.strip()
+            stage = "stage1a"  # fallback chain
+        elif stage == "stage1a_glossary":
+            v = self.model_stage1a_glossary
+            if v and v.strip():
+                return v.strip()
+            stage = "stage1a"  # fallback chain
+
         # 1a/1b: nếu có giá trị riêng dùng nó, nếu không fallback về stage1
         if stage == "stage1a":
             v = self.model_stage1a
@@ -135,8 +156,19 @@ class ModelConfig:
     def get_thinking_for(self, stage: str) -> bool:
         """Trả thinking flag cho stage. None → fallback tier mặc định.
 
+        Stage1a_cast/glossary None → fallback về stage1a → stage1 → heavy_thinking.
         Stage1a/1b None → fallback về stage1 → fallback heavy_thinking.
         """
+        # v3.14: stage1a_cast / stage1a_glossary fallback chain
+        if stage == "stage1a_cast":
+            if self.thinking_stage1a_cast is not None:
+                return bool(self.thinking_stage1a_cast)
+            stage = "stage1a"
+        elif stage == "stage1a_glossary":
+            if self.thinking_stage1a_glossary is not None:
+                return bool(self.thinking_stage1a_glossary)
+            stage = "stage1a"
+
         if stage == "stage1a":
             if self.thinking_stage1a is not None:
                 return bool(self.thinking_stage1a)

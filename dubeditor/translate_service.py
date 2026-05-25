@@ -40,7 +40,11 @@ from models import (
     Character as V3Character,
 )
 from stages.stage0_normalize import run_stage0_normalize, Stage0Report
-from stages.stage1_bible import run_stage1_bible, run_stage1a_only, run_stage1b_only
+from stages.stage1_bible import (
+    run_stage1_bible, run_stage1a_only, run_stage1b_only,
+    # v3.14: tách 1A thành 2 stage độc lập (cast / glossary)
+    run_stage1a_cast_only, run_stage1a_glossary_only,
+)
 from stages.stage2_scenes import run_stage2_chunks
 from stages.stage3_speaker import run_stage3_speaker
 from stages.stage4_translate import (
@@ -101,12 +105,13 @@ def save_bible_to_db(db: Session, project_id: int, v3_bible: V3Bible,
     ).order_by(DBBible.version.desc()).first()
     next_version = (last.version + 1) if last else 1
 
-    # Cost stats
+    # Cost stats — v3.14: tách 1A thành 1a1_cast + 1a2_glossary
     bible_stats = tracker.by_stage if tracker else {}
     tokens_in = 0
     tokens_out = 0
     cost = 0.0
-    for k in ("1a_cast", "1b_world", "1c_glossary"):
+    for k in ("1a_cast", "1a_cast_glossary", "1a1_cast", "1a2_glossary",
+              "1b_world", "1c_glossary"):
         if k in bible_stats:
             tokens_in += bible_stats[k]["tokens_in"]
             tokens_out += bible_stats[k]["tokens_out"]
@@ -520,8 +525,13 @@ def save_translations_to_db(db: Session, project_id: int,
         duration = max(0.01, sub.end_time - sub.start_time)
         sub.cps_value = calculate_cps(text_v1, duration) if text_v1 else None
 
-        sub.emotion = info.get("emotion")
-        sub.intensity = info.get("intensity", 5)
+        # v3.14: KHÔNG ghi emotion/intensity nữa.
+        # Stage 4 prompt đã bỏ 2 field này (tiết kiệm ~28% output token).
+        # Subtitle.emotion/intensity giữ giá trị cũ (nếu có) hoặc null cho data mới.
+        # TTS pipeline fallback "normal" mode khi emotion=None (qua voice_modes.py).
+        # KHÔNG ghi 2 dòng dưới đây nữa:
+        # sub.emotion = info.get("emotion")
+        # sub.intensity = info.get("intensity", 5)
 
         # Update needs_review
         import re
@@ -607,7 +617,8 @@ def build_pipeline_config(req) -> PipelineConfig:
     # Ưu tiên hơn tier cũ. Stage runner gọi config.models.get_model_for("stageN")
     # tự fallback về tier nếu per-stage field rỗng.
     # v3: thêm stage1a + stage1b (Bible split). Stage1 legacy vẫn được forward.
-    for stage_key in ("stage0", "stage1", "stage1a", "stage1b",
+    # v3.14: thêm stage1a_cast + stage1a_glossary (tách 1A) — model riêng từng phần
+    for stage_key in ("stage0", "stage1", "stage1a", "stage1a_cast", "stage1a_glossary", "stage1b",
                        "stage2", "stage3", "stage4", "stage5", "retranslate"):
         model_attr = f"model_{stage_key}"
         think_attr = f"thinking_{stage_key}"
@@ -1034,6 +1045,96 @@ class TranslateRunner:
         await self._emit("bible_1a_done", 20,
                          f"Stage 1A xong: {len(cast.characters)} nhân vật, "
                          f"{len(glossary.terms)} thuật ngữ")
+        return bible
+
+    # ──────────────────────────────────────────────────────────────────
+    # v3.14: Tách 1A thành 2 stage độc lập
+    # ──────────────────────────────────────────────────────────────────
+
+    async def run_bible_cast(self) -> V3Bible:
+        """Stage 1A.1 — chỉ trích Cast (characters). Giữ glossary + world cũ nếu có."""
+        await self._emit("bible_cast", 0, "Stage 1A.1: Trích xuất nhân vật...")
+        self._check_cancelled()
+        self._save_status("running", 0.0)
+
+        entries = self._load_subtitles_as_entries()
+        if not entries:
+            raise ValueError("Project không có subtitles")
+
+        await self._emit("bible_cast", 5, f"1A.1: Trích xuất nhân vật ({len(entries)} dòng)...")
+
+        cast = await run_stage1a_cast_only(entries, self.config, self.tracker)
+        self._check_cancelled()
+
+        if not cast.characters:
+            logger.warning("[Stage 1A.1] Cast rỗng — KHÔNG save Bible.")
+            await self._emit("bible_cast_done", 20, "1A.1: 0 nhân vật (KHÔNG lưu).")
+            return V3Bible(
+                cast=cast,
+                world=V3World(genre=[], genre_id="other", era="", tone="", plot="", arcs=[]),
+                glossary=V3Glossary(terms=[]),
+                model_used=self.config.models.get_model_for("stage1a"),
+            )
+
+        # Giữ glossary + world cũ nếu Bible đã tồn tại
+        existing = load_active_bible_from_db(self.db, self.project_id)
+        glossary = existing.glossary if existing and existing.glossary else V3Glossary(terms=[])
+        if existing and existing.world and existing.world.arcs:
+            world = existing.world
+        else:
+            world = V3World(genre=[], genre_id="other", era="", tone="", plot="", arcs=[])
+
+        bible = V3Bible(
+            cast=cast,
+            world=world,
+            glossary=glossary,
+            model_used=self.config.models.get_model_for("stage1a"),
+        )
+
+        await self._emit("bible_cast_saved", 15, "Lưu Cast...")
+        save_bible_to_db(self.db, self.project_id, bible, self.tracker)
+        self._bible = bible
+
+        await self._emit("bible_cast_done", 20,
+                         f"Stage 1A.1 xong: {len(cast.characters)} nhân vật")
+        return bible
+
+    async def run_bible_glossary(self) -> V3Bible:
+        """Stage 1A.2 — chỉ trích Glossary (terms). Giữ cast + world cũ nếu có."""
+        await self._emit("bible_glossary", 0, "Stage 1A.2: Trích xuất thuật ngữ...")
+        self._check_cancelled()
+        self._save_status("running", 0.0)
+
+        entries = self._load_subtitles_as_entries()
+        if not entries:
+            raise ValueError("Project không có subtitles")
+
+        await self._emit("bible_glossary", 5, f"1A.2: Trích xuất thuật ngữ ({len(entries)} dòng)...")
+
+        glossary = await run_stage1a_glossary_only(entries, self.config, self.tracker)
+        self._check_cancelled()
+
+        # Giữ cast + world cũ nếu Bible đã tồn tại
+        existing = load_active_bible_from_db(self.db, self.project_id)
+        cast = existing.cast if existing and existing.cast else V3Cast(characters=[])
+        if existing and existing.world and existing.world.arcs:
+            world = existing.world
+        else:
+            world = V3World(genre=[], genre_id="other", era="", tone="", plot="", arcs=[])
+
+        bible = V3Bible(
+            cast=cast,
+            world=world,
+            glossary=glossary,
+            model_used=self.config.models.get_model_for("stage1a"),
+        )
+
+        await self._emit("bible_glossary_saved", 15, "Lưu Glossary...")
+        save_bible_to_db(self.db, self.project_id, bible, self.tracker)
+        self._bible = bible
+
+        await self._emit("bible_glossary_done", 20,
+                         f"Stage 1A.2 xong: {len(glossary.terms)} thuật ngữ")
         return bible
 
     async def run_bible_1b(self) -> V3Bible:
@@ -1556,6 +1657,10 @@ class TranslateRunner:
                 return await self.run_bible()
             elif stage == "bible_1a":
                 return await self.run_bible_1a()
+            elif stage == "bible_cast":
+                return await self.run_bible_cast()
+            elif stage == "bible_glossary":
+                return await self.run_bible_glossary()
             elif stage == "bible_1b":
                 return await self.run_bible_1b()
             elif stage in ("chunks", "scenes"):

@@ -285,7 +285,9 @@ class TranslateConfig(BaseModel):
     # Empty string / None → fallback về tier cũ (heavy/medium/light) tương ứng.
     model_stage0:       Optional[str] = None    # Stage 0 Chuẩn hóa
     model_stage1:       Optional[str] = None    # Stage 1 LEGACY combined (vẫn giữ backward compat)
-    model_stage1a:      Optional[str] = None    # Stage 1A Cast + Glossary (v3 split)
+    model_stage1a:      Optional[str] = None    # Stage 1A Cast + Glossary (v3 split — LEGACY gộp)
+    model_stage1a_cast:     Optional[str] = None    # v3.14: Stage 1A.1 Cast riêng
+    model_stage1a_glossary: Optional[str] = None    # v3.14: Stage 1A.2 Glossary riêng
     model_stage1b:      Optional[str] = None    # Stage 1B World + Arcs (v3 split)
     model_stage2:       Optional[str] = None    # Stage 2 Chunks + Scenes
     model_stage3:       Optional[str] = None    # Stage 3 Speaker
@@ -296,6 +298,8 @@ class TranslateConfig(BaseModel):
     thinking_stage0:       Optional[bool] = None
     thinking_stage1:       Optional[bool] = None
     thinking_stage1a:      Optional[bool] = None
+    thinking_stage1a_cast:     Optional[bool] = None    # v3.14
+    thinking_stage1a_glossary: Optional[bool] = None    # v3.14
     thinking_stage1b:      Optional[bool] = None
     thinking_stage2:       Optional[bool] = None
     thinking_stage3:       Optional[bool] = None
@@ -337,6 +341,9 @@ class TranslateStageRequest(TranslateConfig):
         "normalize",
         "bible",
         "bible_1a",
+        # v3.14: tách 1A → 2 stage độc lập
+        "bible_cast",
+        "bible_glossary",
         "bible_1b",
         "scenes",
         "chunks",
@@ -532,10 +539,12 @@ class TranslateStatusOut(BaseModel):
     progress:         float = 0.0
     has_bible:        bool = False
     # v3: cast + world tracking riêng để FE biết 1A xong nhưng 1B chưa
-    has_cast:         bool = False       # Bible có ≥1 nhân vật → coi là 1A xong
+    has_cast:         bool = False       # Bible có ≥1 nhân vật → coi là 1A.1 xong
     has_world:        bool = False       # Bible có ≥1 arc → coi là 1B xong
+    has_glossary:     bool = False       # Bible có ≥1 term → coi là 1A.2 xong
     cast_count:       int = 0            # số nhân vật trong Bible
     world_arcs_count: int = 0            # số arcs trong Bible.world
+    glossary_count:   int = 0            # số terms trong Bible.glossary
     chunk_count:      int = 0       # v3
     scene_count:      int = 0
     speaker_assigned_count: int = 0

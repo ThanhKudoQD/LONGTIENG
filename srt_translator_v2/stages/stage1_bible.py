@@ -1,14 +1,22 @@
 """
-Stage 1 — Bible v3 (refactored).
+Stage 1 — Bible v3.14 (refactored).
 
-2 sub-stages CHẠY TUẦN TỰ để tận dụng prompt cache:
-- 1A. Cast + Glossary (1 call heavy) — gộp lại vì cùng cần Hán Việt + ngữ cảnh
-- 1B. World + arc summaries (1 call medium) — chạy SAU 1A, cache hit SRT prefix
+3 sub-stages:
+- 1A.1 Cast       — parallel với 1A.2, prompt `bible_cast`, output key-shortened
+- 1A.2 Glossary   — parallel với 1A.1, prompt `bible_glossary`, output array compact
+- 1B   World+Arcs — chạy SAU 1A (cần cast), cache hit SRT prefix từ 1A
 
-Lý do gộp/tách:
-- Cast & Glossary cùng cần model Pro (heavy) cho Hán Việt chuẩn → gộp tiết kiệm 1 call
-- World+Arc cần reasoning về plot/structure → medium model đủ, output ngắn
-- Tuần tự (không song song) → call 2 dùng prompt cache của call 1 → giảm 50-90% input cost
+v3.14 changes:
+- TÁCH 1A thành 2 calls riêng (cast / glossary) → tránh MAX_TOKENS với phim
+  dài hoặc nhiều nhân vật, chạy parallel tiết kiệm thời gian
+- Output format compact: cast dùng key viết tắt (z/v/a/g/r/y/c/l),
+  glossary dùng array [z,v,c,n_or_null] — giảm ~30-40% output token
+- Backward-compat parser: vẫn đọc được format object cũ ("characters", "terms")
+
+Lý do thiết kế:
+- Cast & Glossary cùng cần model heavy (Hán Việt chuẩn) → cùng cấu hình `stage1a`
+- Parallel an toàn vì 2 task ĐỘC LẬP (không phụ thuộc data của nhau)
+- World+Arcs vẫn TUẦN TỰ sau 1A (cần cast làm input)
 """
 from __future__ import annotations
 import json
@@ -68,127 +76,224 @@ def split_for_cache(prompt: str) -> tuple[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────
-# 1A. CAST + GLOSSARY (gộp, 1 call heavy)
+# 1A. CAST + GLOSSARY (TÁCH thành 2 calls parallel, cache SRT prefix)
 # ─────────────────────────────────────────────────────────────────
+#
+# v3.14: TÁCH `bible_cast_glossary.txt` thành 2 prompt riêng:
+# - `bible_cast.txt`     → chỉ characters (output có thể lớn — 50-100 NV)
+# - `bible_glossary.txt` → chỉ terms (output nhỏ — 30-80 terms)
+#
+# Lý do tách:
+# 1. Tránh MAX_TOKENS: gộp khiến phim dài/nhiều NV vượt cap output model
+# 2. Output format compact: characters dùng key viết tắt (z/v/a/g/r/y/c/l),
+#    glossary dùng array compact [z,v,c,n_or_null]
+# 3. Parallel: chạy đồng thời tiết kiệm thời gian (~50%)
+# 4. Implicit cache hit: cả 2 prompt cùng kết thúc bằng SRT_FULL ở variable
+#    block → Gemini implicit cache khớp prefix instructions → tiết kiệm input
+# 5. Retry granular: hỏng cast không phải redo glossary và ngược lại
 
-async def stage1a_cast_and_glossary(
+
+async def _call_cast(
     entries: list[SrtEntry],
     config: PipelineConfig,
     tracker: CostTracker,
     client: httpx.AsyncClient,
-) -> tuple[Cast, Glossary]:
-    """Trích xuất nhân vật + thuật ngữ trong 1 call.
+) -> Cast:
+    """Call AI lấy Cast (characters)."""
+    logger.info("[Stage 1A.1] Extracting Cast...")
 
-    Lý do gộp:
-    - Cùng cần đọc toàn bộ SRT (input lớn nhất)
-    - Cùng cần Hán Việt chuẩn (model heavy)
-    - Cùng cần ngữ cảnh nhân vật để gán xưng hô (TỰ XƯNG ↔ Cast)
-    - Output 2 phần độc lập, AI không bị nhầm
-    """
-    logger.info("[Stage 1A] Extracting Cast + Glossary (1 call)...")
-
-    prompt_template = load_prompt("bible_cast_glossary", config)
+    prompt_template = load_prompt("bible_cast", config)
     srt_text = format_srt_for_prompt(entries, with_timing=False)
     prompt = prompt_template.replace("{SRT_FULL}", srt_text)
-
     cached_prefix, variable = split_for_cache(prompt)
 
-    _model_1a = config.models.get_model_for("stage1a")
-    _key_1a = config.get_api_key_for(_model_1a)
-    _thinking_1a = config.models.get_thinking_for("stage1a")
+    _model = config.models.get_model_for("stage1a_cast")
+    _key = config.get_api_key_for(_model)
+    _thinking = config.models.get_thinking_for("stage1a_cast")
 
     req = LLMRequest(
         prompt=variable if cached_prefix else prompt,
         cached_prefix=cached_prefix if cached_prefix else None,
-        model=_model_1a,
-        api_key=_key_1a,
-        temperature=0.2,
-        # v3 FIX: 20000 quá ít khi thinking=True (thinking tokens ăn budget).
-        # Set max (cap_max_output sẽ tự giới hạn theo model: Gemini 2.5 = 65536).
+        model=_model,
+        api_key=_key,
+        # v3.14 FIX: temperature 0.2 → 0.4 cho cast để giảm "repetition loop"
+        # (model determinstic quá khi gặp character nhiều cách gọi → lặp alias vô hạn → MAX_TOKENS)
+        temperature=0.4,
         max_output=65536,
         json_mode=True,
-        thinking=_thinking_1a,
+        thinking=_thinking,
         max_retries=config.concurrency.retry_max,
     )
-
-    # v3 DEBUG: log toàn bộ config request (mask key, KHÔNG log prompt text dài)
     logger.info(
-        f"[Stage 1A] REQUEST CONFIG: "
-        f"model={_model_1a!r}, "
-        f"api_key={'***' + _key_1a[-6:] if _key_1a and len(_key_1a) > 6 else ('EMPTY' if not _key_1a else _key_1a)}, "
-        f"key_len={len(_key_1a or '')}, "
-        f"provider_field={getattr(config, 'provider', '?')!r}, "
-        f"temperature=0.2, "
-        f"max_output=20000, "
-        f"json_mode=True, "
-        f"thinking={_thinking_1a!r}, "
-        f"max_retries={config.concurrency.retry_max}, "
+        f"[Stage 1A.1] REQUEST: model={_model!r}, "
         f"prompt_len={len(variable if cached_prefix else prompt)}, "
-        f"cached_prefix_len={len(cached_prefix) if cached_prefix else 0}, "
-        f"entries_count={len(entries)}"
+        f"cached_prefix_len={len(cached_prefix) if cached_prefix else 0}"
     )
 
-    resp = await call_llm(req, client=client, stage_tag="1a_cast_glossary")
-    tracker.add("1a_cast_glossary", resp)
+    resp = await call_llm(req, client=client, stage_tag="1a1_cast")
+    tracker.add("1a1_cast", resp)
 
-    # v3 DEBUG: log response stats (KHÔNG log text dài, chỉ stats + preview ngắn)
-    _resp_preview = (resp.text or "")[:300].replace("\n", " ")
     logger.info(
-        f"[Stage 1A] RESPONSE: "
-        f"tokens_in={resp.tokens_in}, "
-        f"tokens_out={resp.tokens_out}, "
-        f"cached_tokens={getattr(resp, 'cached_tokens', 0)}, "
-        f"timing_ms={resp.timing_ms}, "
-        f"finish_reason={getattr(resp, 'finish_reason', '?')!r}, "
-        f"text_len={len(resp.text or '')}, "
-        f"preview={_resp_preview!r}"
+        f"[Stage 1A.1] RESPONSE: tokens_in={resp.tokens_in}, "
+        f"tokens_out={resp.tokens_out}, cached_tokens={getattr(resp, 'cached_tokens', 0)}, "
+        f"finish_reason={getattr(resp, 'finish_reason', '?')!r}"
     )
 
-    data = parse_json_response(resp.text, default={"characters": [], "terms": []})
+    data = parse_json_response(resp.text, default={"c": []})
 
-    # v3 DEBUG: log parsed result
-    logger.info(
-        f"[Stage 1A] PARSED: "
-        f"characters_count={len(data.get('characters', []) or [])}, "
-        f"terms_count={len(data.get('terms', []) or [])}, "
-        f"top_keys={list(data.keys()) if isinstance(data, dict) else 'NOT_DICT'}"
-    )
-
-    # Parse Cast
+    # v3.14: Đọc cả format mới ("c") và format cũ ("characters") để backward-compat
+    characters_raw = data.get("c") or data.get("characters") or []
     characters = []
-    for ch_data in data.get("characters", []) or []:
+    dropped_aliases = 0
+    dropped_rels = 0
+    for ch_data in characters_raw:
         try:
+            zh = (ch_data.get("z") or ch_data.get("zh") or "")
+            # v3.14 FIX: Dedupe alias chống bug AI loop sinh ra
+            # ["商总", "商先生", "商湛", "商湛", "商湛", ...] (lặp 250 lần)
+            # → MAX_TOKENS. Dedupe + bỏ tên gốc + cap 5.
+            raw_alias = ch_data.get("a") or ch_data.get("alias") or []
+            if not isinstance(raw_alias, list):
+                raw_alias = []
+            # dict.fromkeys giữ thứ tự, loại trùng
+            alias = []
+            seen_alias = set()
+            for a in raw_alias:
+                if not isinstance(a, str):
+                    continue
+                a = a.strip()
+                if not a or a == zh or a in seen_alias:
+                    continue
+                seen_alias.add(a)
+                alias.append(a)
+                if len(alias) >= 5:
+                    break
+            dropped_aliases += len(raw_alias) - len(alias)
+
+            # v3.14 FIX: Dedupe rel (cùng zh-name nhiều entry)
+            raw_rel = ch_data.get("l") or ch_data.get("rel") or {}
+            if not isinstance(raw_rel, dict):
+                raw_rel = {}
+            rel = {}
+            for k, v in raw_rel.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    continue
+                k = k.strip()
+                v = v.strip()
+                if not k or not v or k == zh:
+                    continue
+                if k not in rel and len(rel) < 6:
+                    rel[k] = v
+                else:
+                    dropped_rels += 1
+
+            # v3.14 FIX: Cap character description 120 ký tự
+            char_desc = (ch_data.get("c") or ch_data.get("char") or "")
+            if len(char_desc) > 120:
+                char_desc = char_desc[:120].rstrip() + "..."
+
             ch = Character(
-                zh=ch_data.get("zh", "") or "",
-                vi=ch_data.get("vi", "") or "",
-                alias=ch_data.get("alias", []) or [],
-                g=ch_data.get("g", "?") or "?",
-                role=ch_data.get("role", "phu") or "phu",
-                age=ch_data.get("age"),
-                char=ch_data.get("char", "") or "",
-                rel=ch_data.get("rel", {}) or {},
+                zh=zh,
+                vi=(ch_data.get("v") or ch_data.get("vi") or ""),
+                alias=alias,
+                g=(ch_data.get("g") or "?"),
+                role=(ch_data.get("r") or ch_data.get("role") or "phu"),
+                age=(ch_data.get("y") or ch_data.get("age")),
+                char=char_desc,
+                rel=rel,
             )
             characters.append(ch)
         except Exception as e:
-            logger.warning(f"[Stage 1A] Skip invalid character: {e}")
+            logger.warning(f"[Stage 1A.1] Skip invalid character: {e}")
 
-    # Parse Glossary (KHÔNG còn field n — bỏ vì AI bịa số)
-    raw_terms = []
-    for t_data in data.get("terms", []) or []:
+    if dropped_aliases or dropped_rels:
+        logger.warning(
+            f"[Stage 1A.1] Dedupe: dropped {dropped_aliases} duplicate aliases, "
+            f"{dropped_rels} duplicate rels (AI repetition loop)"
+        )
+
+    logger.info(f"[Stage 1A.1] Got {len(characters)} characters")
+    return Cast(characters=characters)
+
+
+async def _call_glossary(
+    entries: list[SrtEntry],
+    config: PipelineConfig,
+    tracker: CostTracker,
+    client: httpx.AsyncClient,
+    srt_text: str,
+) -> Glossary:
+    """Call AI lấy Glossary (terms).
+
+    `srt_text` truyền vào để tránh tính lại format_srt_for_prompt (dùng để filter cuối).
+    """
+    logger.info("[Stage 1A.2] Extracting Glossary...")
+
+    prompt_template = load_prompt("bible_glossary", config)
+    prompt = prompt_template.replace("{SRT_FULL}", srt_text)
+    cached_prefix, variable = split_for_cache(prompt)
+
+    _model = config.models.get_model_for("stage1a_glossary")
+    _key = config.get_api_key_for(_model)
+    _thinking = config.models.get_thinking_for("stage1a_glossary")
+
+    req = LLMRequest(
+        prompt=variable if cached_prefix else prompt,
+        cached_prefix=cached_prefix if cached_prefix else None,
+        model=_model,
+        api_key=_key,
+        temperature=0.2,
+        max_output=32768,  # Glossary output nhỏ hơn cast nhiều
+        json_mode=True,
+        thinking=_thinking,
+        max_retries=config.concurrency.retry_max,
+    )
+    logger.info(
+        f"[Stage 1A.2] REQUEST: model={_model!r}, "
+        f"prompt_len={len(variable if cached_prefix else prompt)}, "
+        f"cached_prefix_len={len(cached_prefix) if cached_prefix else 0}"
+    )
+
+    resp = await call_llm(req, client=client, stage_tag="1a2_glossary")
+    tracker.add("1a2_glossary", resp)
+
+    logger.info(
+        f"[Stage 1A.2] RESPONSE: tokens_in={resp.tokens_in}, "
+        f"tokens_out={resp.tokens_out}, cached_tokens={getattr(resp, 'cached_tokens', 0)}, "
+        f"finish_reason={getattr(resp, 'finish_reason', '?')!r}"
+    )
+
+    data = parse_json_response(resp.text, default={"t": []})
+
+    # v3.14: Đọc cả format mới ("t" array) và format cũ ("terms" object) — backward-compat
+    raw_terms_input = data.get("t") or data.get("terms") or []
+    raw_terms: list[GlossaryTerm] = []
+    for entry in raw_terms_input:
         try:
-            raw_terms.append(GlossaryTerm(
-                zh=t_data.get("zh", "") or "",
-                vi=t_data.get("vi", "") or "",
-                cat=(t_data.get("cat") or t_data.get("category") or "khac") or "khac",
-                note=t_data.get("note"),
-            ))
+            if isinstance(entry, list):
+                # Format mới: [z, v, c, n_or_null]
+                if len(entry) < 3:
+                    continue
+                z = entry[0] or ""
+                v = entry[1] or ""
+                c = entry[2] or "khac"
+                n = entry[3] if len(entry) >= 4 else None
+                if isinstance(n, str) and not n.strip():
+                    n = None
+            elif isinstance(entry, dict):
+                # Format cũ: object zh/vi/cat/note
+                z = entry.get("z") or entry.get("zh") or ""
+                v = entry.get("v") or entry.get("vi") or ""
+                c = (entry.get("c") or entry.get("cat") or entry.get("category") or "khac")
+                n = entry.get("n") or entry.get("note")
+            else:
+                continue
+
+            raw_terms.append(GlossaryTerm(zh=z, vi=v, cat=c, note=n))
         except Exception as e:
-            logger.warning(f"[Stage 1A] Skip invalid term: {e}")
+            logger.warning(f"[Stage 1A.2] Skip invalid term: {e}")
 
     # ━━━ FILTER: bỏ term xuất hiện < 2 lần (trừ cliche) ━━━
-    # AI hay phá rule "term phải lặp ≥ 2 lần" — code đếm thật để loại term thừa.
-    # Cliche giữ lại dù xuất hiện 1 lần vì là cụm điển hình quan trọng.
-    srt_text = format_srt_for_prompt(entries, with_timing=False)
     terms = []
     dropped = 0
     for term in raw_terms:
@@ -199,13 +304,47 @@ async def stage1a_cast_and_glossary(
             terms.append(term)
         else:
             dropped += 1
-            logger.debug(f"[Stage 1A] Drop term '{term.zh}' (count={actual_count}, cat={term.cat})")
+            logger.debug(f"[Stage 1A.2] Drop term '{term.zh}' (count={actual_count}, cat={term.cat})")
 
     if dropped:
-        logger.info(f"[Stage 1A] Dropped {dropped} terms appearing <2 times (kept {len(terms)})")
+        logger.info(f"[Stage 1A.2] Dropped {dropped} terms appearing <2 times (kept {len(terms)})")
 
-    logger.info(f"[Stage 1A] Got {len(characters)} characters, {len(terms)} terms")
-    return Cast(characters=characters), Glossary(terms=terms)
+    logger.info(f"[Stage 1A.2] Got {len(terms)} terms")
+    return Glossary(terms=terms)
+
+
+async def stage1a_cast_and_glossary(
+    entries: list[SrtEntry],
+    config: PipelineConfig,
+    tracker: CostTracker,
+    client: httpx.AsyncClient,
+) -> tuple[Cast, Glossary]:
+    """Trích xuất nhân vật + thuật ngữ.
+
+    v3.14: TÁCH thành 2 calls PARALLEL.
+    - 1A.1 cast: prompt `bible_cast`, output format key-shortened
+    - 1A.2 glossary: prompt `bible_glossary`, output format array compact
+
+    Cả 2 calls cùng kết thúc bằng SRT_FULL → Gemini implicit cache prefix
+    chung của instructions; bù lại tăng input vì gửi SRT 2 lần, nhưng tránh
+    được MAX_TOKENS khi gộp.
+    """
+    logger.info("[Stage 1A] Extracting Cast + Glossary (2 parallel calls)...")
+
+    # Format SRT 1 lần dùng chung cho cả 2 calls (cùng input)
+    srt_text = format_srt_for_prompt(entries, with_timing=False)
+
+    # Chạy parallel
+    import asyncio
+    cast, glossary = await asyncio.gather(
+        _call_cast(entries, config, tracker, client),
+        _call_glossary(entries, config, tracker, client, srt_text),
+    )
+
+    logger.info(
+        f"[Stage 1A] DONE. {len(cast.characters)} characters, {len(glossary.terms)} terms"
+    )
+    return cast, glossary
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -430,6 +569,39 @@ async def run_stage1a_only(
         cast, glossary = await stage1a_cast_and_glossary(entries, config, tracker, client)
     logger.info(f"[Stage 1A] DONE. {len(cast.characters)} cast, {len(glossary.terms)} terms")
     return cast, glossary
+
+
+# v3.14: Runners độc lập cho 1A.1 (cast) và 1A.2 (glossary) — user có thể
+# chạy riêng từng cái trong UI để dễ debug + retry granular.
+async def run_stage1a_cast_only(
+    entries: list[SrtEntry],
+    config: PipelineConfig,
+    tracker: CostTracker,
+) -> Cast:
+    """Stage 1A.1 — chỉ trích Cast (characters)."""
+    logger.info("=" * 60)
+    logger.info("STAGE 1A.1 — CAST ONLY")
+    logger.info("=" * 60)
+    async with httpx.AsyncClient() as client:
+        cast = await _call_cast(entries, config, tracker, client)
+    logger.info(f"[Stage 1A.1] DONE. {len(cast.characters)} characters")
+    return cast
+
+
+async def run_stage1a_glossary_only(
+    entries: list[SrtEntry],
+    config: PipelineConfig,
+    tracker: CostTracker,
+) -> Glossary:
+    """Stage 1A.2 — chỉ trích Glossary (terms)."""
+    logger.info("=" * 60)
+    logger.info("STAGE 1A.2 — GLOSSARY ONLY")
+    logger.info("=" * 60)
+    srt_text = format_srt_for_prompt(entries, with_timing=False)
+    async with httpx.AsyncClient() as client:
+        glossary = await _call_glossary(entries, config, tracker, client, srt_text)
+    logger.info(f"[Stage 1A.2] DONE. {len(glossary.terms)} terms")
+    return glossary
 
 
 async def run_stage1b_only(

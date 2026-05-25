@@ -256,12 +256,28 @@ async def call_openai_compat(req: LLMRequest, client: httpx.AsyncClient,
     else:
         messages.append({"role": "user", "content": req.prompt})
 
+    # v3.14 FIX: OpenAI reasoning models (gpt-5*, o1*, o3*, o4*) dùng
+    # `max_completion_tokens` thay vì `max_tokens` (cũ legacy).
+    # Legacy models (gpt-4*, gpt-3.5*) vẫn dùng `max_tokens`.
+    # Reasoning models cũng KHÔNG support temperature ≠ 1 (chỉ default).
+    _model_lower = req.model.lower()
+    _is_reasoning = (
+        _model_lower.startswith("gpt-5")
+        or _model_lower.startswith("o1")
+        or _model_lower.startswith("o3")
+        or _model_lower.startswith("o4")
+    )
+    _max_token_field = "max_completion_tokens" if _is_reasoning else "max_tokens"
+
     payload = {
         "model": req.model,
         "messages": messages,
-        "temperature": req.temperature,
-        "max_tokens": cap_max_output(req.max_output, req.model),
+        _max_token_field: cap_max_output(req.max_output, req.model),
     }
+    # v3.14: reasoning models chỉ accept temperature mặc định (1) → bỏ field
+    # để model dùng default. Legacy models vẫn truyền temperature từ request.
+    if not _is_reasoning:
+        payload["temperature"] = req.temperature
 
     if req.json_mode:
         payload["response_format"] = {"type": "json_object"}
