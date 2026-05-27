@@ -28,12 +28,15 @@ import {
 import ConfigPanel from './translate/ConfigPanel'
 import BibleViewer from './translate/BibleViewer'
 import SceneList from './translate/SceneList'
+import ArcList from './translate/ArcList'  // v4.4: thay SceneList khi không có chunks
 import SubtitlesView from './translate/SubtitlesView'
 import CleanedView from './translate/CleanedView'
 import IssueQueue from './translate/IssueQueue'
 import ProgressLog from './translate/ProgressLog'
+import ManualTranslatePanel from './translate/ManualTranslatePanel'  // v3.15
+import ManualTranslatePanelMega from './translate/ManualTranslatePanelMega'  // v4 mega
 
-type Tab = 'overview' | 'bible' | 'cleaned' | 'scenes' | 'subtitles' | 'issues' | 'logs'
+type Tab = 'overview' | 'bible' | 'cleaned' | 'scenes' | 'subtitles' | 'issues' | 'logs' | 'manual' | 'manual_mega'
 
 // v3: Map next_stage code → label hiển thị (module scope để SSE closure dùng ổn định)
 const NEXT_STAGE_LABEL: Record<string, string> = {
@@ -499,7 +502,11 @@ export default function TranslatePage({
           📖 Bible {bible && <Pill>{bible.cast?.characters?.length || 0}</Pill>}
         </TabButton>
         <TabButton active={tab === 'scenes'} onClick={() => setTab('scenes')}>
-          🎬 Chunks {chunks.length > 0 && <Pill>{chunks.length}</Pill>}
+          {chunks.length > 0 ? (
+            <>🎬 Chunks <Pill>{chunks.length}</Pill></>
+          ) : (
+            <>🎬 Arcs {arcs.length > 0 && <Pill>{arcs.length}</Pill>}</>
+          )}
         </TabButton>
         <TabButton active={tab === 'subtitles'} onClick={() => setTab('subtitles')}>
           📝 Phụ đề {project.subtitle_count > 0 && <Pill>{project.subtitle_count}</Pill>}
@@ -511,6 +518,12 @@ export default function TranslatePage({
           📜 Logs {(progressEvents.length + llmCalls.length) > 0 && (
             <Pill>{progressEvents.length}+{llmCalls.length}</Pill>
           )}
+        </TabButton>
+        <TabButton active={tab === 'manual'} onClick={() => setTab('manual')}>
+          🛠️ Thủ công
+        </TabButton>
+        <TabButton active={tab === 'manual_mega'} onClick={() => setTab('manual_mega')}>
+          🚀 Thủ công Mega <span className="ml-1 text-[10px] px-1 rounded bg-gradient-to-r from-purple-500 to-pink-500 text-white">v4</span>
         </TabButton>
       </div>
 
@@ -542,15 +555,19 @@ export default function TranslatePage({
         )}
 
         {tab === 'scenes' && (
-          <SceneList
-            projectId={projectId}
-            chunks={chunks}
-            scenes={scenes}
-            arcs={arcs}
-            issues={issues}
-            onIssuesUpdate={() => translateApi.listIssues(projectId, { resolved: false }).then(setIssues)}
-            onChunksRefresh={refreshChunks}
-          />
+          chunks.length > 0 ? (
+            <SceneList
+              projectId={projectId}
+              chunks={chunks}
+              scenes={scenes}
+              arcs={arcs}
+              issues={issues}
+              onIssuesUpdate={() => translateApi.listIssues(projectId, { resolved: false }).then(setIssues)}
+              onChunksRefresh={refreshChunks}
+            />
+          ) : (
+            <ArcList projectId={projectId} arcs={arcs} />
+          )
         )}
 
         {tab === 'subtitles' && (
@@ -567,6 +584,29 @@ export default function TranslatePage({
 
         {tab === 'logs' && (
           <ProgressLog events={progressEvents} llmCalls={llmCalls} />
+        )}
+
+        {tab === 'manual' && (
+          <ManualTranslatePanel
+            projectId={projectId}
+            onDataChanged={() => {
+              // Refresh tất cả data sau khi user apply 1 stage thành công
+              refreshStatus()
+              refreshBible()
+              refreshChunks()
+            }}
+          />
+        )}
+
+        {tab === 'manual_mega' && (
+          <ManualTranslatePanelMega
+            projectId={projectId}
+            onDataChanged={() => {
+              refreshStatus()
+              refreshBible()
+              refreshChunks()
+            }}
+          />
         )}
       </div>
 

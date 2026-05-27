@@ -274,3 +274,261 @@ export const settingsApi = {
   setDefaultPreset: (id: number) =>
     api.post(`/settings/presets/${id}/default`).then(r => r.data),
 }
+
+
+// ─── v3.15: Manual Translate (Dịch Thủ công) ────────────────────────────────
+//
+// Code build prompt → user copy ra ChatGPT/Claude/Gemini web → user paste
+// response về → code parse và lưu DB. KHÔNG gọi API LLM thật.
+
+export interface ManualStageInfo {
+  stage: string
+  label: string
+  description: string
+  ready: boolean
+  has_data: boolean
+  units_count: number
+  dependency_msg?: string | null
+  // v3.15: progress thủ công
+  applied_units_count: number
+  built_units_count: number
+  failed_units_count: number
+}
+
+export interface ManualUnitInfo {
+  unit_key: string
+  label: string
+  status: string  // pending | built | applied | failed
+  has_prompt: boolean
+  has_response: boolean
+  applied_at?: string | null
+  apply_summary?: string | null
+}
+
+export interface ManualBuiltPrompt {
+  stage: string
+  unit_key: string
+  label: string
+  prompt: string
+  meta: Record<string, any>
+  char_count: number
+  // v3.15
+  status: string
+  raw_response: string
+  apply_summary?: string | null
+  applied_at?: string | null
+  from_cache: boolean
+}
+
+export interface ManualApplyResult {
+  stage: string
+  unit_key: string
+  ok: boolean
+  summary: string
+  counts: Record<string, number>
+  warnings: string[]
+  errors: string[]
+  status: string
+  applied_at?: string | null
+}
+
+export interface ManualUnitState {
+  stage: string
+  unit_key: string
+  label?: string | null
+  status: string
+  prompt: string
+  raw_response: string
+  meta: Record<string, any>
+  apply_summary?: string | null
+  apply_counts: Record<string, number>
+  apply_warnings: string[]
+  apply_errors: string[]
+  built_at?: string | null
+  applied_at?: string | null
+  updated_at?: string | null
+}
+
+export const manualTranslateApi = {
+  listStages: (pid: number) =>
+    api.get<ManualStageInfo[]>(`/projects/${pid}/manual-translate/stages`)
+       .then(r => r.data),
+
+  listUnits: (pid: number, stage: string) =>
+    api.get<ManualUnitInfo[]>(`/projects/${pid}/manual-translate/units`, {
+      params: { stage }
+    }).then(r => r.data),
+
+  buildPrompt: (pid: number, stage: string, unit_key?: string,
+                force_rebuild = false) =>
+    api.post<ManualBuiltPrompt>(`/projects/${pid}/manual-translate/build-prompt`, {
+      stage, unit_key, force_rebuild
+    }).then(r => r.data),
+
+  applyResponse: (pid: number, stage: string, unit_key: string,
+                   meta: Record<string, any>, raw_response: string) =>
+    api.post<ManualApplyResult>(`/projects/${pid}/manual-translate/apply-response`, {
+      stage, unit_key, meta, raw_response
+    }).then(r => r.data),
+
+  // v3.15: persistence
+  getUnitState: (pid: number, stage: string, unit_key: string) =>
+    api.get<ManualUnitState | null>(`/projects/${pid}/manual-translate/unit-state`, {
+      params: { stage, unit_key }
+    }).then(r => r.data),
+
+  savePromptEdit: (pid: number, stage: string, unit_key: string, prompt: string) =>
+    api.post(`/projects/${pid}/manual-translate/save-prompt-edit`, {
+      stage, unit_key, prompt
+    }).then(r => r.data),
+
+  saveResponseDraft: (pid: number, stage: string, unit_key: string,
+                       raw_response: string) =>
+    api.post(`/projects/${pid}/manual-translate/save-response-draft`, {
+      stage, unit_key, raw_response
+    }).then(r => r.data),
+
+  resetUnit: (pid: number, stage: string, unit_key?: string) =>
+    api.post(`/projects/${pid}/manual-translate/reset`, {
+      stage, unit_key
+    }).then(r => r.data),
+}
+
+// ─── v4: Manual Translate Mega-Chunk ───────────────────────────────────────
+//
+// Workflow tối ưu: 5 stage, ~10-13 paste/phim (vs 60 của v3).
+// 4 endpoint chính ở /manual-translate-mega/*, 4 endpoint phụ
+// (unit-state, save-prompt-edit, save-response-draft, reset) dùng lại v3
+// nhưng stage có hậu tố "_mega" để namespace tách biệt.
+
+export interface ManualMegaStageInfo extends ManualStageInfo {
+  expected_units: number
+}
+
+const M = (stage: string) => stage.endsWith('_mega') ? stage : stage + '_mega'
+
+export const manualTranslateMegaApi = {
+  // ─── 4 endpoint v4 chính ──────────────────────────────────────
+  listStages: (pid: number) =>
+    api.get<ManualMegaStageInfo[]>(`/projects/${pid}/manual-translate-mega/stages`)
+       .then(r => r.data),
+
+  listUnits: (pid: number, stage: string) =>
+    api.get<ManualUnitInfo[]>(`/projects/${pid}/manual-translate-mega/units`, {
+      params: { stage }
+    }).then(r => r.data),
+
+  buildPrompt: async (pid: number, stage: string, unit_key?: string,
+                       _force_rebuild = false,
+                       options?: Record<string, any>): Promise<ManualBuiltPrompt> => {
+    const r = await api.post<{
+      stage: string; unit_key: string; label: string;
+      prompt: string; meta: Record<string, any>;
+      char_count: number; estimated_tokens: number;
+    }>(`/projects/${pid}/manual-translate-mega/build-prompt`, {
+      stage, unit_key, options
+    })
+    // Backend v4 không trả status/raw_response/from_cache → bù từ getUnitState
+    let extra: Partial<ManualBuiltPrompt> = {
+      status: 'built',
+      raw_response: '',
+      apply_summary: null,
+      applied_at: null,
+      from_cache: false,
+    }
+    try {
+      const state = await manualTranslateMegaApi.getUnitState(
+        pid, r.data.stage, r.data.unit_key
+      )
+      if (state) {
+        extra = {
+          status: state.status,
+          raw_response: state.raw_response || '',
+          apply_summary: state.apply_summary,
+          applied_at: state.applied_at,
+          from_cache: !!state.raw_response,
+        }
+      }
+    } catch { /* state có thể chưa tồn tại — OK */ }
+    return { ...r.data, ...extra } as ManualBuiltPrompt
+  },
+
+  // v4.1: lấy schema options cho 1 stage (vd presets + advanced flags)
+  getStageOptions: (pid: number, stage: string) =>
+    api.get<{
+      stage: string
+      presets: Array<{ key: string; label: string; description: string }>
+      default_preset?: string
+      advanced: Array<{
+        key: string
+        label: string
+        type: string
+        default: any
+      }>
+    }>(`/projects/${pid}/manual-translate-mega/stage-options`, {
+      params: { stage }
+    }).then(r => r.data),
+
+  applyResponse: async (pid: number, stage: string, unit_key: string,
+                         meta: Record<string, any>, raw_response: string
+                         ): Promise<ManualApplyResult> => {
+    const r = await api.post<{
+      stage: string; unit_key: string; ok: boolean; summary: string;
+      counts: Record<string, number>; warnings: string[]; errors: string[];
+    }>(`/projects/${pid}/manual-translate-mega/apply-response`, {
+      stage, unit_key, meta, raw_response
+    })
+    return {
+      ...r.data,
+      status: r.data.ok ? 'applied' : 'failed',
+      applied_at: r.data.ok ? new Date().toISOString() : null,
+    }
+  },
+
+  // ─── 4 endpoint phụ — gọi v3 với stage có hậu tố "_mega" ───────
+  getUnitState: (pid: number, stage: string, unit_key: string) =>
+    api.get<ManualUnitState | null>(`/projects/${pid}/manual-translate/unit-state`, {
+      params: { stage: M(stage), unit_key }
+    }).then(r => r.data),
+
+  savePromptEdit: (pid: number, stage: string, unit_key: string, prompt: string) =>
+    api.post(`/projects/${pid}/manual-translate/save-prompt-edit`, {
+      stage: M(stage), unit_key, prompt
+    }).then(r => r.data),
+
+  saveResponseDraft: (pid: number, stage: string, unit_key: string,
+                       raw_response: string) =>
+    api.post(`/projects/${pid}/manual-translate/save-response-draft`, {
+      stage: M(stage), unit_key, raw_response
+    }).then(r => r.data),
+
+  resetUnit: (pid: number, stage: string, unit_key?: string) =>
+    api.post(`/projects/${pid}/manual-translate/reset`, {
+      stage: M(stage), unit_key
+    }).then(r => r.data),
+
+  // ─── v4.2: Reset Bible (xóa Bible + Characters + StoryArcs) ────
+  resetBible: (pid: number) =>
+    api.delete<{
+      ok: boolean
+      summary: string
+      counts: Record<string, number>
+    }>(`/projects/${pid}/manual-translate-mega/bible`)
+       .then(r => r.data),
+
+  // ─── v4.2: Mega target config ─────────────────────────────────
+  getMegaTarget: (pid: number) =>
+    api.get<{
+      target: number
+      default: number
+      min: number
+      max: number
+    }>(`/projects/${pid}/manual-translate-mega/mega-target`)
+       .then(r => r.data),
+
+  setMegaTarget: (pid: number, target: number) =>
+    api.put<{ ok: boolean; target: number }>(
+      `/projects/${pid}/manual-translate-mega/mega-target`,
+      { target }
+    ).then(r => r.data),
+}

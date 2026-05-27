@@ -25,6 +25,7 @@ interface SubRow {
   variant_selected?: 1 | 2
   original_text: string | null
   speaker_zh: string | null
+  speaker_slot?: string | null   // v4.3: slot cho lồng tiếng (M/F/NAM_CHINH...)
   character: { id: number; name: string; color?: string } | null
   emotion: string | null
   intensity: number
@@ -64,6 +65,39 @@ function cpsColor(cps: number | null): string {
   if (cps > 18) return '#D97706'
   if (cps > 14) return '#6B7280'
   return '#059669'
+}
+
+// v4.3: Map slot key → label + màu (cho badge)
+const SLOT_BADGE: Record<string, { label: string; color: string; bg: string }> = {
+  // Mode SIMPLE
+  M: { label: 'Nam', color: '#1D4ED8', bg: '#DBEAFE' },
+  F: { label: 'Nữ', color: '#BE185D', bg: '#FCE7F3' },
+  // Mode MEDIUM
+  NAM_CHINH:     { label: 'Nam chính',     color: '#1E3A8A', bg: '#DBEAFE' },
+  NU_CHINH:      { label: 'Nữ chính',      color: '#9D174D', bg: '#FCE7F3' },
+  PHAN_DIEN_NAM: { label: 'P.diện nam',    color: '#7C2D12', bg: '#FED7AA' },
+  PHAN_DIEN_NU:  { label: 'P.diện nữ',     color: '#86198F', bg: '#F5D0FE' },
+  NAM_PHU:       { label: 'Nam phụ',       color: '#0E7490', bg: '#CFFAFE' },
+  NU_PHU:        { label: 'Nữ phụ',        color: '#A16207', bg: '#FEF3C7' },
+  NARRATION:     { label: 'Voice-over',    color: '#374151', bg: '#E5E7EB' },
+}
+
+/** v4.3: Trả về speaker key/label hiển thị cho 1 sub.
+ *  Ưu tiên: speaker_slot > character.name > speaker_zh */
+function getSpeakerDisplay(sub: { speaker_slot?: string | null; character?: any; speaker_zh?: string | null }):
+  { key: string; label: string; color: string; bg: string } | null {
+  if (sub.speaker_slot && SLOT_BADGE[sub.speaker_slot]) {
+    const b = SLOT_BADGE[sub.speaker_slot]
+    return { key: sub.speaker_slot, label: b.label, color: b.color, bg: b.bg }
+  }
+  if (sub.character?.name) {
+    const c = sub.character.color || '#6B7280'
+    return { key: sub.character.name, label: sub.character.name, color: c, bg: c + '22' }
+  }
+  if (sub.speaker_zh) {
+    return { key: sub.speaker_zh, label: sub.speaker_zh, color: '#6B7280', bg: '#F3F4F6' }
+  }
+  return null
 }
 
 // ─── Mic icon (giống Editor) ────────────────────────────────────────────────
@@ -129,12 +163,18 @@ export default function SubtitlesView({ projectId }: { projectId: number }) {
   }, [projectId])
 
   const speakers = useMemo(() => {
+    // v4.3: list các key speaker từ slot/character/zh
     const set = new Set<string>()
     for (const s of subs) {
-      const name = s.character?.name || s.speaker_zh
-      if (name) set.add(name)
+      const disp = getSpeakerDisplay(s)
+      if (disp) set.add(disp.key)
     }
-    return Array.from(set).sort()
+    // Slot keys ưu tiên đặt trước (theo thứ tự cố định), sau đó character/zh sort tên
+    const slotOrder = ['M', 'F', 'NAM_CHINH', 'NU_CHINH', 'PHAN_DIEN_NAM',
+                       'PHAN_DIEN_NU', 'NAM_PHU', 'NU_PHU', 'NARRATION']
+    const slots = slotOrder.filter(k => set.has(k))
+    const others = Array.from(set).filter(k => !slotOrder.includes(k)).sort()
+    return [...slots, ...others]
   }, [subs])
 
   const filtered = useMemo(() => {
@@ -142,14 +182,19 @@ export default function SubtitlesView({ projectId }: { projectId: number }) {
     if (onlyReview) arr = arr.filter(s => s.needs_review)
     if (onlyOverCps) arr = arr.filter(s => (s.cps_value ?? 0) > 18)
     if (speakerFilter !== 'all') {
-      arr = arr.filter(s => (s.character?.name || s.speaker_zh) === speakerFilter)
+      arr = arr.filter(s => {
+        const disp = getSpeakerDisplay(s)
+        return disp?.key === speakerFilter
+      })
     }
     if (search.trim()) {
       const q = search.toLowerCase()
       arr = arr.filter(s =>
         (s.text || '').toLowerCase().includes(q) ||
         (s.original_text || '').toLowerCase().includes(q) ||
-        (s.character?.name || '').toLowerCase().includes(q)
+        (s.character?.name || '').toLowerCase().includes(q) ||
+        (s.speaker_zh || '').toLowerCase().includes(q) ||
+        (s.speaker_slot || '').toLowerCase().includes(q)
       )
     }
     return arr
@@ -244,7 +289,11 @@ export default function SubtitlesView({ projectId }: { projectId: number }) {
             className="text-[12px] px-2 py-1 rounded border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-900 focus:outline-none"
           >
             <option value="all">Tất cả speaker</option>
-            {speakers.map(s => <option key={s} value={s}>{s}</option>)}
+            {speakers.map(s => {
+              const slotInfo = SLOT_BADGE[s]
+              const label = slotInfo ? `${slotInfo.label} (${s})` : s
+              return <option key={s} value={s}>{label}</option>
+            })}
           </select>
           <Toggle checked={onlyReview} onChange={setOnlyReview} label="⚠ Review" warning />
           <Toggle checked={onlyOverCps} onChange={setOnlyOverCps} label="⚡ Over CPS" danger />
@@ -327,7 +376,7 @@ function SubRowComponent({ sub, isActive, onActivate, onSave, onBlurAll }: {
   }
 
   const char = sub.character
-  const speakerName = char?.name || sub.speaker_zh
+  const speakerDisplay = getSpeakerDisplay(sub)
   const emo = sub.emotion ? EMOTION_BADGE[sub.emotion] : null
 
   // Bg row (giống Editor)
@@ -335,7 +384,7 @@ function SubRowComponent({ sub, isActive, onActivate, onSave, onBlurAll }: {
   let rowBorder = '#E8E6E0'
   if (isActive)            { rowBg = '#EFF6FF'; rowBorder = '#BFDBFE' }
   else if (sub.needs_review){ rowBg = '#FFFBEB'; rowBorder = '#FDE68A' }
-  else if (!char && !sub.speaker_zh) { rowBg = '#FFFBF0'; rowBorder = '#E8E6E0' }
+  else if (!speakerDisplay) { rowBg = '#FFFBF0'; rowBorder = '#E8E6E0' }
 
   return (
     <div
@@ -381,20 +430,13 @@ function SubRowComponent({ sub, isActive, onActivate, onSave, onBlurAll }: {
           </span>
 
           {/* speaker badge */}
-          {char ? (
+          {speakerDisplay ? (
             <span style={{
               fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4,
-              background: char.color + '22', color: char.color,
-              whiteSpace: 'nowrap', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis',
+              background: speakerDisplay.bg, color: speakerDisplay.color,
+              whiteSpace: 'nowrap', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis',
             }}>
-              {char.name}
-            </span>
-          ) : speakerName ? (
-            <span style={{
-              fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 4,
-              background: '#F3F4F6', color: '#6B7280',
-            }}>
-              {speakerName}
+              {speakerDisplay.label}
             </span>
           ) : (
             <span style={{

@@ -1,0 +1,311 @@
+<role>
+Bạn là biên kịch + dramaturg chuyên phân tích C-drama trước khi dịch.
+Nhiệm vụ: đọc toàn bộ phụ đề phim TQ dưới đây và lập "BIBLE" — hồ sơ phim đầy đủ
+phục vụ giai đoạn dịch LỒNG TIẾNG tiếng Việt sau này (TTS đọc thành tiếng).
+</role>
+
+<film_info>
+TỔNG SỐ DÒNG PHỤ ĐỀ: {TOTAL_LINES}
+(Phụ đề được đánh số từ 1 đến {TOTAL_LINES}.)
+</film_info>
+
+<film_subtitles>
+Toàn bộ phụ đề tiếng Trung của phim, format: line_index | text_zh
+
+{ALL_SUBTITLES}
+</film_subtitles>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODE: {PRESET_LABEL}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{PRESET_DESCRIPTION}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+NHIỆM VỤ — BUILD BIBLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Bạn xuất 1 JSON DUY NHẤT gồm 3 section: cast, world, glossary.
+
+━━━ SECTION 1: CAST (Nhân vật) ━━━
+
+{CAST_INCLUSION_RULES}
+
+Với mỗi nhân vật, xuất:
+
+  • zh         — tên TQ chính xác (vd "顾沉舟")
+                  Nếu nhân vật KHÔNG có tên riêng trong phim, dùng vai trò:
+                    "妈" → vai trò "mẹ"
+                    "继父" → "cha dượng"
+                    "陌生男子A" → "đàn ông lạ A"
+  • vi         — tên Hán Việt (vd "Cố Trầm Châu")
+                  Nếu là vai trò: dùng từ Việt tự nhiên ("Mẹ", "Cha dượng")
+  • alias      — list cách gọi khác trong phim (vd ["阿舟", "顾总"])
+                  Để [] nếu không có
+  • g          — giới tính: "nam" / "nu" / "?"
+  • role       — vai trò trong phim:
+                  - "nam_chinh"   — nam chính (chỉ 1)
+                  - "nu_chinh"    — nữ chính (chỉ 1)
+                  - "nam_phu"     — nam phụ chính
+                  - "nu_phu"      — nữ phụ chính
+                  - "phan_dien"   — phản diện
+                  - "phu"         — vai phụ (có vai trò rõ trong scene)
+                  - "khach"       — khách mời / cameo (1-2 lần xuất hiện)
+  • tier       — TIER ĐỘ QUAN TRỌNG:
+                  - "main"        — nhân vật chính (nam_chinh, nu_chinh)
+                  - "supporting"  — nhân vật quan trọng (nam_phu, nu_phu, phan_dien)
+                  - "minor"       — nhân vật phụ có vai trò rõ
+                  - "cameo"       — xuất hiện ngắn nhưng có dòng thoại
+  • line_count — ước lượng số dòng thoại của nhân vật này trong phim
+  • age        — "20s" / "30s" / "40s" / "tre" / "trung_nien" / "lao_nien" / "?"
+  • char       — 1 câu mô tả tính cách + kiểu nói
+                  (vd: "lạnh lùng, nói ngắn gọn, hay ra lệnh")
+  • rel        — dict { tên_zh_nhân_vật_khác: "mô tả quan hệ" }
+                  Vd: {"苏念": "vợ hợp đồng", "顾老爷": "cha ruột"}
+                  CHỈ ghi quan hệ rõ ràng từ phim, không suy diễn
+  • catchphrase — câu cửa miệng (nếu có), null nếu không
+
+Quy tắc CAST:
+- Sắp xếp theo tier: main → supporting → minor → cameo
+- Trong cùng tier: sắp xếp theo line_count giảm dần
+- Phiên âm Hán Việt theo chuẩn (顾→Cố, 沉→Trầm, 舟→Châu, 苏→Tô, 念→Niệm...)
+- Phim cổ trang/tiên hiệp: ưu tiên Hán Việt
+- Phim hiện đại: có thể giữ vài tên thuần Việt nếu nhân vật Việt hóa được
+
+━━━ SECTION 2: WORLD (Bối cảnh phim) ━━━
+
+  • genre        — list thể loại (vd ["đô thị", "ngôn tình", "tổng tài"])
+  • genre_id     — 1 trong: "modern_ceo_romance" / "ancient_palace" / "mafia_lord" /
+                    "reborn_revenge" / "war_god_return" / "xianxia" / "dan_quoc" /
+                    "do_thi" / "co_trang" / "other"
+  • era          — thời đại: "hiện đại" / "cổ đại" / "dân quốc" / "tương lai" /
+                    "vô định" / cụ thể (vd "thập niên 1990")
+  • tone         — 1 câu mô tả tone tổng thể phim
+  • plot         — 3-5 câu tóm tắt cốt truyện chính
+  • arcs         — list các arc lớn (XEM RÀNG BUỘC BÊN DƯỚI):
+                    [
+                      {
+                        "index": 0,
+                        "r": [1, 800],
+                        "t": "Hôn nhân hợp đồng",
+                        "tone": "căng-thẳng",
+                        "summary": "3-4 câu tóm tắt arc"
+                      }
+                    ]
+
+🔴 RÀNG BUỘC TUYỆT ĐỐI VỚI arcs (đọc kỹ, đây là điều quan trọng nhất):
+
+  1. arcs PHẢI phủ TOÀN BỘ phim từ dòng 1 đến dòng {TOTAL_LINES}.
+     → arcs[0].r[0] = 1
+     → arcs[-1].r[1] = {TOTAL_LINES}
+
+  2. arcs LIỀN MẠCH, KHÔNG có gap:
+     → arcs[i+1].r[0] = arcs[i].r[1] + 1
+
+  3. KHÔNG overlap giữa các arc.
+
+  4. Số lượng arcs: 3-7 arc cho phim 5000-8000 dòng.
+     Phim ngắn hơn có thể 2-3 arcs.
+
+  5. KHÔNG được dừng arc cuối ở giữa phim. Phim có {TOTAL_LINES} dòng thì
+     arcs[-1].r[1] BẮT BUỘC = {TOTAL_LINES}.
+
+  6. KHÔNG vượt quá {TOTAL_LINES}. Không có dòng số 9999 nào cả nếu phim chỉ
+     có {TOTAL_LINES} dòng — chỉ có từ 1 đến {TOTAL_LINES}.
+
+Vd ĐÚNG cho phim 4651 dòng, 5 arc:
+  arcs[0].r = [1, 900]
+  arcs[1].r = [901, 1800]
+  arcs[2].r = [1801, 2800]
+  arcs[3].r = [2801, 3800]
+  arcs[4].r = [3801, 4651]   ← PHẢI là {TOTAL_LINES}
+
+Vd SAI:
+  arcs[-1].r = [3801, 1517]  ← end < total, BỎ SÓT phần cuối phim
+  arcs[-1].r = [3801, 9999]  ← end > total, không tồn tại dòng đó
+  arcs[1].r = [901, 1800], arcs[2].r = [1900, ...]  ← GAP từ 1801-1899
+  arcs[1].r = [901, 1800], arcs[2].r = [1500, ...]  ← OVERLAP
+
+━━━ SECTION 3: GLOSSARY (Thuật ngữ, chia 5 nhóm) ━━━
+
+{GLOSSARY_INCLUSION_RULES}
+
+Glossary chia 5 nhóm RIÊNG BIỆT (5 list):
+
+╔═══ NHÓM 1: titles — Chức vụ / Danh xưng ═══╗
+
+Chức danh, danh xưng đặc thù cần dịch nhất quán.
+
+  ✓ Đưa vào: "顾总", "Chủ tịch", "Đại nhân", "Tam tiểu thư", "陛下", "总经理"
+  ✗ KHÔNG: tên riêng (đã ở Cast), từ thông thường
+
+Format:
+  {
+    "zh": "顾总", "vi": "Tổng Cố", "n": 12,
+    "type": "title_business",   // title_business | title_royal | title_family |
+                                 //  title_martial | title_other
+    "usage": "thuộc cấp gọi sếp / vợ gọi chồng / ..."
+  }
+
+╔═══ NHÓM 2: places_orgs — Địa danh / Tổ chức ═══╗
+
+Tên công ty, gia tộc, địa danh, tổ chức đặc thù.
+
+  ✓ Đưa vào: "顾氏集团", "Lan Phượng Các", "Tử Cấm Thành",
+              "联邦调查局", "Long Hổ Bang"
+  ✗ KHÔNG: địa danh phổ thông (Bắc Kinh, Thượng Hải) — trừ khi phim cổ trang
+
+Format:
+  {
+    "zh": "顾氏集团", "vi": "Tập đoàn Cố thị", "n": 15,
+    "type": "company",   // company | family_clan | sect | gov_org |
+                          // location_special | gang | school
+    "note": "công ty nam chính"
+  }
+
+╔═══ NHÓM 3: concepts — Khái niệm đặc thù thể loại ═══╗
+
+Khái niệm chỉ tồn tại trong genre/world phim — cần dịch nhất quán + ghi chú.
+
+  ✓ Tu luyện:    "linh thạch", "kim đan", "trúc cơ", "nguyên anh"
+  ✓ Tổng tài:    "hợp đồng kết hôn", "đính ước từ nhỏ", "thừa kế"
+  ✓ Cung đấu:    "tuyển tú", "lãnh cung", "ngự y"
+  ✓ Trùng sinh:  "ký ức kiếp trước", "trọng sinh"
+
+Format:
+  {
+    "zh": "合同婚姻", "vi": "Hôn nhân hợp đồng", "n": 8,
+    "type": "concept_plot",  // concept_plot | concept_world | concept_skill |
+                              //  concept_item
+    "note": "Trope ngôn tình: kết hôn vì lợi ích, sau yêu thật"
+  }
+
+╔═══ NHÓM 4: cliches — Cụm điển hình / Tropes ═══╗
+
+Cliché / motif đặc trưng C-drama xuất hiện nhiều lần trong phim.
+KHÁC concepts: cliches là KIỂU TÌNH HUỐNG lặp lại, không phải vật/khái niệm.
+
+  ✓ Ví dụ: "替嫁" (thay cô dâu), "失忆梗" (mất trí nhớ),
+            "出车祸" (gặp tai nạn xe — đoạn drama),
+            "误会梗" (hiểu lầm điển hình)
+
+Format:
+  {
+    "zh": "替嫁", "vi": "thay cô dâu", "n": 3,
+    "trope": "marriage_substitution",
+    "note": "Cliché ngôn tình, dịch theo cảm xúc scene cụ thể"
+  }
+
+╔═══ NHÓM 5: idioms — Thành ngữ + Nói đểu / Đá xéo ═══╗
+
+Thành ngữ TQ + cụm từ mỉa mai / nói khích / đá xéo — TUYỆT ĐỐI không dịch literal.
+
+  ✓ Thành ngữ:    "一举两得", "亡羊补牢", "塞翁失马"
+  ✓ Nói đểu:      "阴阳怪气" (nói kháy), "酸溜溜" (chua chát mỉa mai),
+                   "话里有话" (lời có ý ẩn)
+  ✓ Khích bác:    "你算老几" (cậu là cái thớ gì), "狗咬狗" (chó cắn chó)
+
+Format:
+  {
+    "zh": "阴阳怪气", "vi": "nói kháy / cợt nhả",
+    "n": 2,
+    "register": "rude",    // rude | sarcastic | formal | poetic | neutral
+    "note": "Thường dùng khi nhân vật mỉa mai nhân vật khác"
+  }
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUY TRÌNH NỘI BỘ (làm trong đầu, KHÔNG viết ra)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Quét toàn phim → đếm dòng thoại từng nhân vật → phân tier
+2. Đọc 100 dòng đầu + 100 dòng cuối → xác định genre, era, plot
+3. Tìm "sự kiện chuyển hướng" lớn → chia arcs
+   QUAN TRỌNG: kiểm tra arcs phủ từ 1 đến {TOTAL_LINES} không gap
+4. Quét từ lặp lại → phân vào 5 nhóm glossary
+5. Verify: arcs[0].r[0]=1, arcs[-1].r[1]={TOTAL_LINES}, không gap, không overlap
+
+CHỈ OUTPUT JSON CUỐI CÙNG.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+JSON THUẦN. KHÔNG markdown fence.
+
+{
+  "cast": {
+    "characters": [
+      {
+        "zh": "顾沉舟",
+        "vi": "Cố Trầm Châu",
+        "alias": ["阿舟", "顾总"],
+        "g": "nam",
+        "role": "nam_chinh",
+        "tier": "main",
+        "line_count": 245,
+        "age": "30s",
+        "char": "lạnh lùng, nói ngắn gọn, ít biểu cảm nhưng có chiều sâu",
+        "rel": {"苏念": "vợ hợp đồng", "顾老爷": "cha"},
+        "catchphrase": null
+      }
+    ]
+  },
+  "world": {
+    "genre": ["đô thị", "ngôn tình", "tổng tài"],
+    "genre_id": "modern_ceo_romance",
+    "era": "hiện đại",
+    "tone": "căng thẳng kịch tính, có đoạn lãng mạn ngọt",
+    "plot": "...",
+    "arcs": [
+      {
+        "index": 0, "r": [1, 900],
+        "t": "Hôn nhân hợp đồng",
+        "tone": "căng-thẳng",
+        "summary": "..."
+      }
+    ]
+  },
+  "glossary": {
+    "titles": [
+      {"zh": "顾总", "vi": "Tổng Cố", "n": 12,
+       "type": "title_business", "usage": "thuộc cấp gọi sếp"}
+    ],
+    "places_orgs": [
+      {"zh": "顾氏集团", "vi": "Tập đoàn Cố thị", "n": 15,
+       "type": "company", "note": "công ty nam chính"}
+    ],
+    "concepts": [
+      {"zh": "合同婚姻", "vi": "Hôn nhân hợp đồng", "n": 8,
+       "type": "concept_plot",
+       "note": "Trope ngôn tình"}
+    ],
+    "cliches": [
+      {"zh": "替嫁", "vi": "thay cô dâu", "n": 3,
+       "trope": "marriage_substitution",
+       "note": "Cliché ngôn tình"}
+    ],
+    "idioms": [
+      {"zh": "阴阳怪气", "vi": "nói kháy / cợt nhả", "n": 2,
+       "register": "sarcastic",
+       "note": "Mỉa mai nhân vật khác"}
+    ]
+  }
+}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CHECKLIST CUỐI (BẮT BUỘC RÀ TRƯỚC KHI OUTPUT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+□ Tuân thủ MODE đã chọn cho cast inclusion
+□ Mọi nhân vật có TÊN RIÊNG đều có trong cast (kể cả 1 dòng)
+□ tier không trùng (chỉ 1 main_nam, 1 main_nu)
+
+□ ⭐ arcs[0].r[0] == 1                            (BẮT BUỘC)
+□ ⭐ arcs[-1].r[1] == {TOTAL_LINES}                (BẮT BUỘC)
+□ ⭐ arcs liên tiếp: arcs[i+1].r[0] = arcs[i].r[1] + 1  (BẮT BUỘC)
+□ ⭐ KHÔNG overlap giữa các arcs                  (BẮT BUỘC)
+□ ⭐ KHÔNG arc nào vượt [{TOTAL_LINES}]            (BẮT BUỘC)
+
+□ genre_id thuộc danh sách hợp lệ
+□ Glossary có đủ 5 nhóm (có thể list rỗng nếu phim không có)
+□ JSON hợp lệ, không markdown fence

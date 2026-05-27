@@ -1,0 +1,82 @@
+{
+  "id": "co_trang",
+  "name_vi": "Cổ trang",
+  "name_zh": "古装",
+  "description": "Phim cổ trang chung — cung đình, quan trường, võ hiệp, gia tộc xưa. KHÔNG bao gồm tu tiên/tiên hiệp (dùng pack xianxia). Bối cảnh thời phong kiến Trung Quốc.",
+
+  "tone_signature": "Trang trọng, Hán Việt nặng. Xưng hô có thứ bậc rõ ràng. Câu thoại có tính nghi lễ, ít khẩu ngữ đời thường.",
+
+  "typical_pronouns": {
+    "royal_self": "trẫm (vua tự xưng) / bổn cung (hoàng hậu/phi tự xưng) / bổn vương (vương gia tự xưng)",
+    "royal_to_subject": "khanh / ái khanh / các khanh (vua gọi quần thần)",
+    "subject_to_emperor": "thần / nô tỳ / nô tài / hạ thần / vi thần",
+    "subject_to_other": "tại hạ / tiểu nhân / hạ quan",
+    "couple_intimate": "chàng — nàng / phu quân — nương tử",
+    "couple_formal": "phu nhân / tướng công",
+    "family_father": "phụ thân / cha",
+    "family_mother": "mẫu thân / nương / mẹ",
+    "family_siblings": "đại ca / nhị ca / tam đệ / muội muội",
+    "to_elder": "lão gia / lão phu nhân / tổ phụ / tổ mẫu",
+    "to_younger": "tiểu tử (mỉa) / nha đầu (gái nhỏ)",
+    "lovers_calling": "chàng yêu / nàng yêu (hiếm dùng — quá modern)",
+    "polite_third": "vị này / vị ấy / y / thị / chàng / nàng"
+  },
+
+  "common_terms": [
+    {"zh": "皇上", "vi": "Hoàng thượng / Bệ hạ",
+     "category": "title", "notes": "Đối diện vua: 'Bệ hạ'. Nhắc đến: 'Hoàng thượng'."},
+    {"zh": "陛下", "vi": "Bệ hạ", "category": "title", "notes": "Trực tiếp với vua"},
+    {"zh": "皇后", "vi": "Hoàng hậu", "category": "title", "notes": ""},
+    {"zh": "贵妃", "vi": "Quý phi", "category": "title", "notes": ""},
+    {"zh": "公主", "vi": "Công chúa", "category": "title", "notes": ""},
+    {"zh": "王爷", "vi": "Vương gia", "category": "title", "notes": ""},
+    {"zh": "将军", "vi": "Tướng quân", "category": "title", "notes": ""},
+    {"zh": "大人", "vi": "Đại nhân", "category": "title", "notes": "Quan lại"},
+    {"zh": "公子", "vi": "Công tử", "category": "title", "notes": "Nam thanh niên quý tộc"},
+    {"zh": "小姐", "vi": "Tiểu thư", "category": "title", "notes": ""},
+    {"zh": "夫人", "vi": "Phu nhân", "category": "title", "notes": "Vợ quan / chủ nhà"},
+    {"zh": "丫鬟", "vi": "Nha hoàn", "category": "title", "notes": "Người hầu nữ"},
+    {"zh": "侍卫", "vi": "Thị vệ", "category": "title", "notes": ""},
+    {"zh": "御医", "vi": "Ngự y", "category": "title", "notes": ""},
+    {"zh": "圣旨", "vi": "Thánh chỉ", "category": "concept", "notes": ""},
+    {"zh": "册封", "vi": "Sách phong", "category": "concept", "notes": ""},
+    {"zh": "选秀", "vi": "Tuyển tú", "category": "concept", "notes": "Cung đấu"},
+    {"zh": "冷宫", "vi": "Lãnh cung", "category": "concept", "notes": ""},
+    {"zh": "和亲", "vi": "Hòa thân", "category": "concept", "notes": "Gả công chúa cho ngoại bang"},
+    {"zh": "退婚", "vi": "Thoái hôn / hủy hôn", "category": "concept", "notes": ""},
+    {"zh": "府", "vi": "Phủ", "category": "concept", "notes": "Vương phủ, tướng phủ"},
+    {"zh": "门第", "vi": "Môn đệ / gia thế", "category": "concept", "notes": ""},
+    {"zh": "嫡子", "vi": "Đích tử", "category": "concept", "notes": "Con vợ cả"},
+    {"zh": "庶子", "vi": "Thứ tử", "category": "concept", "notes": "Con vợ lẽ"}
+  ],
+
+  "common_cliches": [
+    {"zh": "朕意已决",
+     "vi": "Ý trẫm đã quyết",
+     "category": "cliche", "notes": "Vua tuyên bố"},
+    {"zh": "退下",
+     "vi": "Lui ra / Lui xuống",
+     "category": "cliche", "notes": "Đuổi cấp dưới"},
+    {"zh": "免礼",
+     "vi": "Miễn lễ", "category": "cliche", "notes": ""},
+    {"zh": "罪臣",
+     "vi": "Thần tội / Hạ thần có tội",
+     "category": "cliche", "notes": "Tự nhận tội"},
+    {"zh": "本宫绝不轻饶",
+     "vi": "Bổn cung quyết không tha",
+     "category": "cliche", "notes": "Hoàng hậu/phi đe dọa"}
+  ],
+
+  "translation_examples": [
+    {"zh": "臣妾参见皇上",
+     "vi": "Thần thiếp bái kiến Hoàng thượng",
+     "context": "Phi tử gặp vua",
+     "note": "臣妾 = 'thần thiếp' (KHÔNG 'tôi')"},
+    {"zh": "你算什么东西",
+     "vi": "Ngươi là cái thứ gì",
+     "context": "Quý nhân khinh người",
+     "note": "'你' → 'ngươi' trong cổ trang (KHÔNG 'cô / cậu')"}
+  ],
+
+  "style_notes": "TONE TỔNG: Trang trọng, Hán Việt nặng. Bắt buộc dùng: trẫm/bổn cung/khanh/thần/tại hạ/chàng/nàng. KHÔNG dùng: tôi/anh/em/cậu (modern). Câu thoại có nhịp điệu cổ, ít rút gọn. Xưng hô có thứ bậc — sai bậc là vô lễ, có thể bị phạt. Câu hỏi vua dùng '...không?' không phải '...à?'."
+}

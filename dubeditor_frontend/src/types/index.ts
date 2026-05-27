@@ -83,6 +83,11 @@ export interface Subtitle {
   speaker_zh?: string | null
   speaker_confidence?: 'h' | 'm' | 'l' | 'high' | 'mid' | 'low'
   speaker_reason?: string
+  // v4.3: speaker slot cho lồng tiếng (mode medium/simple)
+  // Mode FULL: null
+  // Mode MEDIUM: NAM_CHINH | NU_CHINH | PHAN_DIEN_NAM | PHAN_DIEN_NU | NAM_PHU | NU_PHU | NARRATION
+  // Mode SIMPLE: M | F
+  speaker_slot?: string | null
   emotion?: string | null
   intensity?: number
   cps_value?: number | null

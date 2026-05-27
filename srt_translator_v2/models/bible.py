@@ -1,11 +1,15 @@
 """
-Bible models — v3 compact.
+Bible models — v3 compact + v4.1 mở rộng.
 
 Thay đổi so với v2:
 - Cast: BỎ self_address, addresses, social_status, speaking_style
        (gộp speaking_style vào personality làm `char` 1 câu)
 - World: BỎ main_conflict, setting (gộp vào plot)
 - Glossary: gộp 2 loại (thuật ngữ riêng phim + xưng hô theo thể loại)
+
+v4.1: thêm các field optional (không break v3):
+- Character: tier, line_count, catchphrase
+- GlossaryTerm: type, usage, trope, register (1 trong số tùy category)
 """
 from __future__ import annotations
 from typing import Optional
@@ -26,6 +30,10 @@ class Character(BaseModel):
     age: Optional[str] = None                 # teen/20s/30s/40s/50s/trung niên/già
     char: str = ""                            # Tính cách + kiểu nói 1 câu ngắn
     rel: dict[str, str] = Field(default_factory=dict)  # Map zh_name → quan hệ
+    # v4.1 additions
+    tier: Optional[str] = None                # main/supporting/minor/cameo
+    line_count: Optional[int] = None          # ước lượng số dòng thoại
+    catchphrase: Optional[str] = None         # câu cửa miệng
 
 
 class Cast(BaseModel):
@@ -66,11 +74,11 @@ class StoryArc(BaseModel):
 
 class World(BaseModel):
     """Bối cảnh phim."""
-    genre: list[str] = Field(default_factory=list)  # ["đô thị", "tổng tài", "ngôn tình"]
-    genre_id: str = "other"                   # ID chuẩn để load genre_pack: modern_ceo_romance/ancient_palace/reborn_revenge/mafia_lord/war_god_return/other
-    era: str = "hiện đại"                     # hiện đại/cổ đại/dân quốc/tương lai
-    tone: str = ""                            # Tone tổng thể (1 câu)
-    plot: str = ""                            # Tóm tắt plot (3-5 câu)
+    genre: list[str] = Field(default_factory=list)
+    genre_id: str = "other"
+    era: str = "hiện đại"
+    tone: str = ""
+    plot: str = ""
     arcs: list[StoryArc] = Field(default_factory=list)
 
 
@@ -78,12 +86,28 @@ class World(BaseModel):
 # GLOSSARY (gộp thuật ngữ riêng + xưng hô thể loại)
 # ─────────────────────────────────────────────────────────────────
 
+# 5 nhóm v4.1 (đẩy vào field `cat`):
+#   "title"        — Chức vụ / Danh xưng (vd: 顾总 → Tổng Cố)
+#   "place_org"    — Địa danh / Tổ chức (vd: 顾氏集团 → Tập đoàn Cố thị)
+#   "concept"      — Khái niệm thể loại (vd: 合同婚姻 → Hôn nhân hợp đồng)
+#   "cliche"       — Cliché / Trope (vd: 替嫁 → thay cô dâu)
+#   "idiom"        — Thành ngữ / Nói đểu (vd: 阴阳怪气 → nói kháy)
+# Tương thích cũ:
+#   "chuc_vu", "dia_danh", "khai_niem", "tu_xung", "khac"
+
 class GlossaryTerm(BaseModel):
     """1 thuật ngữ."""
-    zh: str = ""                              # Term tiếng Trung
-    vi: str = ""                              # Dịch tiếng Việt chuẩn
-    cat: str = "khac"                         # Category: chuc_vu/dia_danh/khai_niem/cliche/tu_xung/khac
-    note: Optional[str] = None                # Ghi chú khi dùng (optional)
+    zh: str = ""
+    vi: str = ""
+    cat: str = "khac"                         # Category — xem comment trên
+    note: Optional[str] = None
+    # v4.1 — số lần xuất hiện
+    n: Optional[int] = None
+    # v4.1 — metadata theo nhóm (chỉ 1 cái có giá trị tùy cat)
+    type: Optional[str] = None                # cho titles + places_orgs + concepts
+    usage: Optional[str] = None               # cho titles
+    trope: Optional[str] = None               # cho cliches
+    register: Optional[str] = None            # cho idioms
 
 
 class Glossary(BaseModel):
@@ -95,6 +119,27 @@ class Glossary(BaseModel):
         if not text:
             return []
         return [t for t in self.terms if t.zh and t.zh in text]
+
+    # v4.1: helper properties để access 5 nhóm như attribute
+    @property
+    def titles(self) -> list[GlossaryTerm]:
+        return [t for t in self.terms if t.cat in ("title", "chuc_vu", "tu_xung")]
+
+    @property
+    def places_orgs(self) -> list[GlossaryTerm]:
+        return [t for t in self.terms if t.cat in ("place_org", "dia_danh")]
+
+    @property
+    def concepts(self) -> list[GlossaryTerm]:
+        return [t for t in self.terms if t.cat in ("concept", "khai_niem")]
+
+    @property
+    def cliches(self) -> list[GlossaryTerm]:
+        return [t for t in self.terms if t.cat == "cliche"]
+
+    @property
+    def idioms(self) -> list[GlossaryTerm]:
+        return [t for t in self.terms if t.cat == "idiom"]
 
 
 # ─────────────────────────────────────────────────────────────────

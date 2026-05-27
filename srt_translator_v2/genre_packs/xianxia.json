@@ -1,0 +1,75 @@
+{
+  "id": "xianxia",
+  "name_vi": "Tiên hiệp / Tu tiên",
+  "name_zh": "仙侠修真",
+  "description": "Phim tu tiên / tu chân / huyền huyễn — nhân vật là tu sĩ, tu luyện linh khí, đột phá cảnh giới, có yêu ma quỷ quái, môn phái, đan dược, pháp bảo.",
+
+  "tone_signature": "Hùng tráng, Hán Việt dày đặc, có chất tiên phong đạo cốt. Xưng hô đặc thù: tại hạ / tiên trưởng / đạo hữu. Câu thoại trang nghiêm, có chất triết lý.",
+
+  "typical_pronouns": {
+    "self_to_peer": "tại hạ / ta",
+    "self_to_master": "đệ tử / vãn bối",
+    "self_to_disciple": "ta / sư phụ",
+    "to_master": "sư phụ / tôn sư / tiên trưởng",
+    "to_disciple": "đồ nhi / đệ tử / hậu bối",
+    "to_peer": "đạo hữu / huynh đài / đạo huynh",
+    "to_elder_cultivator": "tiền bối / lão tiền bối",
+    "to_demon": "ma đầu / yêu nghiệt",
+    "couple_intimate": "chàng — nàng (vẫn dùng trong tu tiên)",
+    "polite_third": "đạo hữu / y / thị"
+  },
+
+  "common_terms": [
+    {"zh": "修仙", "vi": "Tu tiên", "category": "concept", "notes": ""},
+    {"zh": "修真", "vi": "Tu chân", "category": "concept", "notes": ""},
+    {"zh": "修为", "vi": "Tu vi / công lực", "category": "concept", "notes": ""},
+    {"zh": "境界", "vi": "Cảnh giới", "category": "concept", "notes": ""},
+    {"zh": "突破", "vi": "Đột phá", "category": "concept", "notes": "Lên cảnh giới mới"},
+    {"zh": "渡劫", "vi": "Độ kiếp", "category": "concept", "notes": "Vượt thiên kiếp"},
+    {"zh": "筑基", "vi": "Trúc cơ", "category": "concept", "notes": "Cảnh giới sơ"},
+    {"zh": "金丹", "vi": "Kim đan", "category": "concept", "notes": "Cảnh giới"},
+    {"zh": "元婴", "vi": "Nguyên anh", "category": "concept", "notes": "Cảnh giới cao"},
+    {"zh": "化神", "vi": "Hóa thần", "category": "concept", "notes": "Cảnh giới rất cao"},
+    {"zh": "灵气", "vi": "Linh khí", "category": "concept", "notes": ""},
+    {"zh": "灵石", "vi": "Linh thạch", "category": "concept", "notes": "Đơn vị tiền tu sĩ"},
+    {"zh": "灵根", "vi": "Linh căn", "category": "concept", "notes": "Tài năng tu luyện"},
+    {"zh": "丹药", "vi": "Đan dược", "category": "concept", "notes": ""},
+    {"zh": "法宝", "vi": "Pháp bảo", "category": "concept", "notes": "Vũ khí tu sĩ"},
+    {"zh": "飞剑", "vi": "Phi kiếm", "category": "concept", "notes": ""},
+    {"zh": "门派", "vi": "Môn phái", "category": "concept", "notes": ""},
+    {"zh": "宗门", "vi": "Tông môn", "category": "concept", "notes": ""},
+    {"zh": "掌门", "vi": "Chưởng môn", "category": "title", "notes": "Người đứng đầu môn phái"},
+    {"zh": "长老", "vi": "Trưởng lão", "category": "title", "notes": ""},
+    {"zh": "师尊", "vi": "Sư tôn", "category": "title", "notes": "Tôn xưng thầy"},
+    {"zh": "师姐", "vi": "Sư tỷ", "category": "title", "notes": ""},
+    {"zh": "师兄", "vi": "Sư huynh", "category": "title", "notes": ""},
+    {"zh": "妖", "vi": "Yêu / Yêu tộc", "category": "concept", "notes": ""},
+    {"zh": "魔", "vi": "Ma", "category": "concept", "notes": "Ma đạo"},
+    {"zh": "魔尊", "vi": "Ma tôn", "category": "title", "notes": ""}
+  ],
+
+  "common_cliches": [
+    {"zh": "我命由我不由天",
+     "vi": "Mệnh ta do ta không do trời",
+     "category": "cliche", "notes": "Câu cliché tu tiên"},
+    {"zh": "无量天尊",
+     "vi": "Vô lượng thiên tôn",
+     "category": "cliche", "notes": "Tu sĩ tán thán"},
+    {"zh": "道友请留步",
+     "vi": "Đạo hữu xin dừng bước",
+     "category": "cliche", "notes": "Cách gọi lịch sự"}
+  ],
+
+  "translation_examples": [
+    {"zh": "在下姓李，名沉舟",
+     "vi": "Tại hạ họ Lý, tên Trầm Châu",
+     "context": "Tự giới thiệu lịch sự",
+     "note": "在下 → 'tại hạ' (KHÔNG 'tôi')"},
+    {"zh": "师尊在上，弟子拜见",
+     "vi": "Sư tôn ở trên, đệ tử bái kiến",
+     "context": "Đệ tử gặp thầy",
+     "note": "Bắt buộc 'đệ tử' (KHÔNG 'em')"}
+  ],
+
+  "style_notes": "TONE TỔNG: Trang nghiêm, Hán Việt rất nặng. BẮT BUỘC dùng: tại hạ/ta/đạo hữu/sư phụ/đệ tử/tiền bối. KHÔNG dùng: tôi/anh/em/cậu (sai thể loại hoàn toàn). Tu sĩ ít cảm thán đời thường, ít chửi tục. Câu pháp lệnh dùng dạng cổ ('Đứng lại!' → 'Hãy dừng!'). Tên kỹ năng/pháp thuật giữ phiên âm Hán Việt."
+}

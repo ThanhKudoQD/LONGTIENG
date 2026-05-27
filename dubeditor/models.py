@@ -36,6 +36,10 @@ class Project(Base):
     # Subtitle.index (1-based, KHÔNG phải subtitle.id) của dòng cuối user làm.
     # Dùng để scroll + active đúng dòng khi mở lại. index ổn định hơn id.
     last_subtitle_index     = Column(Integer, nullable=True)
+    # ── Manual Translate v4.2 settings ───────────────────────────────────────
+    # Số dòng tối đa cho mỗi mega-chunk trong workflow Dịch thủ công Mega.
+    # Default 500. Range 200-2000. Null = dùng default.
+    mega_target_lines       = Column(Integer, nullable=True)
     # ── Relationships ────────────────────────────────────────────────────────
     subtitles  = relationship("Subtitle",  back_populates="project", cascade="all, delete")
     characters = relationship("Character", back_populates="project", cascade="all, delete")
@@ -100,6 +104,13 @@ class Subtitle(Base):
     speaker_zh           = Column(String, nullable=True)      # Tên Trung của speaker (raw)
     speaker_confidence   = Column(String, default='low')      # high|mid|low
     speaker_reason       = Column(Text, default="")           # Lý do gán speaker (debug)
+    # ── v4.3: Speaker slot cho lồng tiếng ─────────────────────────────────
+    # Mode FULL: NULL — dùng character_id để map voice
+    # Mode MEDIUM: 1 trong 7 slot key: NAM_CHINH, NU_CHINH, PHAN_DIEN_NAM,
+    #              PHAN_DIEN_NU, NAM_PHU, NU_PHU, NARRATION
+    # Mode SIMPLE: 1 trong 2: M, F
+    # TTS sẽ dùng speaker_slot để pick voice cố định (nếu có map)
+    speaker_slot         = Column(String, nullable=True)
     emotion              = Column(String, nullable=True)      # neutral|angry|sad|...
     intensity            = Column(Integer, default=5)         # 1-10
     cps_value            = Column(Float, nullable=True)       # Characters per second
@@ -452,3 +463,45 @@ class AppSetting(Base):
     __tablename__ = "app_settings"
     key   = Column(String, primary_key=True)
     value = Column(Text, nullable=True)
+
+
+# v3.15 — Manual Translate state (Dịch Thủ công)
+class ManualTranslateUnit(Base):
+    """Lưu state mỗi (project, stage, unit_key) cho chế độ Dịch Thủ công.
+
+    Mỗi row = 1 đơn vị copy-paste của user:
+      - prompt: text đã build (có thể user đã edit)
+      - raw_response: response user paste vào
+      - status: pending | built | applied | failed
+      - meta_json: metadata BuiltPrompt (line_range, ...) để parser dùng lại
+      - apply_summary: summary của lần apply gần nhất
+
+    Unique constraint: (project_id, stage, unit_key).
+    """
+    __tablename__ = "manual_translate_units"
+    id              = Column(Integer, primary_key=True, index=True)
+    project_id      = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    stage           = Column(String, nullable=False, index=True)
+    unit_key        = Column(String, nullable=False)
+    label           = Column(String, nullable=True)
+    # State
+    status          = Column(String, default="pending")  # pending | built | applied | failed
+    prompt          = Column(Text, nullable=True)
+    raw_response    = Column(Text, nullable=True)
+    meta_json       = Column(Text, default="{}")
+    # Apply result (lần gần nhất)
+    apply_summary   = Column(Text, nullable=True)
+    apply_counts_json = Column(Text, nullable=True)   # JSON dict
+    apply_warnings_json = Column(Text, nullable=True) # JSON list
+    apply_errors_json = Column(Text, nullable=True)   # JSON list
+    # Timestamps
+    built_at        = Column(DateTime(timezone=True), nullable=True)
+    applied_at      = Column(DateTime(timezone=True), nullable=True)
+    updated_at      = Column(DateTime(timezone=True),
+                              server_default=func.now(),
+                              onupdate=func.now())
+
+    __table_args__ = (
+        Index("ix_manual_unit_pid_stage_key",
+              "project_id", "stage", "unit_key", unique=True),
+    )

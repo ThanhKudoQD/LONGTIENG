@@ -1,0 +1,81 @@
+{
+  "id": "dan_quoc",
+  "name_vi": "Dân quốc",
+  "name_zh": "民国",
+  "description": "Phim bối cảnh Dân Quốc Trung Quốc (1912-1949) — thời kỳ giao thoa Đông-Tây. Bối cảnh thường gồm: thượng lưu Thượng Hải, gia tộc lớn, quân phiệt, gián điệp, ngân hàng, kinh đô. Có hôn nhân sắp đặt, hôn nhân quân binh, ám sát, kháng chiến.",
+
+  "tone_signature": "Phong cách hoài cổ trang trọng, lai giữa cổ điển và hiện đại. Xưng hô trang nghiêm hơn đô thị (vẫn 'tiểu thư', 'thiếu gia', 'phu nhân') nhưng đã có 'ngân hàng', 'cảnh sát'. KHÔNG dùng trẫm/khanh (đã hết phong kiến).",
+
+  "typical_pronouns": {
+    "self_default": "tôi (đã modern hóa)",
+    "self_humble": "tại hạ (vẫn dùng với người trên / lịch sự cao)",
+    "couple_intimate": "anh — em / chàng — nàng (dùng cả 2)",
+    "couple_arranged": "tôi — anh / tôi — cô (lạnh khi mới kết)",
+    "family_father": "cha / phụ thân",
+    "family_mother": "mẹ / mẫu thân / mạ",
+    "to_servant": "anh / chị / cô (theo tuổi) — tránh 'thằng/con' trừ chủ tớ nghiêm",
+    "servant_to_master": "thưa thiếu gia / thưa tiểu thư / thưa phu nhân",
+    "to_elder": "cụ / ông / bà / bác",
+    "officer_self": "bản chức / chức hạ (chính thức) / tôi (đời thường)",
+    "to_officer": "thưa ngài / thưa đại nhân (quân/quan) / thưa quan trưởng",
+    "rival_to_rival": "tôi — ông / tôi — bà"
+  },
+
+  "common_terms": [
+    {"zh": "少爷", "vi": "Thiếu gia", "category": "title", "notes": ""},
+    {"zh": "小姐", "vi": "Tiểu thư", "category": "title", "notes": ""},
+    {"zh": "夫人", "vi": "Phu nhân", "category": "title", "notes": "Vợ chủ nhà"},
+    {"zh": "太太", "vi": "Bà chủ / phu nhân", "category": "title", "notes": ""},
+    {"zh": "老爷", "vi": "Ông chủ", "category": "title", "notes": ""},
+    {"zh": "管家", "vi": "Quản gia", "category": "title", "notes": ""},
+    {"zh": "佣人", "vi": "Người hầu", "category": "title", "notes": ""},
+    {"zh": "司机", "vi": "Tài xế", "category": "title", "notes": "Đã hiện đại"},
+    {"zh": "保镖", "vi": "Vệ sĩ", "category": "title", "notes": ""},
+    {"zh": "军官", "vi": "Sĩ quan / quân quan", "category": "title", "notes": ""},
+    {"zh": "司令", "vi": "Tư lệnh", "category": "title", "notes": ""},
+    {"zh": "团长", "vi": "Đoàn trưởng / Trung đoàn trưởng", "category": "title", "notes": ""},
+    {"zh": "警察", "vi": "Cảnh sát", "category": "title", "notes": ""},
+    {"zh": "巡捕", "vi": "Tuần bộ", "category": "title", "notes": "Cảnh sát thuộc địa Thượng Hải"},
+    {"zh": "洋人", "vi": "Người Tây / Tây dương", "category": "concept", "notes": ""},
+    {"zh": "租界", "vi": "Tô giới", "category": "concept", "notes": "Vùng do nước ngoài thuê"},
+    {"zh": "包办婚姻", "vi": "Hôn nhân sắp đặt", "category": "concept", "notes": "Cha mẹ định"},
+    {"zh": "门当户对", "vi": "Môn đăng hộ đối", "category": "concept", "notes": ""},
+    {"zh": "妾", "vi": "Thiếp / vợ lẽ", "category": "concept", "notes": ""},
+    {"zh": "嫡出", "vi": "Đích xuất / con vợ cả", "category": "concept", "notes": ""},
+    {"zh": "庶出", "vi": "Thứ xuất / con vợ lẽ", "category": "concept", "notes": ""},
+    {"zh": "洋行", "vi": "Dương hành", "category": "concept", "notes": "Cty buôn bán có yếu tố Tây"},
+    {"zh": "银行", "vi": "Ngân hàng", "category": "concept", "notes": ""},
+    {"zh": "公馆", "vi": "Công quán", "category": "concept", "notes": "Tư dinh lớn"},
+    {"zh": "戏园", "vi": "Hí viện", "category": "concept", "notes": "Nhà hát"},
+    {"zh": "黄包车", "vi": "Xe kéo", "category": "concept", "notes": ""},
+    {"zh": "汽车", "vi": "Ô tô / xe hơi", "category": "concept", "notes": ""},
+    {"zh": "电报", "vi": "Điện báo", "category": "concept", "notes": ""},
+    {"zh": "枪", "vi": "Súng", "category": "concept", "notes": ""},
+    {"zh": "情报", "vi": "Tình báo", "category": "concept", "notes": ""}
+  ],
+
+  "common_cliches": [
+    {"zh": "我陈家容不下你",
+     "vi": "Nhà họ Trần không dung được cô",
+     "category": "cliche", "notes": "Mẹ chồng đuổi con dâu"},
+    {"zh": "门不当户不对",
+     "vi": "Không môn đăng hộ đối",
+     "category": "cliche", "notes": "Lý do từ chối"},
+    {"zh": "你这种身份",
+     "vi": "Thân phận của cô / Loại như cô",
+     "category": "cliche", "notes": "Khinh thường giai cấp"}
+  ],
+
+  "translation_examples": [
+    {"zh": "少爷，太太找您",
+     "vi": "Thưa thiếu gia, bà chủ tìm cậu",
+     "context": "Người hầu báo",
+     "note": "Bắt buộc 'thưa thiếu gia'. 'Bà chủ' (không 'phu nhân' cho mẹ ruột)"},
+    {"zh": "我顾家容不下这样的儿媳",
+     "vi": "Nhà họ Cố không chấp nhận loại con dâu này",
+     "context": "Mẹ chồng phán",
+     "note": "顾家 → 'nhà họ Cố'. Giữ chất Dân Quốc trang trọng."}
+  ],
+
+  "style_notes": "TONE TỔNG: Hoài cổ trang trọng, lai cổ-modern. Vẫn dùng 'tiểu thư/thiếu gia/phu nhân' nhưng đã có 'ô tô/ngân hàng/cảnh sát'. KHÔNG dùng từ cổ thuần (trẫm/khanh/tại hạ trừ khi cố tình trang trọng). KHÔNG dùng từ siêu modern ('OK', 'sếp', 'gói cước'). Khi quân nhân nói: tone kỷ luật, dùng 'thưa', 'rõ', 'báo cáo'. Khi xã hội thượng lưu: tone trau chuốt, nhiều tính từ."
+}

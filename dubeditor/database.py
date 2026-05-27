@@ -76,6 +76,8 @@ def _migrate_v3():
             # v3.9: Editor resume state
             add_col("projects", "last_filter_chapter_ids", "TEXT")
             add_col("projects", "last_subtitle_index", "INTEGER")
+            # v4.2: Manual Translate Mega target lines (default 500)
+            add_col("projects", "mega_target_lines", "INTEGER")
 
         # characters v2 fields (giữ nguyên column cũ để không mất data)
         if has_table("characters"):
@@ -124,6 +126,8 @@ def _migrate_v3():
             add_col("subtitles", "is_cleaned", "INTEGER DEFAULT 0")
             add_col("subtitles", "original_raw", "TEXT")
             add_col("subtitles", "clean_reason", "TEXT")
+            # v4.3: Speaker slot cho lồng tiếng (NAM_CHINH, NU_CHINH, ... hoặc M/F)
+            add_col("subtitles", "speaker_slot", "TEXT")
 
         # scenes: thêm chunk_id FK (v3)
         if has_table("scenes"):
