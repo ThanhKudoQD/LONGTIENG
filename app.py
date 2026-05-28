@@ -356,7 +356,9 @@ async def lifespan(app: FastAPI):
     from dubeditor.database import init_db as dub_init_db
     dub_init_db()  # khởi tạo toàn bộ bảng (DubEditor + VoiceCast) trong 1 DB
     seed_admin()
-
+    import asyncio
+    from dubeditor.simple.jobs import set_main_loop
+    set_main_loop(asyncio.get_running_loop())
     # Khởi động TTS Queue worker
     from dubeditor.tts_queue import queue_manager
     from dubeditor.routers.ws import broadcast as dub_broadcast

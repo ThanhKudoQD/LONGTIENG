@@ -16,19 +16,7 @@ def get_subtitles(project_id: int, db: Session = Depends(get_db)):
         Subtitle.project_id == project_id
     ).order_by(Subtitle.index).all()
 
-    # Auto-clean: dòng đã được Stage 0 normalize (is_cleaned=True) nhưng
-    # cột `text` legacy vẫn chứa TQ gốc lúc import → clear text.
-    # Stage 4 sẽ ghi lại text bằng bản dịch Việt sau này.
-    dirty = False
-    for s in subs:
-        if s.is_cleaned and s.text and s.text != (s.text_v1 or ""):
-            # text khác text_v1 (Việt) → có thể là TQ legacy, clear đi
-            if s.text != s.original_text:  # tránh xóa nhầm
-                s.text = s.text_v1 or ""
-                dirty = True
-    if dirty:
-        db.commit()
-
+    # Simple v4: pipeline cũ (Stage 0) đã bị bỏ. Trả thẳng subs.
     return subs
 
 
@@ -142,27 +130,18 @@ def update_subtitle_by_index(project_id: int, subtitle_index: int, data: Subtitl
 
 
 def _sync_variant_active(s: Subtitle) -> None:
-    """Sync text active từ variant_selected. Recompute CPS.
+    """Recompute CPS sau khi update text.
 
-    Logic:
-    - Nếu update đến text_v1/text_v2/variant_selected → đồng bộ Subtitle.text
-    - Nếu update text trực tiếp → cũng update vào variant đang active để giữ nhất quán
+    Simple v4: KHÔNG còn variant — chỉ giữ recompute CPS để các endpoint update
+    text vẫn cập nhật cps_value đúng.
     """
-    variant = s.variant_selected or 1
-    if variant == 2 and s.text_v2:
-        s.text = s.text_v2
-    elif s.text_v1 is not None:
-        s.text = s.text_v1
-    # Recompute CPS
+    # Recompute CPS từ text hiện tại
     duration = max(0.01, (s.end_time or 0.0) - (s.start_time or 0.0))
     text = s.text or ""
     if duration > 0 and text:
         s.cps_value = len(text.strip()) / duration
     else:
         s.cps_value = None
-    # Reset TTS cache vì text có thể đã đổi
-    # (chỉ reset nếu text_v1/v2 hoặc variant_selected có trong fields update)
-    # → đơn giản: chỉ reset nếu cần. UI sẽ xử lý.
 
 
 # ─── Backup helpers cho undo delete subtitle ─────────────────────────────────
@@ -175,17 +154,16 @@ def _sync_variant_active(s: Subtitle) -> None:
 #   - Vì vậy restore chỉ cần insert lại row → audio_path cũ vẫn dùng được.
 
 _BACKUP_FIELDS = (
-    "id", "project_id", "character_id", "scene_id", "index",
+    "id", "project_id", "character_id", "index",
     "start_time", "end_time", "text", "original_text",
     "audio_path", "audio_offset", "tts_done", "wav_duration", "tts_speed",
     "audio_voice_mode",
-    "speaker_zh", "speaker_confidence", "speaker_reason",
     "emotion", "intensity", "cps_value",
-    "needs_review", "review_reason", "text_draft", "is_hook",
+    "needs_review", "review_reason", "is_hook",
     "translation_version",
-    "text_v1", "text_v2", "variant_selected",
-    "is_noise", "is_cleaned", "original_raw", "clean_reason",
-    "chunk_id", "tts_voice_mode",
+    "is_noise", "tts_voice_mode",
+    # Simple v4 fields
+    "simple_speaker_zh", "simple_text_vi", "simple_status",
 )
 
 

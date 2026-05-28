@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import ProjectList from './components/ProjectList'
 import Editor from './components/Editor'
-import TranslatePage from './components/TranslatePage'
+import TranslatePage from './components/translate/simple'
 import LicenseGate, { LicenseStatus } from './components/LicenseGate'
 import api from './api'
 

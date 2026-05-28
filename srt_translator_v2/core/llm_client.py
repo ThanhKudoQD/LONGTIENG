@@ -68,8 +68,11 @@ def cap_max_output(max_output: int, model: str) -> int:
         return min(max_output, 8192)
     if "gpt-3.5" in m:
         return min(max_output, 4096)
-    if m.startswith(("o1", "o3", "o4", "gpt-5")):
-        return min(max_output, 32768)
+    # GPT-5 series: 128000 max output tokens (gồm cả reasoning tokens)
+    if m.startswith("gpt-5"):
+        return min(max_output, 128000)
+    if m.startswith(("o1", "o3", "o4")):
+        return min(max_output, 100000)
     # DeepSeek V4 (Flash & Pro) — doc nói 384K, cap ở 65536 cho ổn định + tránh chunk lớn bị cắt
     if "deepseek-v4" in m or "deepseek-reasoner" in m:
         return min(max_output, 65536)

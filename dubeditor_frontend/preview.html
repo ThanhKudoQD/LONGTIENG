@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Simple Translator — Preview</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root{ --bg: #FAFAF7; }
+  body{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, 'Helvetica Neue', sans-serif;
+    background: #FAFAF7;
+    color: #1F2937;
+    -webkit-font-smoothing: antialiased;
+    margin:0;
+  }
+  .surface-card{ background:#fff; border:1px solid rgba(228,228,231,.7); }
+  .surface{ background:#FAFAF7; }
+  .btn{
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    padding:6px 12px; font-size:13px; font-weight:500;
+    border-radius:8px; border:1px solid #e4e4e7; background:#fff; color:#3f3f46;
+    cursor:pointer; transition:all .15s;
+  }
+  .btn:hover{ background:#fafafa; }
+  .btn-primary{
+    display:inline-flex; align-items:center; justify-content:center; gap:6px;
+    padding:6px 12px; font-size:13px; font-weight:500;
+    border-radius:8px; background:#2563eb; color:#fff; border:none;
+    cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,.05); transition:background .15s;
+  }
+  .btn-primary:hover{ background:#3b82f6; }
+  .input{
+    padding:4px 10px; font-size:11.5px;
+    border-radius:6px; border:1px solid #e4e4e7; background:#fff;
+  }
+  ::-webkit-scrollbar{ width:4px; height:4px; }
+  ::-webkit-scrollbar-thumb{ background:#d4d4d8; border-radius:2px; }
+</style>
+</head>
+<body class="h-screen flex flex-col">
+
+<!-- TOP BAR -->
+<div class="flex items-center gap-3 px-4 py-2.5 bg-white border-b border-zinc-200">
+  <button class="btn">← Editor</button>
+  <h1 class="text-[15px] font-serif text-zinc-800 tracking-tight">SOAICA_22-05-2026_PHIM02</h1>
+  <span class="font-mono text-[10.5px] text-zinc-400 uppercase tracking-widest">4,663 dòng · 26 nhân vật</span>
+  <div class="flex-1"></div>
+  <span class="inline-flex items-center gap-2 px-2.5 py-1 rounded-md text-[10.5px] font-mono uppercase tracking-wider bg-blue-50 text-blue-700 border border-blue-200">
+    <span class="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
+    Đang dịch · Batch 12/47
+  </span>
+</div>
+
+<!-- TABS -->
+<div class="flex items-stretch gap-0.5 px-4 bg-white border-b border-zinc-200">
+  <button onclick="showTab('bible')" id="tab-bible" class="tab-btn flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px border-blue-600 text-zinc-900">
+    <span class="font-serif italic text-[16px] text-blue-600">I</span>
+    <span>Bible</span>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10.5px] font-mono tracking-wide bg-emerald-50 text-emerald-700">✓ 26</span>
+  </button>
+  <button onclick="showTab('translate')" id="tab-translate" class="tab-btn flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px border-transparent text-zinc-500 hover:text-zinc-800">
+    <span class="font-serif italic text-[16px] text-zinc-400">II</span>
+    <span>Dịch batch</span>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10.5px] font-mono tracking-wide bg-blue-50 text-blue-700 animate-pulse">12 / 47</span>
+  </button>
+  <button onclick="showTab('filter')" id="tab-filter" class="tab-btn flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px border-transparent text-zinc-500 hover:text-zinc-800">
+    <span class="font-serif italic text-[16px] text-zinc-400">III</span>
+    <span>Lọc lỗi</span>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10.5px] font-mono tracking-wide bg-amber-50 text-amber-700">23</span>
+  </button>
+  <button onclick="showTab('review')" id="tab-review" class="tab-btn flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px border-transparent text-zinc-500 hover:text-zinc-800">
+    <span class="font-serif italic text-[16px] text-zinc-400">IV</span>
+    <span>Review</span>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10.5px] font-mono tracking-wide bg-zinc-100 text-zinc-600">0 / 3</span>
+  </button>
+  <button onclick="showTab('issues')" id="tab-issues" class="tab-btn flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 -mb-px border-transparent text-zinc-500 hover:text-zinc-800">
+    <span class="font-serif italic text-[16px] text-zinc-400">V</span>
+    <span>Vấn đề</span>
+    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10.5px] font-mono tracking-wide bg-red-50 text-red-700">8</span>
+  </button>
+</div>
+
+<!-- MAIN -->
+<div class="flex-1 overflow-y-auto px-6 py-5 surface">
+<div class="max-w-[1280px] mx-auto">
+
+<!-- ════════════ PAGE BIBLE ════════════ -->
+<div id="page-bible" class="page">
+
+  <div class="flex items-end justify-between mb-5 pb-3 border-b border-zinc-200/80">
+    <div>
+      <h1 class="text-[24px] font-serif font-normal leading-none text-zinc-900 tracking-tight">
+        Movie <em class="italic text-blue-600">Bible</em>
+      </h1>
+      <p class="text-[12px] text-zinc-500 mt-2 max-w-2xl leading-snug">
+        Trích xuất nhân vật, quan hệ, thuật ngữ, phong cách thoại. Dùng làm bộ nhớ chung cho toàn bộ pipeline dịch.
+      </p>
+    </div>
+    <div class="text-right font-mono text-[10.5px] text-zinc-500 leading-relaxed">
+      <div><span class="text-zinc-400">SRT:</span> 4,663 dòng · ~82k tok</div>
+      <div><span class="text-zinc-400">Bible cuối: ~3,200 tok</span></div>
+    </div>
+  </div>
+
+  <!-- Mode bar -->
+  <div class="surface-card rounded-lg px-4 py-2.5 mb-4 flex items-center gap-4">
+    <span class="text-[10.5px] font-mono uppercase tracking-widest text-zinc-500">Chế độ</span>
+    <div class="inline-flex bg-zinc-100 rounded-md p-0.5 gap-0.5">
+      <button class="px-3 py-1 text-[11.5px] font-medium rounded text-zinc-600">Single · 1 prompt</button>
+      <button class="px-3 py-1 text-[11.5px] font-medium rounded bg-white text-zinc-900 shadow-sm">Multi · 5 phần</button>
+    </div>
+    <span class="text-[11px] text-zinc-500 ml-2">
+      SRT lớn — khuyên dùng <b class="text-blue-600">Multi</b>. Các parts chạy song song → merge thành Master.
+    </span>
+  </div>
+
+  <!-- Part 1 -->
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <div class="flex items-baseline gap-3">
+        <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Part 1</span> / 5</span>
+        <span class="font-mono text-[10.5px] text-zinc-500 tracking-wide">lines 1 → 933 · ~16k tok</span>
+      </div>
+      <div class="flex-1"></div>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-emerald-50 text-emerald-700">
+        ✓ Đã lưu · 32 nhân vật
+      </span>
+    </div>
+  </div>
+
+  <!-- Part 2 -->
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <div class="flex items-baseline gap-3">
+        <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Part 2</span> / 5</span>
+        <span class="font-mono text-[10.5px] text-zinc-500">lines 934 → 1,866 · ~16k tok</span>
+      </div>
+      <div class="flex-1"></div>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-emerald-50 text-emerald-700">
+        ✓ Đã lưu · 28 nhân vật
+      </span>
+    </div>
+  </div>
+
+  <!-- Part 3 — running with expanded -->
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <div class="flex items-baseline gap-3">
+        <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Part 3</span> / 5</span>
+        <span class="font-mono text-[10.5px] text-zinc-500">lines 1,867 → 2,799 · ~16k tok</span>
+      </div>
+      <div class="flex-1"></div>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-blue-50 text-blue-700">
+        <span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-current animate-pulse"></span>⏵ Đang chạy
+      </span>
+    </div>
+    <div class="p-4">
+      <div class="grid grid-cols-2 gap-3">
+        <!-- Prompt -->
+        <div class="surface-card rounded-lg overflow-hidden flex flex-col min-h-[220px]">
+          <div class="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-b border-zinc-200/70">
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Prompt</span>
+            <span class="text-[10px] text-zinc-400 font-mono">≈ 16,240 tokens</span>
+            <div class="flex-1"></div>
+            <button class="text-[11px] px-2 py-1 rounded border border-zinc-200 text-zinc-600 hover:bg-zinc-50">📋 Copy</button>
+          </div>
+          <textarea readonly class="flex-1 bg-transparent outline-none p-3 font-mono text-[11.5px] leading-relaxed text-zinc-600 resize-none">You are a world-class Chinese → Vietnamese subtitle localization architect.
+
+Your task is NOT subtitle translation.
+Your task is to build an elite production-grade MOVIE BIBLE...
+
+[SCHEMA]
+{
+  "genre": "",
+  "setting": "",
+  "period": "",
+  "c": {},
+  "speech": {},
+  "self": {},
+  "r": {},
+  "dynamics": {},
+  "t": {},
+  "rules": [],
+  "sum": "",
+  "unknowns": []
+}
+
+[SUBTITLE INPUT]
+1867
+00:48:12,400 --> 00:48:14,200
+你不能这样对我！</textarea>
+        </div>
+        <!-- Response -->
+        <div class="surface-card rounded-lg overflow-hidden flex flex-col min-h-[220px]">
+          <div class="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-b border-zinc-200/70">
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Response</span>
+            <span class="text-[10px] text-zinc-400 font-mono">streaming...</span>
+            <div class="flex-1"></div>
+            <button class="text-[11px] px-2 py-1 rounded border border-zinc-200 text-zinc-500 hover:bg-red-50 hover:text-red-600 hover:border-red-300">Clear</button>
+            <button class="text-[11px] px-2.5 py-1 rounded bg-blue-600 text-white font-medium hover:bg-blue-500">💾 Lưu</button>
+          </div>
+          <textarea class="flex-1 bg-transparent outline-none p-3 font-mono text-[11.5px] leading-relaxed text-zinc-700 resize-none">{
+  "genre": "ngôn tình hiện đại, hào môn",
+  "setting": "Kinh Thị, giới thượng lưu",
+  "period": "hiện đại 2020s",
+  "c": {
+    "颜娇娇": ["Nhan Kiều Kiều", "F", "core", ["娇娇"]],
+    "颜冰":   ["Nhan Băng", "F", "core", ["冰冰"]],
+    ...</textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Part 4, 5 idle -->
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Part 4</span> / 5</span>
+      <span class="font-mono text-[10.5px] text-zinc-500">lines 2,800 → 3,731 · ~16k tok</span>
+      <div class="flex-1"></div>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-zinc-100 text-zinc-500">— Chưa chạy</span>
+    </div>
+  </div>
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Part 5</span> / 5</span>
+      <span class="font-mono text-[10.5px] text-zinc-500">lines 3,732 → 4,663 · ~16k tok</span>
+      <div class="flex-1"></div>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-zinc-100 text-zinc-500">— Chưa chạy</span>
+    </div>
+  </div>
+
+  <div class="my-6 border-t border-dashed border-zinc-300"></div>
+
+  <!-- Merge -->
+  <div class="surface-card rounded-lg overflow-hidden mb-3 border-blue-300 shadow-[0_0_0_1px_rgba(59,130,246,0.15)]">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-gradient-to-r from-blue-50/80 to-zinc-50">
+      <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">⟡ Merge</span> · 5 partial → 1 master</span>
+      <span class="font-mono text-[10.5px] text-zinc-500">resolve aliases, dedupe characters, gộp speech style</span>
+      <div class="flex-1"></div>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-zinc-100 text-zinc-500">— Chờ 3 part còn lại</span>
+    </div>
+  </div>
+
+  <div class="flex items-center gap-2 mt-5 pt-4 border-t border-zinc-200/70">
+    <button class="btn-primary">⚡ Run All Auto</button>
+    <button class="btn">📋 Copy All Prompts</button>
+    <button class="btn text-zinc-500">↻ Reset Bible</button>
+    <div class="flex-1"></div>
+    <span class="font-mono text-[10.5px] text-zinc-500">
+      <span class="text-zinc-400">Cost ước tính:</span> $0.18 Gemini Pro · $0.04 DeepSeek
+    </span>
+  </div>
+</div>
+
+<!-- ════════════ PAGE TRANSLATE ════════════ -->
+<div id="page-translate" class="page hidden">
+
+  <div class="flex items-end justify-between mb-5 pb-3 border-b border-zinc-200/80">
+    <div>
+      <h1 class="text-[24px] font-serif font-normal leading-none text-zinc-900 tracking-tight">
+        Dịch theo <em class="italic text-blue-600">batch</em>
+      </h1>
+      <p class="text-[12px] text-zinc-500 mt-2 max-w-2xl leading-snug">
+        Mỗi batch nhận ACTIVE_BIBLE (subset nhân vật xuất hiện) + 15 dòng context trước → trả về [id, speaker, vi].
+      </p>
+    </div>
+    <div class="text-right font-mono text-[10.5px] text-zinc-500 leading-relaxed">
+      <div><span class="text-zinc-400">Batch size:</span> 100 dòng · gap ≥ 3s</div>
+      <div><span class="text-zinc-400">Tiến độ:</span> 12 / 47</div>
+    </div>
+  </div>
+
+  <!-- Info strip -->
+  <div class="surface-card rounded-lg px-4 py-3 mb-4 flex gap-6">
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Đã dịch</span>
+      <span class="text-[20px] font-serif leading-none text-emerald-600">1,213</span>
+    </div>
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Còn lại</span>
+      <span class="text-[20px] font-serif leading-none text-zinc-800">3,450</span>
+    </div>
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">UNKNOWN ratio</span>
+      <span class="text-[20px] font-serif leading-none text-amber-600">8.4%</span>
+    </div>
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Chế độ</span>
+      <span class="text-[20px] font-serif leading-none text-blue-600">Turbo · 5x</span>
+    </div>
+    <div class="flex flex-col gap-0.5 ml-auto">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Cost so far</span>
+      <span class="text-[20px] font-serif leading-none text-zinc-800">$0.21</span>
+    </div>
+  </div>
+
+  <!-- Mode -->
+  <div class="surface-card rounded-lg px-4 py-2.5 mb-4 flex items-center gap-4">
+    <span class="text-[10.5px] font-mono uppercase tracking-widest text-zinc-500">Chế độ chạy</span>
+    <div class="inline-flex bg-zinc-100 rounded-md p-0.5 gap-0.5">
+      <button class="px-3 py-1 text-[11.5px] font-medium rounded text-zinc-600">Normal · tuần tự</button>
+      <button class="px-3 py-1 text-[11.5px] font-medium rounded bg-white text-zinc-900 shadow-sm">Turbo · 5x song song</button>
+    </div>
+    <span class="text-[11px] text-zinc-500 ml-2">Dùng context Chinese thay vì context đã dịch. Nhanh ~5x, chất lượng giảm nhẹ.</span>
+  </div>
+
+  <div class="grid grid-cols-[260px_1fr] gap-4">
+    <!-- Sidebar -->
+    <div class="surface-card rounded-lg overflow-hidden h-fit">
+      <div class="flex items-center justify-between px-3 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+        <span class="text-[10.5px] font-mono uppercase tracking-widest text-zinc-500">Batches</span>
+        <span class="text-[10.5px] font-mono text-blue-600">12 / 47</span>
+      </div>
+      <div class="max-h-[520px] overflow-y-auto">
+        <button class="w-full flex items-center gap-2.5 px-3 py-2 border-b border-zinc-100 hover:bg-zinc-50 text-left">
+          <span class="font-mono text-[10.5px] w-7 text-zinc-400">01</span>
+          <div class="flex-1 min-w-0">
+            <div class="font-mono text-[10.5px] text-zinc-700 tracking-wide">1 → 98</div>
+            <div class="text-[10.5px] text-zinc-400 mt-0.5">98 dòng · 5 nhân vật</div>
+          </div>
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+        </button>
+        <button class="w-full flex items-center gap-2.5 px-3 py-2 border-b border-zinc-100 hover:bg-zinc-50 text-left">
+          <span class="font-mono text-[10.5px] w-7 text-zinc-400">02</span>
+          <div class="flex-1 min-w-0">
+            <div class="font-mono text-[10.5px] text-zinc-700">99 → 201</div>
+            <div class="text-[10.5px] text-zinc-400 mt-0.5">103 dòng · 6 nhân vật</div>
+          </div>
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+        </button>
+        <button class="w-full flex items-center gap-2.5 px-3 py-2 border-b border-zinc-100 bg-blue-50/60 border-l-2 border-l-blue-600 pl-[10px] text-left">
+          <span class="font-mono text-[10.5px] w-7 text-blue-600 font-semibold">12</span>
+          <div class="flex-1 min-w-0">
+            <div class="font-mono text-[10.5px] text-zinc-700">1,109 → 1,213</div>
+            <div class="text-[10.5px] text-zinc-400 mt-0.5">105 dòng · 7 nhân vật</div>
+          </div>
+          <span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+        </button>
+        <button class="w-full flex items-center gap-2.5 px-3 py-2 border-b border-zinc-100 hover:bg-zinc-50 text-left">
+          <span class="font-mono text-[10.5px] w-7 text-zinc-400">13</span>
+          <div class="flex-1 min-w-0">
+            <div class="font-mono text-[10.5px] text-zinc-700">1,214 → 1,316</div>
+            <div class="text-[10.5px] text-zinc-400 mt-0.5">103 dòng · 5 nhân vật</div>
+          </div>
+          <span class="w-1.5 h-1.5 rounded-full bg-zinc-300"></span>
+        </button>
+        <button class="w-full flex items-center gap-2.5 px-3 py-2 border-b border-zinc-100 hover:bg-zinc-50 text-left">
+          <span class="font-mono text-[10.5px] w-7 text-zinc-400">14</span>
+          <div class="flex-1 min-w-0">
+            <div class="font-mono text-[10.5px] text-zinc-700">1,317 → 1,420</div>
+            <div class="text-[10.5px] text-zinc-400 mt-0.5">104 dòng · 4 nhân vật</div>
+          </div>
+          <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Active batch -->
+    <div>
+      <div class="surface-card rounded-lg overflow-hidden mb-3">
+        <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+          <div class="flex items-baseline gap-3">
+            <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Batch 12</span> · lines 1,109 → 1,213</span>
+            <span class="font-mono text-[10.5px] text-zinc-500">105 dòng · ACTIVE_BIBLE: 7 nhân vật · ~3.8k tok</span>
+          </div>
+          <div class="flex-1"></div>
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-blue-50 text-blue-700">
+            <span class="w-1.5 h-1.5 mr-1.5 rounded-full bg-current animate-pulse"></span>⏵ Đang chạy
+          </span>
+        </div>
+        <div class="p-4">
+          <div class="grid grid-cols-2 gap-3">
+            <div class="surface-card rounded-lg overflow-hidden flex flex-col min-h-[260px]">
+              <div class="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-b border-zinc-200/70">
+                <span class="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Prompt</span>
+                <span class="text-[10px] text-zinc-400 font-mono">cached 2,140 · variable 1,680</span>
+                <div class="flex-1"></div>
+                <button class="text-[11px] px-2 py-1 rounded border border-zinc-200 text-zinc-600 hover:bg-zinc-50">📋 Copy</button>
+              </div>
+              <textarea readonly class="flex-1 bg-transparent outline-none p-3 font-mono text-[11.5px] leading-relaxed text-zinc-600 resize-none">[CACHED PREFIX — 2140 tok]
+Bạn là chuyên gia dịch phụ đề phim Trung Quốc...
+
+[MASTER_BIBLE.rules]
+- Dịch thoại tự nhiên, ngắn gọn
+- Cặp yêu nhau ưu tiên anh/em
+- Giữ thuật ngữ trọng sinh, vả mặt
+
+[OUTPUT FORMAT]
+[[id, "speaker_zh", "vi"], ...]
+
+═══════════════════════════════════════════
+
+[ACTIVE_BIBLE]
+{
+  "c": {
+    "颜娇娇": ["Nhan Kiều Kiều", "F", "core", ["娇娇"]],
+    "颜冰":   ["Nhan Băng", "F", "core", ["冰冰"]]
+  }
+}
+
+[PREVIOUS_CONTEXT — 15 dòng cuối batch 11]
+[[1094, "颜娇娇", "Chị, chờ em với!"],
+ [1095, "颜冰", "Mau lên."]]
+
+[CURRENT_LINES — 105 dòng]
+1109 | 颜娇娇你又跑到哪儿去了？
+1110 | 我...我刚才在花园里。</textarea>
+            </div>
+            <div class="surface-card rounded-lg overflow-hidden flex flex-col min-h-[260px]">
+              <div class="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-b border-zinc-200/70">
+                <span class="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Response</span>
+                <span class="text-[10px] text-zinc-400 font-mono">streaming...</span>
+                <div class="flex-1"></div>
+                <button class="text-[11px] px-2 py-1 rounded border border-zinc-200 text-zinc-500 hover:bg-red-50">Clear</button>
+                <button class="text-[11px] px-2.5 py-1 rounded bg-blue-600 text-white font-medium hover:bg-blue-500">💾 Lưu</button>
+              </div>
+              <textarea class="flex-1 bg-transparent outline-none p-3 font-mono text-[11.5px] leading-relaxed text-zinc-700 resize-none">[
+  [1109, "颜冰",   "Nhan Kiều Kiều, em lại đi đâu vậy?"],
+  [1110, "颜娇娇", "Em... em vừa ở vườn hoa thôi."],
+  [1111, "颜冰",   "Một mình?"],
+  [1112, "颜娇娇", "Dạ..."],
+  [1113, "陆易安", "Là tôi đến tìm cô ấy."]</textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2 mt-3 pt-3 border-t border-zinc-200/70">
+        <button class="btn-primary">⚡ Run Batch này</button>
+        <button class="btn">▶ Run All từ batch hiện tại</button>
+        <button class="btn text-zinc-500">↻ Dịch lại batch này</button>
+        <div class="flex-1"></div>
+        <button class="btn text-zinc-500">⚙ Cấu hình batch</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ PAGE FILTER ════════════ -->
+<div id="page-filter" class="page hidden">
+
+  <div class="flex items-end justify-between mb-5 pb-3 border-b border-zinc-200/80">
+    <div>
+      <h1 class="text-[24px] font-serif font-normal leading-none text-zinc-900 tracking-tight">
+        Lọc <em class="italic text-blue-600">lỗi</em>
+      </h1>
+      <p class="text-[12px] text-zinc-500 mt-2 max-w-2xl leading-snug">
+        Code thuần, không gọi AI. Quét 8 loại lỗi sau khi mỗi batch dịch xong. Auto-fix lỗi format trước khi flag.
+      </p>
+    </div>
+    <div class="text-right font-mono text-[10.5px] text-zinc-500 leading-relaxed">
+      <div><span class="text-zinc-400">Lần quét gần nhất:</span> 2 phút trước</div>
+      <div><span class="text-zinc-400">Lỗi tìm thấy:</span> 23 · Auto-fixed: 6</div>
+    </div>
+  </div>
+
+  <!-- 8 stat cards -->
+  <div class="grid grid-cols-8 gap-2 mb-4">
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">JSON parse</div>
+      <div class="text-[22px] font-serif leading-none text-emerald-600">0</div>
+    </div>
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">Thiếu id</div>
+      <div class="text-[22px] font-serif leading-none text-amber-600">3</div>
+    </div>
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">Id thừa</div>
+      <div class="text-[22px] font-serif leading-none text-emerald-600">0</div>
+    </div>
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">Speaker sai</div>
+      <div class="text-[22px] font-serif leading-none text-red-600">8</div>
+    </div>
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">Còn TQ</div>
+      <div class="text-[22px] font-serif leading-none text-red-600">5</div>
+    </div>
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">CPS vượt</div>
+      <div class="text-[22px] font-serif leading-none text-amber-600">4</div>
+    </div>
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">Dòng rỗng</div>
+      <div class="text-[22px] font-serif leading-none text-amber-600">3</div>
+    </div>
+    <div class="surface-card rounded-lg px-3 py-2.5">
+      <div class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500 mb-1">UNKNOWN</div>
+      <div class="text-[22px] font-serif leading-none text-amber-600">8.4%</div>
+    </div>
+  </div>
+
+  <div class="flex items-center gap-2 mb-5">
+    <button class="btn-primary">⚡ Quét lại toàn bộ</button>
+    <button class="btn">↺ Auto-fix tất cả</button>
+    <button class="btn text-zinc-500">📤 Đẩy 23 lỗi sang Review →</button>
+  </div>
+
+  <!-- Filter -->
+  <div class="surface-card rounded-lg px-4 py-2.5 mb-4 flex items-center gap-4">
+    <div class="flex items-center gap-2">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Loại</span>
+      <select class="input">
+        <option>Tất cả (23)</option>
+        <option>Speaker sai (8)</option>
+        <option>Còn TQ (5)</option>
+      </select>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Severity</span>
+      <select class="input">
+        <option>Tất cả</option>
+        <option>Error</option>
+        <option>Warning</option>
+      </select>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Batch</span>
+      <select class="input">
+        <option>Tất cả</option>
+        <option>Batch 12</option>
+      </select>
+    </div>
+    <div class="flex-1"></div>
+    <span class="text-[11px] text-zinc-500">23 / 23 hiển thị</span>
+  </div>
+
+  <!-- Issue rows -->
+  <div class="space-y-2">
+    <div class="surface-card rounded-lg p-3 hover:border-zinc-300">
+      <div class="flex items-center gap-2 mb-2.5">
+        <span class="font-mono text-[12px] font-semibold text-blue-600">#1234</span>
+        <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-red-50 text-red-700">Speaker sai</span>
+        <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-red-50 text-red-700">Xưng hô sai</span>
+        <div class="flex-1"></div>
+        <span class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Batch 12 · pending</span>
+      </div>
+      <div class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-3 items-baseline text-[12px]">
+        <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">ZH</span>
+        <span class="font-mono text-zinc-700">姜柠，你别装了。</span>
+        <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">VI hiện tại</span>
+        <span class="text-red-600"><span class="text-zinc-500 mr-1">UNKNOWN —</span>"Khương Nịnh, bạn đừng giả vờ nữa."</span>
+      </div>
+    </div>
+
+    <div class="surface-card rounded-lg p-3">
+      <div class="flex items-center gap-2 mb-2.5">
+        <span class="font-mono text-[12px] font-semibold text-blue-600">#1567</span>
+        <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-red-50 text-red-700">Dòng rỗng</span>
+        <div class="flex-1"></div>
+        <span class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Batch 14 · pending</span>
+      </div>
+      <div class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-3 items-baseline text-[12px]">
+        <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">ZH</span>
+        <span class="font-mono text-zinc-700">我爱你。</span>
+        <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">VI hiện tại</span>
+        <span class="text-red-600">(rỗng)</span>
+      </div>
+    </div>
+
+    <div class="surface-card rounded-lg p-3">
+      <div class="flex items-center gap-2 mb-2.5">
+        <span class="font-mono text-[12px] font-semibold text-blue-600">#3102</span>
+        <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">CPS vượt</span>
+        <div class="flex-1"></div>
+        <span class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Batch 30 · pending</span>
+      </div>
+      <div class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-3 items-baseline text-[12px]">
+        <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">ZH</span>
+        <span class="font-mono text-zinc-700">你好。</span>
+        <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">VI hiện tại</span>
+        <span class="text-zinc-700"><span class="text-zinc-500 mr-1">颜娇娇 —</span>"Xin chào bạn hôm nay khỏe không nhỉ tôi rất vui..."</span>
+        <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">CPS</span>
+        <span class="text-amber-600">38.2 (max 22)</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ PAGE REVIEW ════════════ -->
+<div id="page-review" class="page hidden">
+
+  <div class="flex items-end justify-between mb-5 pb-3 border-b border-zinc-200/80">
+    <div>
+      <h1 class="text-[24px] font-serif font-normal leading-none text-zinc-900 tracking-tight">
+        <em class="italic text-blue-600">Review & Repair</em>
+      </h1>
+      <p class="text-[12px] text-zinc-500 mt-2 max-w-2xl leading-snug">
+        Gom các dòng lỗi thành nhóm theo cụm gần, kèm context trước/sau, gửi AI sửa lại. Tối đa 2 lần retry.
+      </p>
+    </div>
+    <div class="text-right font-mono text-[10.5px] text-zinc-500">
+      <div><span class="text-zinc-400">Lỗi cần sửa:</span> 17 (đã auto-fix 6)</div>
+      <div><span class="text-zinc-400">Chia thành:</span> 3 nhóm · 3 prompts</div>
+    </div>
+  </div>
+
+  <div class="surface-card rounded-lg px-4 py-2.5 mb-4 flex items-center gap-4">
+    <span class="text-[10.5px] font-mono uppercase tracking-widest text-zinc-500">Sub-mode</span>
+    <div class="inline-flex bg-zinc-100 rounded-md p-0.5 gap-0.5">
+      <button class="px-3 py-1 text-[11.5px] font-medium rounded bg-white text-zinc-900 shadow-sm">Repair · từ lỗi đã phát hiện</button>
+      <button class="px-3 py-1 text-[11.5px] font-medium rounded text-zinc-600">QA · rà soát đoạn đã dịch</button>
+    </div>
+    <span class="text-[11px] text-zinc-500 ml-2">Context adaptive — speaker errors lấy nhiều context hơn (5-8 dòng), Chinese leak ít hơn (2-3 dòng).</span>
+  </div>
+
+  <!-- Group 1 -->
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <div class="flex items-baseline gap-3">
+        <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Group 1</span> · Batch 12</span>
+        <span class="font-mono text-[10.5px] text-zinc-500">5 lỗi · range 1234-1289 · context: 5 trước / 5 sau</span>
+      </div>
+      <div class="flex-1"></div>
+      <button class="text-[10.5px] px-2.5 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50 font-medium">⚡ Auto Repair</button>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-zinc-100 text-zinc-500">— Chưa chạy</span>
+    </div>
+    <div class="p-4">
+      <div class="flex flex-wrap gap-1.5 mb-3">
+        <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">invalid_speaker</span>
+        <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600">unnatural_pronoun</span>
+        <span class="text-[10.5px] text-zinc-400 ml-1">~1,840 tokens</span>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="surface-card rounded-lg overflow-hidden flex flex-col min-h-[220px]">
+          <div class="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-b border-zinc-200/70">
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Prompt · Repair</span>
+            <span class="text-[10px] text-zinc-400 font-mono">≈ 1,840 tokens</span>
+            <div class="flex-1"></div>
+            <button class="text-[11px] px-2 py-1 rounded border border-zinc-200 text-zinc-600 hover:bg-zinc-50">📋 Copy</button>
+          </div>
+          <textarea readonly class="flex-1 bg-transparent outline-none p-3 font-mono text-[11.5px] leading-relaxed text-zinc-600 resize-none">[ACTIVE_BIBLE]
+{
+  "c": { "颜娇娇": [...], "颜冰": [...], "姜柠": [...] }
+}
+
+[CONTEXT_BEFORE — 5 dòng]
+[[1229, "颜娇娇", "Chị ơi, cô ta lại đến rồi."],
+ [1230, "颜冰",   "Để chị xử lý."],
+ [1231, "姜柠",   "Hai chị em vui vẻ nhỉ."]]
+
+[ERRORS]
+[{
+  "id": 1234,
+  "zh": "姜柠，你别装了。",
+  "bad_speaker": "UNKNOWN",
+  "bad_vi": "Khương Nịnh, bạn đừng giả vờ nữa.",
+  "error_types": ["invalid_speaker"]
+}]
+
+Return: [[id, speaker, vi], ...]</textarea>
+        </div>
+        <div class="surface-card rounded-lg overflow-hidden flex flex-col min-h-[220px]">
+          <div class="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-b border-zinc-200/70">
+            <span class="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">Response</span>
+            <span class="text-[10px] text-zinc-400 font-mono">empty</span>
+            <div class="flex-1"></div>
+            <button class="text-[11px] px-2 py-1 rounded border border-zinc-200 text-zinc-500">Clear</button>
+            <button class="text-[11px] px-2.5 py-1 rounded bg-blue-600 text-white font-medium opacity-40 cursor-not-allowed" disabled>💾 Lưu</button>
+          </div>
+          <textarea placeholder="Bấm Auto Repair để gọi API, hoặc paste response JSON sau khi đã chạy thủ công..." class="flex-1 bg-transparent outline-none p-3 font-mono text-[11.5px] leading-relaxed text-zinc-700 resize-none placeholder:text-zinc-400"></textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Groups 2, 3 collapsed -->
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Group 2</span> · Batch 14-15</span>
+      <span class="font-mono text-[10.5px] text-zinc-500">7 lỗi · range 1567-1623 · context: 3 / 3</span>
+      <div class="flex-1"></div>
+      <button class="text-[10.5px] px-2.5 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50 font-medium">⚡ Auto Repair</button>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-zinc-100 text-zinc-500">— Chưa chạy</span>
+    </div>
+  </div>
+
+  <div class="surface-card rounded-lg overflow-hidden mb-3">
+    <div class="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-200/70 bg-zinc-50/80">
+      <span class="font-mono text-[12px] font-semibold text-zinc-800"><span class="text-blue-600">Group 3</span> · Batch 30, 37</span>
+      <span class="font-mono text-[10.5px] text-zinc-500">5 lỗi · 2 cụm lẻ</span>
+      <div class="flex-1"></div>
+      <button class="text-[10.5px] px-2.5 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50 font-medium">⚡ Auto Repair</button>
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-[10.5px] font-mono uppercase tracking-wider bg-zinc-100 text-zinc-500">— Chưa chạy</span>
+    </div>
+  </div>
+
+  <div class="flex items-center gap-2 mt-5 pt-4 border-t border-zinc-200/70">
+    <button class="btn-primary">⚡ Run All Repair (3 groups)</button>
+    <button class="btn">📋 Copy all prompts</button>
+    <div class="flex-1"></div>
+    <span class="font-mono text-[10.5px] text-zinc-500">
+      <span class="text-zinc-400">Retry policy:</span> max 2 lần · vẫn lỗi → mark still_broken
+    </span>
+  </div>
+</div>
+
+<!-- ════════════ PAGE ISSUES ════════════ -->
+<div id="page-issues" class="page hidden">
+
+  <div class="flex items-end justify-between mb-5 pb-3 border-b border-zinc-200/80">
+    <div>
+      <h1 class="text-[24px] font-serif font-normal leading-none text-zinc-900 tracking-tight">
+        Vấn đề <em class="italic text-blue-600">tồn đọng</em>
+      </h1>
+      <p class="text-[12px] text-zinc-500 mt-2 max-w-2xl leading-snug">
+        Lịch sử các dòng đã từng lỗi và cách AI đã sửa. Theo dõi dòng còn "still_broken" cần xử lý tay.
+      </p>
+    </div>
+    <div class="text-right font-mono text-[10.5px] text-zinc-500">
+      <div><span class="text-zinc-400">Tổng:</span> 31 · fixed: 23 · still_broken: 8</div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="surface-card rounded-lg px-4 py-3 mb-4 flex gap-6">
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Tổng issues</span>
+      <span class="text-[20px] font-serif leading-none text-zinc-800">31</span>
+    </div>
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Đã fix</span>
+      <span class="text-[20px] font-serif leading-none text-emerald-600">23</span>
+    </div>
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Còn lỗi</span>
+      <span class="text-[20px] font-serif leading-none text-red-600">8</span>
+    </div>
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">User resolved</span>
+      <span class="text-[20px] font-serif leading-none text-zinc-800">—</span>
+    </div>
+    <div class="flex flex-col gap-0.5">
+      <span class="text-[9.5px] font-mono uppercase tracking-widest text-zinc-500">Cost repair</span>
+      <span class="text-[20px] font-serif leading-none text-blue-600">$0.04</span>
+    </div>
+  </div>
+
+  <!-- Filter -->
+  <div class="surface-card rounded-lg px-4 py-2.5 mb-4 flex items-center gap-4">
+    <div class="flex items-center gap-2">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Status</span>
+      <select class="input">
+        <option>Tất cả (31)</option>
+        <option>Fixed (23)</option>
+        <option>Still broken (8)</option>
+      </select>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Loại lỗi</span>
+      <select class="input">
+        <option>Tất cả</option>
+        <option>Speaker invalid</option>
+      </select>
+    </div>
+    <div class="flex-1"></div>
+    <button class="btn text-zinc-500">📥 Export CSV</button>
+  </div>
+
+  <!-- Fixed -->
+  <div class="surface-card rounded-lg p-3 mb-2 hover:border-zinc-300">
+    <div class="flex items-center gap-2 mb-2.5">
+      <span class="font-mono text-[12px] font-semibold text-blue-600">#1234</span>
+      <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">✓ FIXED</span>
+      <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-500 opacity-70">invalid_speaker</span>
+      <div class="flex-1"></div>
+      <span class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Attempt 1 · Batch 12</span>
+    </div>
+    <div class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-3 items-baseline text-[12px]">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">ZH</span>
+      <span class="font-mono text-zinc-700">姜柠，你别装了。</span>
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Trước</span>
+      <span class="text-red-600 line-through decoration-red-400/60"><span class="text-zinc-500 mr-1 no-underline">UNKNOWN —</span>"Khương Nịnh, bạn đừng giả vờ nữa."</span>
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Sau</span>
+      <span class="text-emerald-600"><span class="text-zinc-500 mr-1">姜柠 —</span>"Khương Nịnh, cô đừng giả vờ nữa."</span>
+    </div>
+  </div>
+
+  <!-- Fixed 2 -->
+  <div class="surface-card rounded-lg p-3 mb-2">
+    <div class="flex items-center gap-2 mb-2.5">
+      <span class="font-mono text-[12px] font-semibold text-blue-600">#3890</span>
+      <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">✓ FIXED</span>
+      <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-500 opacity-70">chinese_remained</span>
+      <div class="flex-1"></div>
+      <span class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Attempt 1 · Batch 37</span>
+    </div>
+    <div class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-3 items-baseline text-[12px]">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">ZH</span>
+      <span class="font-mono text-zinc-700">他是个混蛋。</span>
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Trước</span>
+      <span class="text-red-600 line-through decoration-red-400/60"><span class="text-zinc-500 mr-1 no-underline">陆易安 —</span>"Hắn là một 混蛋."</span>
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Sau</span>
+      <span class="text-emerald-600"><span class="text-zinc-500 mr-1">陆易安 —</span>"Hắn là một thằng khốn."</span>
+    </div>
+  </div>
+
+  <!-- Still broken -->
+  <div class="surface-card rounded-lg p-3 mb-2 border-red-300">
+    <div class="flex items-center gap-2 mb-2.5">
+      <span class="font-mono text-[12px] font-semibold text-blue-600">#4102</span>
+      <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-red-50 text-red-700">⚠ STILL BROKEN</span>
+      <span class="font-mono text-[9.5px] uppercase tracking-widest px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-500 opacity-70">cps_exceeded</span>
+      <div class="flex-1"></div>
+      <span class="font-mono text-[10px] uppercase tracking-wider text-zinc-500">Attempt 2/2 · cần xử lý tay · Batch 39</span>
+    </div>
+    <div class="grid grid-cols-[80px_1fr] gap-y-1 gap-x-3 items-baseline text-[12px]">
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">ZH</span>
+      <span class="font-mono text-zinc-700">这件事情其实没那么简单，背后还有更深的阴谋。</span>
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Trước</span>
+      <span class="text-red-600 line-through decoration-red-400/60">"Chuyện này thực ra không đơn giản như vậy, đằng sau còn có âm mưu sâu hơn nữa."</span>
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Attempt 1</span>
+      <span class="text-zinc-500">"Chuyện này không đơn giản, có âm mưu sâu hơn." <span class="text-amber-600 ml-2">CPS 23.1</span> <span class="text-red-500 ml-2">— không đạt</span></span>
+      <span class="text-[10px] font-mono uppercase tracking-widest text-zinc-500">Attempt 2</span>
+      <span class="text-zinc-500">"Việc này có ẩn tình sâu xa." <span class="text-amber-600 ml-2">CPS 21.8</span> <span class="text-red-500 ml-2">— vẫn vượt 0.8</span></span>
+    </div>
+    <div class="flex items-center gap-2 mt-3 pt-3 border-t border-zinc-200/70">
+      <button class="btn text-zinc-500 !py-1 !text-[11px]">↻ Re-fix</button>
+      <button class="btn text-zinc-500 !py-1 !text-[11px]">✏ Sửa tay</button>
+      <button class="btn text-zinc-500 !py-1 !text-[11px]">✓ Mark resolved</button>
+    </div>
+  </div>
+</div>
+
+</div>
+</div>
+
+<script>
+  function showTab(name){
+    document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+    document.getElementById('page-' + name).classList.remove('hidden');
+
+    document.querySelectorAll('.tab-btn').forEach(t => {
+      t.classList.remove('border-blue-600', 'text-zinc-900');
+      t.classList.add('border-transparent', 'text-zinc-500');
+      const num = t.querySelector('.font-serif');
+      if (num) {
+        num.classList.remove('text-blue-600');
+        num.classList.add('text-zinc-400');
+      }
+    });
+    const active = document.getElementById('tab-' + name);
+    active.classList.remove('border-transparent', 'text-zinc-500');
+    active.classList.add('border-blue-600', 'text-zinc-900');
+    const num = active.querySelector('.font-serif');
+    if (num) {
+      num.classList.remove('text-zinc-400');
+      num.classList.add('text-blue-600');
+    }
+  }
+</script>
+</body>
+</html>

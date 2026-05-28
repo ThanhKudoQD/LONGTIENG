@@ -158,6 +158,15 @@ def _migrate_v3():
             except Exception as e:
                 print(f"[migrate v3.9] index create failed: {e}")
 
+        # ─── Simple Translator v4 (idempotent) ─────────────────────────
+        # Thêm 3 cột mới vào subtitles. Bảng simple_* được tạo qua
+        # Base.metadata.create_all (chạy ở init_db). Migration nặng (drop bảng cũ,
+        # drop cột cũ) ở migrations/migrate_simple_v4.py.
+        if has_table("subtitles"):
+            add_col("subtitles", "simple_speaker_zh", "TEXT")
+            add_col("subtitles", "simple_text_vi", "TEXT")
+            add_col("subtitles", "simple_status", "TEXT DEFAULT 'pending'")
+
         # Note: tables bibles, scenes, story_arcs, polish_issues, chunks (NEW)
         # được tạo tự động bởi Base.metadata.create_all (SQLAlchemy).
 

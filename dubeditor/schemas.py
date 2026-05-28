@@ -82,63 +82,44 @@ class SubtitleUpdate(BaseModel):
     text:          Optional[str]   = None
     original_text: Optional[str]   = None
     character_id:  Optional[int]   = None
-    scene_id:      Optional[int]   = None
     audio_offset:  Optional[float] = None
     tts_done:      Optional[bool]  = None
     wav_duration:  Optional[float] = None
     tts_speed:     Optional[float] = None
     # v2 fields editable
-    speaker_zh:           Optional[str]   = None
-    speaker_confidence:   Optional[str]   = None
     emotion:              Optional[str]   = None
     intensity:            Optional[int]   = None
     needs_review:         Optional[bool]  = None
-    # v3: per-line voice mode override (null = auto theo emotion)
     tts_voice_mode:       Optional[str]   = None
-    # v3: 2 variants — user có thể edit từng bản và chọn bản dùng
-    text_v1:              Optional[str]   = None
-    text_v2:              Optional[str]   = None
-    variant_selected:     Optional[int]   = None  # 1 hoặc 2
+    # Simple v4 — user có thể edit speaker/text bản dịch trong Editor
+    simple_speaker_zh:    Optional[str]   = None
+    simple_text_vi:       Optional[str]   = None
+    simple_status:        Optional[str]   = None
 
 class SubtitleOut(SubtitleBase):
     id:            int
     project_id:    int
-    scene_id:      Optional[int] = None
     audio_path:    Optional[str] = None
     tts_done:      bool          = False
     wav_duration:  Optional[float] = None
     tts_speed:     Optional[float] = None
     character:     Optional[CharacterOut] = None
-    # v2 fields
-    speaker_zh:         Optional[str] = None
-    speaker_confidence: str           = "low"
-    speaker_reason:     str           = ""
+    # Editing fields
     emotion:            Optional[str] = None
     intensity:          int           = 5
     cps_value:          Optional[float] = None
     needs_review:       bool          = False
     review_reason:      str           = ""
-    text_draft:         Optional[str] = None
     is_hook:            bool          = False
     translation_version: int          = 1
-    # v3: per-line voice mode override (user set manually)
     tts_voice_mode:     Optional[str] = None
-    # v3: mode đã dùng khi tạo audio hiện tại (read-only)
     audio_voice_mode:   Optional[str] = None
-    # v3 computed: mode được resolve từ (emotion, intensity, tts_voice_mode)
-    # — hiển thị làm badge trên FE. Backend tính sẵn để FE consistent.
     voice_mode:         str           = "normal"
-    # v3: 2 variants
-    text_v1:            Optional[str] = None
-    text_v2:            Optional[str] = None
-    variant_selected:   int           = 1
-    chunk_id:           Optional[int] = None
-    # v3.1: noise filter
     is_noise:           bool          = False
-    # v3.2: Stage 0 normalize
-    is_cleaned:         bool          = False
-    original_raw:       Optional[str] = None
-    clean_reason:       Optional[str] = None
+    # Simple v4 fields
+    simple_speaker_zh:  Optional[str] = None
+    simple_text_vi:     Optional[str] = None
+    simple_status:      str           = 'pending'
 
     @model_validator(mode="after")
     def _compute_voice_mode(self):

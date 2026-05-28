@@ -5,7 +5,9 @@ from pathlib import Path
 import json, shutil, uuid
 
 from dubeditor.database import get_db
-from dubeditor.models import Project, Subtitle, Bible, Scene
+from dubeditor.models import Project, Subtitle
+# Simple v4: dùng SimpleBibleMerge/SimpleBatch thay cho Bible/Scene legacy
+from dubeditor.simple.models import SimpleBibleMerge, SimpleBiblePart, SimpleBatch
 from dubeditor.schemas import ProjectCreate, ProjectOut
 
 router = APIRouter()
@@ -25,10 +27,30 @@ def _enrich_project_out(p: Project, db: Session) -> ProjectOut:
     done  = db.query(func.count(Subtitle.id)).filter(
         Subtitle.project_id == p.id, Subtitle.tts_done == True  # noqa: E712
     ).scalar()
-    scene_count = db.query(func.count(Scene.id)).filter(Scene.project_id == p.id).scalar()
-    has_bible = db.query(Bible).filter(
-        Bible.project_id == p.id, Bible.is_active == True  # noqa: E712
-    ).first() is not None
+    # Simple v4: scene_count → batches count, has_bible → master Bible đã có chưa
+    scene_count = db.query(func.count(SimpleBatch.id)).filter(
+        SimpleBatch.project_id == p.id
+    ).scalar()
+
+    # has_bible: True nếu có ít nhất 1 part status=done (single mode)
+    # hoặc merge.status=done (multi mode)
+    has_bible = False
+    done_parts = db.query(SimpleBiblePart).filter(
+        SimpleBiblePart.project_id == p.id,
+        SimpleBiblePart.status == 'done',
+    ).count()
+    if done_parts > 0:
+        total_parts = db.query(SimpleBiblePart).filter(
+            SimpleBiblePart.project_id == p.id
+        ).count()
+        if total_parts == 1:
+            has_bible = True  # single mode
+        else:
+            merge = db.query(SimpleBibleMerge).filter(
+                SimpleBibleMerge.project_id == p.id,
+                SimpleBibleMerge.status == 'done',
+            ).first()
+            has_bible = merge is not None
 
     # v3.9: parse last_filter_chapter_ids từ Text JSON → list[int].
     # Pydantic v2 không tự parse JSON string → list nên phải làm tay TRƯỚC khi validate.
