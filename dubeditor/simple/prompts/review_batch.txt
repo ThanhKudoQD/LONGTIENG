@@ -58,6 +58,11 @@ NGUYÊN TẮC
   (mỗi dòng 1 entry) với bản viết lại để đọc nối tiếp thấy xuôi.
 * Đừng sửa vụn vặt (vd thay từ đồng nghĩa không cần thiết). Chỉ sửa khi có lý do rõ:
   sai nghĩa, khó hiểu, xưng hô sai, speaker sai, hoặc cụm bị ngược/rời rạc.
+* KHÔNG đề xuất sửa nếu chỉ thay đổi dấu câu / dấu phẩy / dấu chấm / khoảng trắng
+  / ngắt nghỉ mà NGỮ NGHĨA không đổi. Những thay đổi đó vô nghĩa, BỎ QUA.
+  (vd "năm mình tám tuổi" → "năm mình tám tuổi," là KHÔNG cần thiết → đừng đề xuất)
+* Chỉ đề xuất khi bản mới thực sự DỄ HIỂU HƠN / ĐÚNG HƠN về NỘI DUNG, không phải
+  chỉ khác về hình thức.
 * Mỗi dòng sửa PHẢI có "reason" ngắn gọn giải thích vì sao.
 * TIÊU CHÍ: bản sau phải dễ hiểu hơn rõ rệt, không còn cảm giác lủng củng.
 

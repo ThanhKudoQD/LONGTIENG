@@ -41,10 +41,13 @@ ERROR_LABELS = {
 
 
 def list_subtitles_with_notes(db: Session, project_id: int) -> list[dict]:
-    """List tất cả subtitles kèm error notes (từ SimpleIssue chưa resolved).
+    """List tất cả subtitles kèm review suggestion (từ AI review, status pending).
 
-    notes = list các {type, label, severity} cho dòng đó.
+    Mỗi dòng có suggestion → has_issue=True, kèm vi_new/speaker_new/reason để
+    user xem AI đề xuất gì ngay trong tab Phụ đề (có ngữ cảnh dòng xung quanh).
     """
+    from dubeditor.simple.models import SimpleReviewSuggestion
+
     subs = (
         db.query(Subtitle)
         .filter(Subtitle.project_id == project_id)
@@ -52,26 +55,26 @@ def list_subtitles_with_notes(db: Session, project_id: int) -> list[dict]:
         .all()
     )
 
-    # Build map subtitle_index → list error types (từ issue pending/still_broken)
-    issues = (
-        db.query(SimpleIssue)
+    # Map subtitle_index → suggestion (pending) từ AI review
+    suggs = (
+        db.query(SimpleReviewSuggestion)
         .filter(
-            SimpleIssue.project_id == project_id,
-            SimpleIssue.status.in_(('pending', 'still_broken')),
+            SimpleReviewSuggestion.project_id == project_id,
+            SimpleReviewSuggestion.status == 'pending',
         )
         .all()
     )
-    idx_to_notes: dict[int, list] = {}
-    for iss in issues:
-        try:
-            types = json.loads(iss.error_types_json or '[]')
-        except Exception:
-            types = []
-        notes = [
-            {'type': t, 'label': ERROR_LABELS.get(t, t), 'severity': iss.severity}
-            for t in types
-        ]
-        idx_to_notes.setdefault(iss.subtitle_index, []).extend(notes)
+    idx_to_sugg: dict[int, dict] = {}
+    for sg in suggs:
+        idx_to_sugg[sg.subtitle_index] = {
+            'id': sg.id,
+            'vi_old': sg.vi_old,
+            'vi_new': sg.vi_new,
+            'speaker_old': sg.speaker_old,
+            'speaker_new': sg.speaker_new,
+            'reason': sg.reason,
+            'change_type': sg.change_type,
+        }
 
     # Build map index → batch_index
     batches = db.query(SimpleBatch).filter(
@@ -84,7 +87,7 @@ def list_subtitles_with_notes(db: Session, project_id: int) -> list[dict]:
 
     out = []
     for s in subs:
-        notes = idx_to_notes.get(s.index, [])
+        sugg = idx_to_sugg.get(s.index)
         out.append({
             'id': s.id,
             'index': s.index,
@@ -96,8 +99,8 @@ def list_subtitles_with_notes(db: Session, project_id: int) -> list[dict]:
             'simple_speaker_zh': s.simple_speaker_zh,
             'simple_status': s.simple_status or 'pending',
             'batch_index': idx_to_batch.get(s.index),
-            'notes': notes,
-            'has_issue': len(notes) > 0,
+            'suggestion': sugg,           # đề xuất AI (hoặc None)
+            'has_issue': sugg is not None,
         })
     return out
 

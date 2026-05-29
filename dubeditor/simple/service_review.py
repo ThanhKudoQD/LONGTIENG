@@ -227,6 +227,19 @@ def save_group_response(db: Session, group_id: int, response: str) -> SimpleRevi
     return group
 
 
+def _normalize_text(s: str) -> str:
+    """Chuẩn hóa để so sánh ngữ nghĩa: bỏ dấu câu + khoảng trắng + lowercase.
+
+    Dùng để phát hiện 2 bản dịch chỉ khác dấu câu/spacing (vô nghĩa).
+    """
+    import re
+    if not s:
+        return ''
+    # Bỏ dấu câu phổ biến + gộp khoảng trắng + lowercase
+    t = re.sub(r'[\s,.!?;:…"\'""\'\-–—()]+', '', s)
+    return t.lower()
+
+
 def _apply_review_response(db: Session, project_id: int, group_index: int, response: str) -> int:
     """Parse response → tạo SimpleReviewSuggestion (pending). Trả số suggestion."""
     fixes = _parse_review_fixes(response)
@@ -255,10 +268,14 @@ def _apply_review_response(db: Session, project_id: int, group_index: int, respo
             speaker_new = speaker_old
 
         # Xác định loại thay đổi
-        vi_changed = vi_new != vi_old
+        # Bỏ qua thay đổi vi chỉ khác dấu câu / khoảng trắng (ngữ nghĩa không đổi)
+        vi_changed = vi_new != vi_old and _normalize_text(vi_new) != _normalize_text(vi_old)
         spk_changed = speaker_new != speaker_old
         if not vi_changed and not spk_changed:
-            continue  # không có gì đổi → bỏ
+            continue  # không có gì đổi (hoặc chỉ khác dấu câu) → bỏ
+        # Nếu vi không đổi ngữ nghĩa → giữ vi_old (không lưu thay đổi vụn)
+        if not vi_changed:
+            vi_new = vi_old
         change_type = 'both' if (vi_changed and spk_changed) else ('speaker' if spk_changed else 'text')
 
         sugg = SimpleReviewSuggestion(
