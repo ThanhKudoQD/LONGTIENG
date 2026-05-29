@@ -30,7 +30,6 @@ def default_config() -> SimpleConfigSchema:
         tasks={
             'bible':     TaskModelConfig(provider='gemini', model='gemini-2.5-pro',   thinking=True),
             'translate': TaskModelConfig(provider='gemini', model='gemini-2.5-pro',   thinking=True),
-            'repair':    TaskModelConfig(provider='gemini', model='gemini-2.5-flash', thinking=False),
             'qa':        TaskModelConfig(provider='gemini', model='gemini-2.5-flash', thinking=False),
         },
     )
@@ -48,6 +47,9 @@ def load_config(db: Session, project_id: int) -> SimpleConfigSchema:
 
     try:
         data = json.loads(setting.value)
+        # Bỏ task 'repair' khỏi config cũ (đã không dùng nữa, schema mới không chấp nhận)
+        if isinstance(data.get('tasks'), dict):
+            data['tasks'].pop('repair', None)
         # Merge với default để tránh missing keys
         defaults = default_config().model_dump()
         # Shallow merge — keep nested defaults if missing

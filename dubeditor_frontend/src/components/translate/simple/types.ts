@@ -6,7 +6,7 @@
 //   IV. Review/Repair   (AI sửa lỗi theo group)
 //   +  Issues           (lịch sử lỗi & cách fix)
 
-export type SimpleTab = 'bible' | 'bible-view' | 'translate' | 'subtitles' | 'review'
+export type SimpleTab = 'flow' | 'bible' | 'bible-view' | 'translate' | 'subtitles' | 'review'
 
 export type RunStatus = 'idle' | 'running' | 'done' | 'error'
 
@@ -26,7 +26,7 @@ export interface ProviderApiKeys {
 //   translate: Dịch batch (heavy task — main)
 //   repair:    Review/Repair (medium task)
 //   qa:        Review/QA (medium task)
-export type TaskKey = 'bible' | 'translate' | 'repair' | 'qa'
+export type TaskKey = 'bible' | 'translate' | 'qa'
 
 export interface SimpleConfig {
   // API keys cho 3 providers, lưu local

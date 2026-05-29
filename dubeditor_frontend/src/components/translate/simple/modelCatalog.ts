@@ -122,10 +122,9 @@ export const MODELS: Record<Provider, ModelOption[]> = {
 }
 
 // Mặc định cho 4 task — tối ưu chi phí/chất lượng
-export const DEFAULT_TASK_MODELS: Record<'bible' | 'translate' | 'repair' | 'qa', { provider: Provider; model: string; thinking: boolean }> = {
+export const DEFAULT_TASK_MODELS: Record<'bible' | 'translate' | 'qa', { provider: Provider; model: string; thinking: boolean }> = {
   bible:     { provider: 'gemini', model: 'gemini-2.5-pro',         thinking: true  },
   translate: { provider: 'gemini', model: 'gemini-2.5-pro',         thinking: true  },
-  repair:    { provider: 'gemini', model: 'gemini-2.5-flash',       thinking: false },
   qa:        { provider: 'gemini', model: 'gemini-2.5-flash',       thinking: false },
 }
 
@@ -135,7 +134,7 @@ export const PROVIDER_LABELS: Record<Provider, string> = {
   deepseek: 'DeepSeek',
 }
 
-export const TASK_LABELS: Record<'bible' | 'translate' | 'repair' | 'qa', { title: string; desc: string }> = {
+export const TASK_LABELS: Record<'bible' | 'translate' | 'qa', { title: string; desc: string }> = {
   bible: {
     title: 'I · Bible',
     desc: 'Trích nhân vật, quan hệ, thuật ngữ. Cần model mạnh + thinking.',
@@ -144,12 +143,8 @@ export const TASK_LABELS: Record<'bible' | 'translate' | 'repair' | 'qa', { titl
     title: 'II · Dịch batch',
     desc: 'Task chính. Quyết định chất lượng cuối cùng — khuyên dùng model mạnh.',
   },
-  repair: {
-    title: 'IV · Repair',
-    desc: 'Sửa lỗi đã phát hiện. Model nhẹ là đủ vì input đã rõ ràng.',
-  },
   qa: {
-    title: 'IV · QA',
-    desc: 'Rà soát đoạn dài, tìm lỗi semantic. Optional.',
+    title: 'III · AI Review',
+    desc: 'Rà soát bản dịch, đề xuất sửa xưng hô / câu từ / speaker.',
   },
 }

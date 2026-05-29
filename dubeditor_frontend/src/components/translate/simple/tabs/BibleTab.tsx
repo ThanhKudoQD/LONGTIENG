@@ -30,6 +30,30 @@ export default function BibleTab(props: Props) {
   const completedParts = state.parts.filter(p => p.status === 'done').length
   const allPartsDone = state.parts.every(p => p.status === 'done')
   const canRunMerge = state.mode === 'multi' && allPartsDone
+  // Đã có ít nhất 1 part done → KHÓA đổi mode/số part để tránh mất Bible đã chạy
+  const hasDonePart = completedParts > 0
+
+  const tryChangeMode = (target: 'single' | 'multi', partsCount?: number) => {
+    if (hasDonePart) {
+      alert(
+        `Bible đã có ${completedParts} part đã chạy xong.\n\n` +
+        `Đổi mode/số phần sẽ XÓA hết Bible đã có.\n` +
+        `Bấm "↻ Reset Bible" tường minh trước nếu thực sự muốn đổi.`
+      )
+      return
+    }
+    props.onChangeMode(target, partsCount)
+  }
+
+  const handleResetBible = () => {
+    if (!confirm(
+      `RESET toàn bộ Bible?\n\n` +
+      `Sẽ xóa ${state.parts.length} part hiện tại (kể cả ${completedParts} part đã done).\n` +
+      `Sau khi reset, bạn có thể đổi mode tùy ý và chạy lại Bible.\n\n` +
+      `Tiếp tục?`
+    )) return
+    props.onReset()
+  }
 
   return (
     <div>
@@ -51,9 +75,9 @@ export default function BibleTab(props: Props) {
         onChange={(v) => {
           const newMode = v as 'single' | 'multi'
           if (newMode === 'multi') {
-            props.onChangeMode('multi', multiPartsCount)
+            tryChangeMode('multi', multiPartsCount)
           } else {
-            props.onChangeMode('single')
+            tryChangeMode('single')
           }
         }}
         options={[
@@ -66,6 +90,21 @@ export default function BibleTab(props: Props) {
             : <>Toàn bộ SRT gửi trong 1 prompt. Phù hợp phim dưới 2000 dòng hoặc dùng Gemini/Claude.</>
         }
       />
+
+      {/* Cảnh báo khóa khi đã có part done */}
+      {hasDonePart && (
+        <div className="surface-card p-3 mt-2 mb-2 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800 flex items-center gap-3 flex-wrap">
+          <span className="text-[12px] text-amber-800 dark:text-amber-200">
+            🔒 Đã có <b>{completedParts}</b> part Bible chạy xong. Khóa đổi mode/số phần để tránh mất.
+          </span>
+          <button
+            onClick={handleResetBible}
+            className="ml-auto px-3 py-1 text-[12px] rounded-md bg-red-600 text-white hover:bg-red-700"
+          >
+            ↻ Reset Bible (xóa hết)
+          </button>
+        </div>
+      )}
 
       {/* Multi mode: chọn số parts */}
       {state.mode === 'multi' && (
@@ -87,6 +126,10 @@ export default function BibleTab(props: Props) {
           <button
             onClick={() => {
               if (multiPartsCount !== state.parts.length) {
+                if (hasDonePart) {
+                  tryChangeMode('multi', multiPartsCount)  // sẽ alert
+                  return
+                }
                 if (confirm(`Đổi sang ${multiPartsCount} parts? Tất cả prompts hiện tại sẽ bị xóa và build lại.`)) {
                   props.onChangeMode('multi', multiPartsCount)
                 }

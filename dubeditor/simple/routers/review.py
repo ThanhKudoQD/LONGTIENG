@@ -18,11 +18,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from dubeditor.database import get_db, SessionLocal
+from dubeditor.database import get_db
 from dubeditor.models import Project
 from dubeditor.simple import service_review, service_config
 from dubeditor.simple.models import SimpleReviewGroup
-from dubeditor.simple.jobs import spawn_task, broadcast_simple
+from dubeditor.simple.jobs import spawn_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -65,23 +65,18 @@ def auto_group(project_id: int, group_index: int, db: Session = Depends(get_db))
     group_id = group.id
     task_id = f"review.group.{group_index}"
 
-    async def coro():
-        await broadcast_simple(project_id, 'review', task_id, 'started',
-                               ref={'group_index': group_index})
-        _db = SessionLocal()
-        try:
-            await service_review.run_review_group(_db, group_id)
-            state = service_review.get_review_state(_db, project_id)
-            await broadcast_simple(project_id, 'review', task_id, 'done',
-                                   ref={'group_index': group_index}, data=state,
-                                   message=f"Review nhóm {group_index + 1} xong")
-        except Exception as e:
-            await broadcast_simple(project_id, 'review', task_id, 'error',
-                                   ref={'group_index': group_index}, error=str(e))
-        finally:
-            _db.close()
+    async def _job(session: Session):
+        await service_review.run_review_group(session, group_id)
 
-    spawn_task(project_id, task_id, coro)
+    spawn_task(
+        project_id=project_id,
+        section="review",
+        task_id=task_id,
+        coro_factory=_job,
+        ref={"group_index": group_index},
+        state_loader=lambda s: service_review.get_review_state(s, project_id),
+        start_message=f"Đang review nhóm {group_index + 1}...",
+    )
     return {"ok": True, "status": "started", "task_id": task_id}
 
 
@@ -114,26 +109,21 @@ def run_all(project_id: int, db: Session = Depends(get_db)):
     group_ids = [g.id for g in groups]
     task_id = "review.run-all"
 
-    async def coro():
-        await broadcast_simple(project_id, 'review', task_id, 'started')
-        _db = SessionLocal()
-        try:
-            for i, gid in enumerate(group_ids):
-                try:
-                    await service_review.run_review_group(_db, gid)
-                except Exception as e:
-                    logger.warning(f"[review.run-all] group {gid} failed: {e}")
-                await broadcast_simple(project_id, 'review', task_id, 'progress',
-                                       message=f"{i + 1}/{len(group_ids)} nhóm")
-            state = service_review.get_review_state(_db, project_id)
-            await broadcast_simple(project_id, 'review', task_id, 'done', data=state,
-                                   message="Review tất cả xong")
-        except Exception as e:
-            await broadcast_simple(project_id, 'review', task_id, 'error', error=str(e))
-        finally:
-            _db.close()
+    async def _job(session: Session):
+        for gid in group_ids:
+            try:
+                await service_review.run_review_group(session, gid)
+            except Exception as e:
+                logger.warning(f"[review.run-all] group {gid} failed: {e}")
 
-    spawn_task(project_id, task_id, coro)
+    spawn_task(
+        project_id=project_id,
+        section="review",
+        task_id=task_id,
+        coro_factory=_job,
+        state_loader=lambda s: service_review.get_review_state(s, project_id),
+        start_message=f"Đang review {len(group_ids)} nhóm...",
+    )
     return {"ok": True, "status": "started", "task_id": task_id}
 
 

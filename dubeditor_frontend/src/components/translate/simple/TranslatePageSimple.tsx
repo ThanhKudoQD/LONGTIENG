@@ -13,6 +13,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import BibleTab from './tabs/BibleTab'
 import TranslateTab from './tabs/TranslateTab'
 import ReviewTab from './tabs/ReviewTab'
+import FlowTab from './tabs/FlowTab'
 import BibleViewTab from './tabs/BibleViewTab'
 import SubtitlesViewTab from './tabs/SubtitlesViewTab'
 import ConfigPanel, {
@@ -34,6 +35,7 @@ import type {
 // ─── Tab metadata ────────────────────────────────────────────────────────────
 
 const TAB_META: { key: SimpleTab; num: number; label: string }[] = [
+  { key: 'flow',        num: 0, label: '⚡ Auto Flow' },
   { key: 'bible',       num: 1, label: 'Bible' },
   { key: 'bible-view',  num: 2, label: 'Xem Bible' },
   { key: 'translate',   num: 3, label: 'Dịch batch' },
@@ -646,6 +648,23 @@ export default function TranslatePageSimple({ projectId, onBack }: Props) {
           />
         )
 
+      case 'flow':
+        return (
+          <FlowTab
+            projectId={projectId}
+            runningTasks={runningTasks}
+            onStarted={() => setRunningTasks(prev => new Set(prev).add('flow.run'))}
+            onOpenConfig={() => setShowConfig(true)}
+            onFlowDone={() => {
+              // Flow vừa xong → refetch 3 state để badge các tab update
+              bibleApi.getState(projectId).then(setBible).catch(() => {})
+              batchesApi.getState(projectId).then(setTranslateState).catch(() => {})
+              reviewApi.getState(projectId).then(setReviewState).catch(() => {})
+              setRunningTasks(prev => { const n = new Set(prev); n.delete('flow.run'); return n })
+            }}
+          />
+        )
+
       default:
         return null
     }
@@ -749,7 +768,7 @@ export default function TranslatePageSimple({ projectId, onBack }: Props) {
                   : 'border-transparent text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-200'
               }`}
             >
-              <TabNumber n={num} active={isActive} />
+              {num > 0 && <TabNumber n={num} active={isActive} />}
               <span>{label}</span>
               {renderTabBadge(key)}
             </button>

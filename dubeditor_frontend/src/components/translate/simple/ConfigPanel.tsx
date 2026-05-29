@@ -28,7 +28,6 @@ export function defaultSimpleConfig(): SimpleConfig {
     tasks: {
       bible:     { ...DEFAULT_TASK_MODELS.bible },
       translate: { ...DEFAULT_TASK_MODELS.translate },
-      repair:    { ...DEFAULT_TASK_MODELS.repair },
       qa:        { ...DEFAULT_TASK_MODELS.qa },
     },
     batch_size_target: 100,
@@ -153,7 +152,7 @@ export default function ConfigPanel({ initialConfig, onClose, onSave }: Props) {
           {([
             { key: 'models',  num: '1', label: 'API & Models' },
             { key: 'batch',   num: '2', label: 'Batch dịch' },
-            { key: 'review',  num: '3', label: 'Review & Repair' },
+            { key: 'review',  num: '3', label: 'Review' },
           ] as { key: ConfigTab; num: string; label: string }[]).map(tab => (
             <button
               key={tab.key}
@@ -263,10 +262,10 @@ function ModelsTab({
       {/* Task models */}
       <Section
         title="Model cho từng task"
-        desc="Chọn provider + model riêng cho từng task. Bible & Translate nên dùng model mạnh. Repair & QA model nhẹ là đủ."
+        desc="Chọn provider + model riêng cho từng task. Bible & Translate nên dùng model mạnh. QA model nhẹ là đủ."
       >
         <div className="space-y-3">
-          {(['bible', 'translate', 'repair', 'qa'] as TaskKey[]).map(taskKey => (
+          {(['bible', 'translate', 'qa'] as TaskKey[]).map(taskKey => (
             <TaskModelRow
               key={taskKey}
               taskKey={taskKey}
