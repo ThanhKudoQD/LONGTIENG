@@ -183,25 +183,13 @@ async def do_generate(subtitle_id: int):
         if text.startswith("[CHƯA DỊCH") or text.startswith("[UNTRANSLATED"):
             raise RuntimeError(f"Sub {subtitle_id} placeholder, chưa được dịch")
 
-        # Resolve voice strategy:
-        # Toggle ON  → mode theo emotion (qua emotion_to_mode 14→3)
-        # Toggle OFF → luôn dùng mode "normal"
-        from dubeditor.models import Project
-        project = db.query(Project).filter(Project.id == s.project_id).first()
-        use_emotion_voice = bool(project and project.use_emotion_voice)
-
-        # Per-line override (Subtitle.tts_voice_mode) — chỉ áp khi toggle ON
+        # Voice strategy: emotion voice đã bị BỎ — luôn dùng mode "normal"
+        # (AI không còn gán emotion; field cũ giữ trong DB nhưng không dùng nữa).
+        use_emotion_voice = False
         force_mode = None
-        if use_emotion_voice:
-            v = (s.tts_voice_mode or "").strip()
-            if v in ("normal", "sad", "angry"):
-                force_mode = v
 
         logger.info(
-            f"[DubTTS] subtitle={subtitle_id} role={role_id} "
-            f"emotion={s.emotion or '-'} intensity={s.intensity or '-'} "
-            f"use_emotion_voice={use_emotion_voice} force_mode={force_mode or '-'} "
-            f"text={text!r}"[:300]
+            f"[DubTTS] subtitle={subtitle_id} role={role_id} text={text!r}"[:300]
         )
 
         loop = asyncio.get_event_loop()

@@ -38,6 +38,17 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   // v3.4: filter state đã chuyển sang Zustand store. Đọc state + setters trực tiếp.
   const filter = useStore(s => s.filterText)
   const setFilter = useStore(s => s.setFilterText)
+  // PERF: filter input dùng local state — debounce 150ms trước khi commit vào store
+  // → khi gõ liên tục, SubtitleList chỉ recompute visible 1 lần thay vì mỗi keystroke.
+  const [filterDraft, setFilterDraft] = useState(filter)
+  // Sync khi filter đổi từ ngoài (vd nút clear)
+  useEffect(() => { setFilterDraft(filter) }, [filter])
+  // Debounce commit vào store
+  useEffect(() => {
+    if (filterDraft === filter) return
+    const t = setTimeout(() => setFilter(filterDraft), 150)
+    return () => clearTimeout(t)
+  }, [filterDraft])  // eslint-disable-line react-hooks/exhaustive-deps
   const filterNoChar = useStore(s => s.filterNoChar)
   const setFilterNoChar = useStore(s => s.setFilterNoChar)
   const filterNoTTS = useStore(s => s.filterNoTTS)
@@ -231,27 +242,6 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
   }
 
   // ── Emotion voice toggle (v3) ────────────────────────────────────────────
-  // OFF: tất cả TTS dùng mode "normal"
-  // ON:  TTS dùng mode theo emotion (qua emotion_to_mode), có thể override per-line
-  const [emotionVoiceOn, setEmotionVoiceOn] = useState(false)
-  useEffect(() => {
-    if (project && typeof project.use_emotion_voice === 'boolean') {
-      setEmotionVoiceOn(project.use_emotion_voice)
-    }
-  }, [project?.id, project?.use_emotion_voice])
-
-  const toggleEmotionVoice = async () => {
-    if (!project) return
-    const next = !emotionVoiceOn
-    setEmotionVoiceOn(next)   // optimistic
-    try {
-      await api.patch(`/projects/${project.id}`, { use_emotion_voice: next })
-    } catch (e: any) {
-      setEmotionVoiceOn(!next)   // revert
-      alert('Lưu thất bại: ' + (e?.message || ''))
-    }
-  }
-
   const [overlapMinCount, setOverlapMinCount] = useState(2)
   const [overlapMinSec, setOverlapMinSec] = useState(0.01)
   const [overlapIdx, setOverlapIdx] = useState(0)
@@ -743,24 +733,6 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
 
         <div className="h-5 w-px bg-zinc-200 dark:bg-zinc-700 flex-shrink-0" />
 
-        {/* Emotion Voice toggle — v3 (3 mode: BT / Buồn / Giận)
-            OFF → tất cả TTS dùng mode "Bình thường"
-            ON  → TTS dùng mode theo cảm xúc của mỗi dòng (qua emotion_to_mode) */}
-        <button
-          onClick={toggleEmotionVoice}
-          disabled={!project}
-          title={emotionVoiceOn
-            ? "TTS theo mode cảm xúc của từng câu (BT/Buồn/Giận). Click để tắt → tất cả dùng BT."
-            : "TTS luôn dùng mode Bình thường. Click để bật theo cảm xúc câu."}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0 disabled:opacity-50
-            ${emotionVoiceOn
-              ? 'border-fuchsia-300 dark:border-fuchsia-700 bg-fuchsia-50 dark:bg-fuchsia-950/40 text-fuchsia-700 dark:text-fuchsia-400 hover:bg-fuchsia-100'
-              : 'border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-500 hover:bg-fuchsia-50 hover:border-fuchsia-300 hover:text-fuchsia-600'
-            }`}>
-          <span>🎭</span>
-          {emotionVoiceOn ? 'Mode cảm xúc ON' : 'Mode cảm xúc OFF'}
-        </button>
-
         {/* Auto Fix Overlap button — số chuỗi đè theo đoạn đang lọc */}
         <button onClick={() => setShowAutoFix(true)}
           disabled={overlapGroups.length === 0}
@@ -876,7 +848,7 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
                 <circle cx="5.5" cy="5.5" r="4" stroke="currentColor" strokeWidth="1.5"/>
                 <path d="M9 9l2.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
               </svg>
-              <input placeholder="Tìm phụ đề..." value={filter} onChange={e => setFilter(e.target.value)}
+              <input placeholder="Tìm phụ đề..." value={filterDraft} onChange={e => setFilterDraft(e.target.value)}
                 className="input w-full pl-8 text-[13px]" />
             </div>
             <button onClick={() => setFilterNoChar(!filterNoChar)}

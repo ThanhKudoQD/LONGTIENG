@@ -42,6 +42,71 @@ def sync_chapters_from_arcs(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(500, f"Sync failed: {e}")
 
 
+@router.post("/project/{project_id}/sync-from-batches")
+def sync_chapters_from_batches(project_id: int, db: Session = Depends(get_db)):
+    """Đồng bộ Simple Translate Batches → Chapter.
+
+    Mỗi batch dịch (SimpleBatch) → 1 chapter. Tên chapter = "Batch N (start→end)".
+    Xóa các Chapter source='auto_from_arc' (legacy) trước khi tạo mới.
+    Giữ nguyên Chapter source='user'.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(404, "Project không tồn tại")
+
+    from dubeditor.simple.models import SimpleBatch
+
+    batches = (
+        db.query(SimpleBatch)
+        .filter(SimpleBatch.project_id == project_id)
+        .order_by(SimpleBatch.batch_index)
+        .all()
+    )
+    if not batches:
+        raise HTTPException(400, "Chưa có batch dịch nào. Vào tab 'Dịch batch' để chia trước.")
+
+    # Xóa Chapter auto cũ (cả từ arc + batch)
+    db.query(Chapter).filter(
+        Chapter.project_id == project_id,
+        Chapter.source.in_(['auto_from_arc', 'auto_from_batch']),
+    ).delete(synchronize_session=False)
+    db.flush()
+
+    # Tính sort_order base (giữ chapter user tạo tay trước)
+    existing_user = (
+        db.query(Chapter)
+        .filter(Chapter.project_id == project_id, Chapter.source == 'user')
+        .count()
+    )
+
+    created = 0
+    for i, b in enumerate(batches):
+        ch = Chapter(
+            project_id=project_id,
+            name=f"Batch {b.batch_index + 1} ({b.start_line}→{b.end_line})",
+            start_sub_index=b.start_line,
+            end_sub_index=b.end_line,
+            sort_order=existing_user + i,
+            source='auto_from_batch',
+            arc_index=b.batch_index,
+        )
+        db.add(ch)
+        created += 1
+
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, f"Sync failed: {e}")
+
+    return {
+        "ok": True,
+        "created": created,
+        "message": f"Đã chia {created} chapters từ batch dịch",
+    }
+
+
+
 @router.get("/project/{project_id}/stats")
 def chapters_stats(project_id: int, db: Session = Depends(get_db)):
     """

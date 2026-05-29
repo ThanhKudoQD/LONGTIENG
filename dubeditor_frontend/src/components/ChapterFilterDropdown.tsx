@@ -84,9 +84,9 @@ export default function ChapterFilterDropdown({ projectId, chapters, selectedIds
     if (syncing) return
     setSyncing(true)
     try {
-      const r = await api.post(`/chapters/project/${projectId}/sync-from-arcs`)
+      const r = await api.post(`/chapters/project/${projectId}/sync-from-batches`)
       setInfo({
-        message: r.data.message || `Đã sync ${r.data.created} chapters từ Story Arc`,
+        message: r.data.message || `Đã chia ${r.data.created} chapters từ batch dịch`,
         variant: 'success',
       })
       window.dispatchEvent(new Event('chapters_changed'))
@@ -107,18 +107,18 @@ export default function ChapterFilterDropdown({ projectId, chapters, selectedIds
         <button
           onClick={requestSync}
           disabled={syncing}
-          title="Sync chapters từ StoryArc (cần đã chạy Stage 1)"
+          title="Chia chapter theo Batch dịch (mỗi batch = 1 chapter)"
           className="px-2.5 py-1.5 text-[12px] rounded-lg border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800 flex-shrink-0"
         >
-          {syncing ? '⏳ Đang sync...' : '🔄 Sync từ Arc'}
+          {syncing ? '⏳ Đang chia...' : '📦 Chia theo Batch'}
         </button>
 
         <ConfirmModal
           open={showSyncConfirm}
-          title="Sync Chapter từ Story Arc"
-          message="Hệ thống sẽ xóa Chapter loại 'auto_from_arc' và tạo lại từ Story Arc hiện tại. Chapter do user tạo tay được giữ nguyên."
+          title="Chia Chapter theo Batch dịch"
+          message="Hệ thống sẽ xóa Chapter tự động (auto_from_arc/auto_from_batch) và tạo lại theo các batch dịch hiện tại. Chapter do user tạo tay được giữ nguyên."
           variant="warning"
-          confirmText="Đồng bộ"
+          confirmText="Chia"
           cancelText="Hủy"
           onConfirm={handleSync}
           onCancel={() => setShowSyncConfirm(false)}
@@ -179,10 +179,10 @@ export default function ChapterFilterDropdown({ projectId, chapters, selectedIds
             <button
               onClick={requestSync}
               disabled={syncing}
-              title="Sync chapters từ Arc"
+              title="Chia chapter theo Batch dịch"
               className="text-[11px] px-2 py-0.5 rounded border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-800"
             >
-              {syncing ? '⏳' : '🔄 Sync'}
+              {syncing ? '⏳' : '📦 Batch'}
             </button>
           </div>
 
@@ -190,7 +190,7 @@ export default function ChapterFilterDropdown({ projectId, chapters, selectedIds
           <div className="py-1">
             {chapters.map(c => {
               const isSelected = selectedIds.includes(c.id)
-              const isAuto = c.source === 'auto_from_arc'
+              const isAuto = c.source === 'auto_from_arc' || c.source === 'auto_from_batch'
               return (
                 <label
                   key={c.id}
@@ -205,8 +205,8 @@ export default function ChapterFilterDropdown({ projectId, chapters, selectedIds
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5">
                       {isAuto && (
-                        <span title="Auto từ Story Arc" className="text-[10px] px-1 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400">
-                          ARC
+                        <span title="Auto chia từ Batch dịch" className="text-[10px] px-1 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400">
+                          BATCH
                         </span>
                       )}
                       <span className="font-medium truncate">{c.name}</span>
@@ -225,10 +225,10 @@ export default function ChapterFilterDropdown({ projectId, chapters, selectedIds
       {/* Dialog xác nhận sync */}
       <ConfirmModal
         open={showSyncConfirm}
-        title="Sync Chapter từ Story Arc"
-        message="Hệ thống sẽ xóa Chapter loại 'auto_from_arc' và tạo lại từ Story Arc hiện tại. Chapter do user tạo tay được giữ nguyên."
+        title="Chia Chapter theo Batch dịch"
+        message="Hệ thống sẽ xóa Chapter tự động (auto_from_arc/auto_from_batch) và tạo lại theo các batch dịch hiện tại. Chapter do user tạo tay được giữ nguyên."
         variant="warning"
-        confirmText="Đồng bộ"
+        confirmText="Chia"
         cancelText="Hủy"
         onConfirm={handleSync}
         onCancel={() => setShowSyncConfirm(false)}

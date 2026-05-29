@@ -3,7 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import useStore from '../store'
 import useUndoStore from '../store/undo'
 import api from '../api'
-import { playSubAudio, stopGlobalAudio, subscribePlayingId } from '../audio'
+import { playSubAudio, stopGlobalAudio, subscribePlayingId, preloadSubAudios, invalidatePreload } from '../audio'
 import { findDuplicateStarts } from '../utils/perf'
 import type { Subtitle, Chapter } from '../types'
 import { loadConfig, getApiKey, getRetranslateModel, getRetranslateThinking, getRetranslateContextWindow } from './ConfigModal'
@@ -122,6 +122,9 @@ function VoiceModePill({ mode, emotion, intensity, isOverride, isActive }: {
     </span>
   )
 }
+
+// PERF: empty array với REF ỔN ĐỊNH (tránh tạo `[]` mới mỗi render → break React.memo)
+const EMPTY_MODES: string[] = []
 
 // ─── Row component memo ────────────────────────────────────────────────────
 // Tách Row + React.memo để khi 1 sub đổi (TTS xong, click chọn), chỉ row đó
@@ -403,6 +406,15 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   const emotionVoiceOn = !!project?.use_emotion_voice
   // v3: map character_id → available modes
   const voiceModesByChar = useStore(s => s.voiceModesByCharacter)
+
+  // PERF: helper trả availableModes với REF ỔN ĐỊNH
+  // - Sub không có character → luôn trả về cùng 1 EMPTY array (không tạo `[]` mới mỗi render)
+  // - Sub có character → trả về reference từ map (chỉ đổi khi voiceModesByChar đổi)
+  // → Row.memo skip re-render khi prop không thực sự đổi → giảm lag bulk TTS.
+  const getAvailableModes = useCallback((cid: number | null | undefined): string[] => {
+    if (!cid) return EMPTY_MODES
+    return voiceModesByChar[cid] || EMPTY_MODES
+  }, [voiceModesByChar])
 
   // Queue state — show icon trên row
   const ttsQueueRunning = useStore(s => s.ttsQueueRunning)
@@ -732,6 +744,30 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
   // Lưu ý cho virtualizer: estimateSize phụ thuộc vào items, phải reset khi items đổi
   useEffect(() => { virt.measure() }, [items.length])
 
+  // PERF: preload audio cho rows visible + neighbors (giảm delay click → play).
+  // Chạy throttle ~250ms khi scroll/items đổi để tránh spam khi scroll nhanh.
+  const preloadTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (preloadTimerRef.current) window.clearTimeout(preloadTimerRef.current)
+    preloadTimerRef.current = window.setTimeout(() => {
+      const vItems = virt.getVirtualItems()
+      if (vItems.length === 0) return
+      const lo = Math.max(0, vItems[0].index - 5)
+      const hi = Math.min(items.length, vItems[vItems.length - 1].index + 5)
+      const toPreload: Array<{ id: number; audio_path: string | null }> = []
+      for (let i = lo; i < hi; i++) {
+        const it = items[i]
+        if (it?.type === 'sub' && it.sub.audio_path && it.sub.tts_done) {
+          toPreload.push({ id: it.sub.id, audio_path: it.sub.audio_path })
+        }
+      }
+      if (toPreload.length) preloadSubAudios(toPreload)
+    }, 250)
+    return () => {
+      if (preloadTimerRef.current) window.clearTimeout(preloadTimerRef.current)
+    }
+  }, [items, virt])
+
   // Auto scroll list theo activeSubId
   // PERF: dùng ref để đọc visible/items hiện tại — tránh effect re-run khi subtitles
   // đổi (TTS xong từng dòng) trong khi activeSubId không đổi.
@@ -830,6 +866,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     const undoToken = res.data?.undo_token
     const backup    = res.data?.backup || []
     deleteAudioStore([s.id])
+    invalidatePreload(s.id)   // clear preload cache (audio đã xóa)
 
     if (backup.length) {
       useUndoStore.getState().push({
@@ -985,7 +1022,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
               onRetranslate={handleRetranslate}
               onSetVoiceMode={handleSetVoiceMode}
               emotionVoiceOn={emotionVoiceOn}
-              availableModes={s.character_id ? (voiceModesByChar[s.character_id] || []) : []}
+              availableModes={getAvailableModes(s.character_id)}
               isViOnly={isViOnly}
               top={vi.start}
               height={vi.size}

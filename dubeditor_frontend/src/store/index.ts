@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { Project, Subtitle, Character } from '../types'
 import api from '../api'
+import { invalidatePreload } from '../audio'
 
 /**
  * PERF NOTES — quan trọng khi sửa code:
@@ -198,6 +199,7 @@ const useStore = create<EditorStore>((set, get) => ({
   },
 
   deleteAudio: (ids) => {
+    ids.forEach(id => invalidatePreload(id))
     const idSet = new Set(ids)
     set(state => ({
       subtitles: state.subtitles.map(s =>
@@ -218,6 +220,9 @@ const useStore = create<EditorStore>((set, get) => ({
   },
 
   markTTSDone: (id, audioPath, wavDuration) => {
+    // PERF: invalidate preload cache để click sau load file MỚI (TTS lại
+    // ghi đè cùng filename {id}.wav, browser sẽ cache file cũ nếu không clear).
+    invalidatePreload(id)
     set(state => {
       const idx = state.subtitles.findIndex(s => s.id === id)
       if (idx < 0) return state
