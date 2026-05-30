@@ -1,0 +1,15 @@
+# ============================================================================
+#  Nano — requirements OPTIONAL (chỉ cài khi cần các tính năng nặng)
+#  Server BOOT ĐƯỢC mà KHÔNG cần file này. Cài thêm nếu bạn muốn:
+# ============================================================================
+
+# ── Tách nhạc nền (Stem Separator) — dùng khi export muốn tách bass/drums/vocals
+#    Cài: pip install -r requirements-optional.txt
+demucs==4.0.1
+
+# ── Auto-assign speaker bằng diarization (RẤT NẶNG, kéo theo speechbrain +
+#    lightning + asteroid...). Chỉ bỏ comment nếu thực sự cần.
+#    pyannote còn cần HF token + bấm "accept" điều khoản model trên HuggingFace:
+#      - pyannote/speaker-diarization-3.1
+#      - pyannote/wespeaker-voxceleb-resnet34-LM
+# pyannote.audio==3.3.2

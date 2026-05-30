@@ -1,0 +1,40 @@
+# ============================================================================
+#  Nano — requirements (RUNTIME)
+#  Pin theo đúng môi trường đang chạy OK ở máy bạn (env conda "flash", py3.10)
+#
+#  LƯU Ý: torch / torchaudio / flash-attn / nano-vllm-voxcpm KHÔNG nằm ở đây.
+#  Chúng cần index riêng / wheel build sẵn -> setup_vast.sh cài trước, rồi mới
+#  cài file này. Đừng để pip tự nâng torch lên.
+# ============================================================================
+
+# ── Web server ──
+fastapi==0.136.1
+uvicorn==0.46.0
+uvloop==0.22.1
+httptools==0.7.1
+watchfiles==1.1.1
+websockets==16.0
+python-multipart==0.0.26
+
+# ── Data / validate ──
+pydantic==2.13.3
+SQLAlchemy==2.0.49
+
+# ── Auth ──
+bcrypt==5.0.0
+PyJWT==2.12.1
+
+# ── HTTP client (gọi LLM dịch: gemini/openai...) ──
+httpx==0.28.1
+python-dotenv==1.2.2
+
+# ── Audio I/O ──
+numpy==2.2.6
+soundfile==0.13.1
+
+# ── TTS deps mà VoxCPM2 / nano-vllm cần (pin để khớp tokenizer) ──
+transformers==4.40.0
+tokenizers==0.19.1
+safetensors==0.7.0
+sentencepiece==0.2.1
+huggingface-hub==0.23.4
