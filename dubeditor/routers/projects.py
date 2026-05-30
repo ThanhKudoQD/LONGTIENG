@@ -5,7 +5,7 @@ from pathlib import Path
 import json, shutil, uuid
 
 from dubeditor.database import get_db
-from dubeditor.models import Project, Subtitle, Bible, Scene, User
+from dubeditor.models import Project, Subtitle, User
 from dubeditor.schemas import ProjectCreate, ProjectOut
 from dubeditor.auth_deps import get_current_user, check_project_access
 
@@ -26,10 +26,8 @@ def _enrich_project_out(p: Project, db: Session) -> ProjectOut:
     done  = db.query(func.count(Subtitle.id)).filter(
         Subtitle.project_id == p.id, Subtitle.tts_done == True  # noqa: E712
     ).scalar()
-    scene_count = db.query(func.count(Scene.id)).filter(Scene.project_id == p.id).scalar()
-    has_bible = db.query(Bible).filter(
-        Bible.project_id == p.id, Bible.is_active == True  # noqa: E712
-    ).first() is not None
+    scene_count = 0    # pipeline cũ đã bỏ
+    has_bible = False    # pipeline cũ đã bỏ — Simple Bible check riêng
 
     # v3.9: parse last_filter_chapter_ids từ Text JSON → list[int].
     # Pydantic v2 không tự parse JSON string → list nên phải làm tay TRƯỚC khi validate.

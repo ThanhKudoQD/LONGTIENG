@@ -6,7 +6,6 @@ from dubeditor.routers import settings  # v3.12
 from dubeditor.routers import export_video  # v4.0 — module xuất video FFmpeg
 from dubeditor.routers import auth as auth_router  # v5.0 — User auth
 from dubeditor.routers import admin as admin_router  # v5.0 — Admin CRUD
-from dubeditor.routers import translate
 from dubeditor.simple.routers import router as simple_router  # v6 — Simple Translator
 
 router = APIRouter()
@@ -26,5 +25,4 @@ router.include_router(ws.router,                                      tags=["dub
 router.include_router(settings.router,     prefix="/api",            tags=["dub-settings"])
 router.include_router(auth_router.router,  prefix="/api/auth",  tags=["v5-auth"])
 router.include_router(admin_router.router, prefix="/api/admin", tags=["v5-admin"])
-router.include_router(translate.router,    prefix="/api",            tags=["dub-translate"])
 router.include_router(simple_router,       prefix="/api",            tags=["dub-simple"])

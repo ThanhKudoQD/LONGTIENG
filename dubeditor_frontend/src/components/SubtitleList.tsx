@@ -6,7 +6,6 @@ import api from '../api'
 import { playSubAudio, stopGlobalAudio, subscribePlayingId, preloadSubAudios, invalidatePreload } from '../audio'
 import { findDuplicateStarts } from '../utils/perf'
 import type { Subtitle, Chapter } from '../types'
-import { loadConfig, getApiKey, getRetranslateModel, getRetranslateThinking, getRetranslateContextWindow } from './ConfigModal'
 import { loadSimpleConfig } from './translate/simple/ConfigPanel'
 import { getEffectiveSpeed } from '../types'
 
@@ -494,15 +493,12 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
    * Default scope = "cụm context" (anchor ± context_window).
    */
   const handleRetranslate = useCallback(async (s: Subtitle) => {
-    const cfgOld = loadConfig()
     const cfgSimple = loadSimpleConfig()
-    // Ưu tiên simple config; fallback config cũ nếu trống
     const taskCfg = cfgSimple.tasks?.retranslate
-    const provider = taskCfg?.provider || cfgOld.provider || 'gemini'
-    const model = taskCfg?.model || getRetranslateModel(cfgOld)
-    const thinking = taskCfg?.thinking ?? getRetranslateThinking(cfgOld)
-    const apiKey = (cfgSimple.api_keys && cfgSimple.api_keys[provider as 'gemini'|'openai'|'deepseek'])
-                  || getApiKey(cfgOld)
+    const provider = (taskCfg?.provider || 'gemini') as 'gemini' | 'openai' | 'deepseek'
+    const model = taskCfg?.model || 'gemini-2.5-flash-lite'
+    const thinking = taskCfg?.thinking ?? false
+    const apiKey = cfgSimple.api_keys?.[provider] || ''
     if (!apiKey) {
       setInlineRT({
         anchorSub: s, loading: false, results: [],
@@ -512,7 +508,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     }
 
     // Build scope: anchor ± ctxN (cap 5 lines total)
-    const ctxN = getRetranslateContextWindow(cfgOld)
+    const ctxN = 2     // Bỏ pipeline cũ — default 2 dòng context trước/sau
     const subs = useStore.getState().subtitles
     const anchorIdx = s.index
     let pool = subs.filter(x => x.index >= anchorIdx - ctxN && x.index <= anchorIdx + ctxN)

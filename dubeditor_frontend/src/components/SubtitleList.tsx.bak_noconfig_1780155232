@@ -7,6 +7,7 @@ import { playSubAudio, stopGlobalAudio, subscribePlayingId, preloadSubAudios, in
 import { findDuplicateStarts } from '../utils/perf'
 import type { Subtitle, Chapter } from '../types'
 import { loadConfig, getApiKey, getRetranslateModel, getRetranslateThinking, getRetranslateContextWindow } from './ConfigModal'
+import { loadSimpleConfig } from './translate/simple/ConfigPanel'
 import { getEffectiveSpeed } from '../types'
 
 interface Props {
@@ -493,8 +494,15 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
    * Default scope = "cụm context" (anchor ± context_window).
    */
   const handleRetranslate = useCallback(async (s: Subtitle) => {
-    const config = loadConfig()
-    const apiKey = getApiKey(config)
+    const cfgOld = loadConfig()
+    const cfgSimple = loadSimpleConfig()
+    // Ưu tiên simple config; fallback config cũ nếu trống
+    const taskCfg = cfgSimple.tasks?.retranslate
+    const provider = taskCfg?.provider || cfgOld.provider || 'gemini'
+    const model = taskCfg?.model || getRetranslateModel(cfgOld)
+    const thinking = taskCfg?.thinking ?? getRetranslateThinking(cfgOld)
+    const apiKey = (cfgSimple.api_keys && cfgSimple.api_keys[provider as 'gemini'|'openai'|'deepseek'])
+                  || getApiKey(cfgOld)
     if (!apiKey) {
       setInlineRT({
         anchorSub: s, loading: false, results: [],
@@ -504,7 +512,7 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
     }
 
     // Build scope: anchor ± ctxN (cap 5 lines total)
-    const ctxN = getRetranslateContextWindow(config)
+    const ctxN = getRetranslateContextWindow(cfgOld)
     const subs = useStore.getState().subtitles
     const anchorIdx = s.index
     let pool = subs.filter(x => x.index >= anchorIdx - ctxN && x.index <= anchorIdx + ctxN)
@@ -525,9 +533,9 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
           subtitle_id: s.id,
           hint:        '',
           api_key:     apiKey,
-          provider:    config.provider,
-          model:       getRetranslateModel(config),
-          thinking:    getRetranslateThinking(config),
+          provider:    provider as 'gemini' | 'openai' | 'deepseek',
+          model:       model,
+          thinking:    thinking,
           context_window: ctxN,
         })
         const line: RTLine = {
@@ -548,9 +556,9 @@ export default function SubtitleList({ filter, filterNoChar, filterNoTTS, overla
           subtitle_ids: pool.map(t => t.id),
           hint:         '',
           api_key:      apiKey,
-          provider:     config.provider,
-          model:        getRetranslateModel(config),
-          thinking:     getRetranslateThinking(config),
+          provider:    provider as 'gemini' | 'openai' | 'deepseek',
+          model:       model,
+          thinking:    thinking,
           context_window: ctxN,
         })
         const lines: RTLine[] = res.lines.map(l => {
