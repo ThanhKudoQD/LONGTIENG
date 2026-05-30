@@ -55,22 +55,14 @@ export function defaultSimpleConfig(): SimpleConfig {
 }
 
 export function loadSimpleConfig(): SimpleConfig {
-  const def = defaultSimpleConfig()
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw) || {}
-      // Deep merge: tasks + api_keys merge theo từng key,
-      // các field khác overwrite bình thường.
-      return {
-        ...def,
-        ...parsed,
-        tasks: { ...def.tasks, ...(parsed.tasks || {}) },
-        api_keys: { ...def.api_keys, ...(parsed.api_keys || {}) },
-      }
+      const parsed = JSON.parse(raw)
+      return { ...defaultSimpleConfig(), ...parsed }
     }
   } catch {}
-  return def
+  return defaultSimpleConfig()
 }
 
 export function saveSimpleConfig(cfg: SimpleConfig) {

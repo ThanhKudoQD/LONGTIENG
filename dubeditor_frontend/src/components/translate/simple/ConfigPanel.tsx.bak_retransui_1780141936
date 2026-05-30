@@ -29,7 +29,6 @@ export function defaultSimpleConfig(): SimpleConfig {
       bible:     { ...DEFAULT_TASK_MODELS.bible },
       translate: { ...DEFAULT_TASK_MODELS.translate },
       qa:        { ...DEFAULT_TASK_MODELS.qa },
-      retranslate: { ...DEFAULT_TASK_MODELS.retranslate },
     },
     batch_size_target: 100,
     batch_size_max: 120,
@@ -55,22 +54,14 @@ export function defaultSimpleConfig(): SimpleConfig {
 }
 
 export function loadSimpleConfig(): SimpleConfig {
-  const def = defaultSimpleConfig()
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw) || {}
-      // Deep merge: tasks + api_keys merge theo từng key,
-      // các field khác overwrite bình thường.
-      return {
-        ...def,
-        ...parsed,
-        tasks: { ...def.tasks, ...(parsed.tasks || {}) },
-        api_keys: { ...def.api_keys, ...(parsed.api_keys || {}) },
-      }
+      const parsed = JSON.parse(raw)
+      return { ...defaultSimpleConfig(), ...parsed }
     }
   } catch {}
-  return def
+  return defaultSimpleConfig()
 }
 
 export function saveSimpleConfig(cfg: SimpleConfig) {
@@ -274,7 +265,7 @@ function ModelsTab({
         desc="Chọn provider + model riêng cho từng task. Bible & Translate nên dùng model mạnh. QA model nhẹ là đủ."
       >
         <div className="space-y-3">
-          {(['bible', 'translate', 'qa', 'retranslate'] as TaskKey[]).map(taskKey => (
+          {(['bible', 'translate', 'qa'] as TaskKey[]).map(taskKey => (
             <TaskModelRow
               key={taskKey}
               taskKey={taskKey}

@@ -284,7 +284,7 @@ class SimpleConfigSchema(BaseModel):
     """Config cho 1 project. Lưu trong AppSetting (key='simple_config:{pid}')
     hoặc trong LocalStorage FE (hiện tại FE đang dùng localStorage)."""
     api_keys: ProviderApiKeys
-    tasks: dict[Literal['bible', 'translate', 'qa', 'retranslate'], TaskModelConfig]
+    tasks: dict[Literal['bible', 'translate', 'qa'], TaskModelConfig]
     batch_size_target: int = 100
     batch_size_max: int = 120
     gap_threshold_seconds: float = 3.0

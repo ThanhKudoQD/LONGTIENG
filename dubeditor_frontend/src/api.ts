@@ -141,7 +141,7 @@ export const translateApi = {
       }>
       tokens_in: number
       tokens_out: number
-    }>(`/projects/${pid}/translate/retranslate-batch`, payload).then(r => r.data),
+    }>(`/projects/${pid}/simple/subtitles/retranslate-batch`, payload).then(r => r.data),
 
   // v3.13: Retranslate 1 CHUNK
   retranslateChunk: (pid: number, payload: {
