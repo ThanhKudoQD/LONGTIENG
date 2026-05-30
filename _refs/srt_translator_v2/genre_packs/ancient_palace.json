@@ -1,0 +1,290 @@
+{
+  "id": "ancient_palace",
+  "name_vi": "Cung đấu cổ trang",
+  "name_zh": "古装宫斗",
+  "description": "Cung đấu cổ trang — câu chuyện trong hoàng cung, các phi tần / phi tử tranh sủng, mưu kế, đầu độc, vu cáo. Đặc trưng: lễ nghi nghiêm ngặt, đại từ phức tạp theo thứ bậc, nói có ý ngầm.",
+
+  "tone_signature": "Lễ nghi + ẩn ý + sắc bén ngầm. Hoàng đế uy nghi. Hoàng hậu / quý phi nói khéo nhưng mỗi câu có dao. Cung nữ / thái giám phải khúm núm. Tone cổ trang trang nghiêm, KHÔNG dùng từ hiện đại.",
+
+  "typical_pronouns": {
+    "emperor_default": "trẫm",
+    "emperor_to_empress": "trẫm-hoàng hậu / trẫm-nàng",
+    "emperor_to_concubine": "trẫm-ái phi / trẫm-nàng",
+    "emperor_to_minister": "trẫm-khanh",
+    "empress_default": "bản cung",
+    "empress_to_emperor": "thần thiếp-hoàng thượng / thần thiếp-bệ hạ",
+    "empress_to_concubine_low": "bản cung-muội muội (giả ngọt) / bản cung-ngươi",
+    "empress_to_servant": "bản cung-ngươi",
+    "concubine_default": "bản cung (cao phẩm) / thần thiếp",
+    "concubine_to_emperor": "thần thiếp-hoàng thượng",
+    "concubine_to_concubine_peer": "bản cung-tỷ tỷ / muội muội",
+    "concubine_to_servant": "bản cung-ngươi",
+    "queen_mother_default": "ai gia",
+    "queen_mother_to_emperor": "ai gia-hoàng nhi",
+    "servant_to_master": "nô tỳ / nô tài-nương nương / chủ tử / công công",
+    "servant_to_servant_peer": "ta-ngươi"
+  },
+
+  "common_terms": [
+    {
+      "zh": "皇上",
+      "vi": "hoàng thượng",
+      "category": "title",
+      "notes": "Cách gọi vua phổ thông"
+    },
+    {
+      "zh": "陛下",
+      "vi": "bệ hạ",
+      "category": "title",
+      "notes": "Cách gọi vua trang trọng hơn 'hoàng thượng'"
+    },
+    {
+      "zh": "皇后",
+      "vi": "hoàng hậu",
+      "category": "title",
+      "notes": ""
+    },
+    {
+      "zh": "贵妃",
+      "vi": "quý phi",
+      "category": "title",
+      "notes": ""
+    },
+    {
+      "zh": "贤妃",
+      "vi": "hiền phi",
+      "category": "title",
+      "notes": ""
+    },
+    {
+      "zh": "淑妃",
+      "vi": "thục phi",
+      "category": "title",
+      "notes": ""
+    },
+    {
+      "zh": "本宫",
+      "vi": "bản cung",
+      "category": "title",
+      "notes": "Cách tự xưng của phi tần ở vị cao — khi nói với người dưới"
+    },
+    {
+      "zh": "臣妾",
+      "vi": "thần thiếp",
+      "category": "title",
+      "notes": "Cách phi tần tự xưng khi nói với hoàng thượng / thái hậu"
+    },
+    {
+      "zh": "哀家",
+      "vi": "ai gia",
+      "category": "title",
+      "notes": "Thái hậu tự xưng"
+    },
+    {
+      "zh": "朕",
+      "vi": "trẫm",
+      "category": "title",
+      "notes": "Hoàng đế tự xưng"
+    },
+    {
+      "zh": "奴婢",
+      "vi": "nô tỳ",
+      "category": "title",
+      "notes": "Cung nữ tự xưng"
+    },
+    {
+      "zh": "奴才",
+      "vi": "nô tài",
+      "category": "title",
+      "notes": "Thái giám / nô bộc nam tự xưng"
+    },
+    {
+      "zh": "娘娘",
+      "vi": "nương nương",
+      "category": "title",
+      "notes": "Cách gọi phi tần"
+    },
+    {
+      "zh": "公公",
+      "vi": "công công",
+      "category": "title",
+      "notes": "Cách gọi thái giám lớn tuổi"
+    },
+    {
+      "zh": "嬷嬷",
+      "vi": "ma ma",
+      "category": "title",
+      "notes": "Cách gọi nữ bộc lớn tuổi / vú nuôi"
+    },
+    {
+      "zh": "中堂大人",
+      "vi": "trung đường đại nhân",
+      "category": "title",
+      "notes": "Quan đại thần"
+    },
+    {
+      "zh": "三品大员",
+      "vi": "quan tam phẩm",
+      "category": "title",
+      "notes": ""
+    },
+    {
+      "zh": "凤栖宫",
+      "vi": "cung Phượng Hoa",
+      "category": "location",
+      "notes": "Nơi ở phi tần — VÍ DỤ, tên thực sẽ ở Bible.glossary"
+    },
+    {
+      "zh": "御花园",
+      "vi": "ngự hoa viên",
+      "category": "location",
+      "notes": "Vườn của vua"
+    },
+    {
+      "zh": "宠幸",
+      "vi": "sủng hạnh",
+      "category": "concept",
+      "notes": "Vua sủng ái phi tần — qua đêm"
+    },
+    {
+      "zh": "侍寝",
+      "vi": "thị tẩm",
+      "category": "concept",
+      "notes": "Hầu hạ vua ngủ"
+    },
+    {
+      "zh": "圣旨",
+      "vi": "thánh chỉ",
+      "category": "concept",
+      "notes": "Lệnh của vua"
+    },
+    {
+      "zh": "懿旨",
+      "vi": "ý chỉ",
+      "category": "concept",
+      "notes": "Lệnh của thái hậu / hoàng hậu"
+    },
+    {
+      "zh": "打入冷宫",
+      "vi": "đày vào lãnh cung",
+      "category": "concept",
+      "notes": "Trừng phạt phi tần — bị giam ở cung lạnh"
+    },
+    {
+      "zh": "废后",
+      "vi": "phế hậu",
+      "category": "concept",
+      "notes": "Phế truất hoàng hậu"
+    }
+  ],
+
+  "common_cliches": [
+    {
+      "zh": "臣妾做不到啊",
+      "vi": "Thần thiếp không thể làm được đâu",
+      "category": "cliche",
+      "notes": "Cliché kinh điển cung đấu — phi tần kêu khổ với vua"
+    },
+    {
+      "zh": "本宫今日就让你知道",
+      "vi": "Hôm nay bản cung sẽ cho ngươi biết",
+      "category": "cliche",
+      "notes": "Hoàng hậu / phi tần cao phẩm đe dọa"
+    },
+    {
+      "zh": "皇上明察",
+      "vi": "Hoàng thượng minh xét",
+      "category": "cliche",
+      "notes": "Cầu xin vua xem xét công bằng"
+    },
+    {
+      "zh": "求皇上开恩",
+      "vi": "Cầu hoàng thượng mở lòng nhân từ",
+      "category": "cliche",
+      "notes": "Xin tha tội"
+    },
+    {
+      "zh": "妹妹这是怎么了",
+      "vi": "Muội muội sao vậy?",
+      "category": "cliche",
+      "notes": "Phi tần cao phẩm giả vờ quan tâm — thường có ẩn ý"
+    },
+    {
+      "zh": "你好大的胆子",
+      "vi": "Ngươi to gan thật",
+      "category": "cliche",
+      "notes": "Trách mắng cấp dưới / kẻ vô lễ"
+    },
+    {
+      "zh": "退下",
+      "vi": "Lui xuống",
+      "category": "cliche",
+      "notes": "Lệnh đuổi"
+    },
+    {
+      "zh": "来人",
+      "vi": "Người đâu",
+      "category": "cliche",
+      "notes": "Gọi cung nữ / thị vệ"
+    },
+    {
+      "zh": "拖出去",
+      "vi": "Lôi ra ngoài",
+      "category": "cliche",
+      "notes": "Lệnh trừng phạt"
+    },
+    {
+      "zh": "皇上吉祥",
+      "vi": "Hoàng thượng cát tường",
+      "category": "cliche",
+      "notes": "Lời chào hoàng thượng"
+    }
+  ],
+
+  "translation_examples": [
+    {
+      "zh": "臣妾参见皇上",
+      "vi": "Thần thiếp bái kiến hoàng thượng",
+      "context": "Phi tần chào vua",
+      "note": "Giữ Hán Việt — KHÔNG dịch 'em chào anh' (sai tone). 'tham kiến' → 'bái kiến' (mềm hơn)"
+    },
+    {
+      "zh": "妹妹今日穿得真好看",
+      "vi": "Hôm nay muội muội ăn mặc thật đẹp",
+      "context": "Phi tần cao phẩm khen phi tần thấp — thường có ẩn ý ganh tỵ",
+      "note": "'muội muội' KHÔNG dịch 'em gái' — giữ Hán Việt cho tone cổ trang. 'ăn mặc' KHÔNG 'mặc đồ'"
+    },
+    {
+      "zh": "本宫不喜欢被人骗",
+      "vi": "Bản cung không thích bị người ta lừa",
+      "context": "Hoàng hậu cảnh cáo",
+      "note": "'bản cung' giữ nguyên. 'bị người ta lừa' nghe tự nhiên hơn 'bị lừa gạt'"
+    },
+    {
+      "zh": "皇上，臣妾冤枉啊",
+      "vi": "Hoàng thượng, thần thiếp oan uổng a",
+      "context": "Phi tần kêu oan trước vua",
+      "note": "'oan uổng a' giữ 啊 → 'a' cuối câu cho cảm giác kêu khóc"
+    },
+    {
+      "zh": "来人，把她拖出去",
+      "vi": "Người đâu, lôi nàng ta ra ngoài",
+      "context": "Lệnh trừng phạt phi tần khác",
+      "note": "'nàng ta' KHÔNG 'cô ta' (nàng = cổ trang nữ thứ 3). 'lôi ra ngoài' chuẩn cliché"
+    },
+    {
+      "zh": "回禀皇上，奴婢不知",
+      "vi": "Bẩm hoàng thượng, nô tỳ không biết",
+      "context": "Cung nữ trả lời vua",
+      "note": "'回禀' = 'bẩm' (chuẩn cổ trang). 'nô tỳ' tự xưng — cung nữ"
+    },
+    {
+      "zh": "你这是想造反吗",
+      "vi": "Ngươi muốn tạo phản hay sao?",
+      "context": "Buộc tội nặng",
+      "note": "'造反' = 'tạo phản'. 'ngươi' phù hợp tone cổ trang."
+    }
+  ],
+
+  "style_notes": "TONE TỔNG: Lễ nghi nghiêm ngặt + ẩn ý sắc bén. KHÔNG dùng từ hiện đại ('ok', 'thôi nào', 'bạn', 'tôi-cậu'). Đại từ phải đúng bậc: vua = 'trẫm', phi tần cao phẩm khi tự xưng riêng = 'bản cung', khi nói với vua = 'thần thiếp', thái hậu = 'ai gia', cung nữ = 'nô tỳ'. Cách gọi: phi tần với phi tần ngang hàng = 'tỷ tỷ / muội muội', với cấp dưới = 'ngươi'. Câu thường có ẨN Ý — KHÔNG dịch quá thẳng, giữ vẻ kiểu cách."
+}

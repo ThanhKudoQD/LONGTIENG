@@ -1,0 +1,135 @@
+{
+  "id": "reborn_revenge",
+  "name_vi": "Trọng sinh báo thù",
+  "name_zh": "重生复仇",
+  "description": "Trọng sinh báo thù — nhân vật chính chết / bị phản bội, sống lại, biết trước tương lai và ra tay báo thù. Đặc trưng: tự tin, ngầm mỉa mai, thao túng tình thế.",
+
+  "tone_signature": "Lạnh + tự tin + mỉa mai ngầm. Nhân vật chính sau khi trọng sinh KHÔNG biểu lộ nhiều, nhưng câu nào cũng có ẩn ý. Tone vừa kịch tính vừa thoả mãn cho người xem (the dau khi reveal thân phận).",
+
+  "typical_pronouns": {
+    "reborn_protagonist_default": "tôi",
+    "reborn_protagonist_to_old_enemy": "tôi-cô / tôi-cậu (lạnh, mỉa mai)",
+    "reborn_protagonist_to_past_family": "tôi-mẹ / tôi-cha (lạnh xa cách)",
+    "reborn_protagonist_to_savior": "anh-em (nếu yêu) / tôi-anh (nếu chỉ ơn nghĩa)",
+    "old_enemy_to_reborn": "cô/cậu (chưa biết identity)"
+  },
+
+  "common_terms": [
+    {
+      "zh": "重生",
+      "vi": "trọng sinh",
+      "category": "concept",
+      "notes": "Khái niệm cốt lõi — sống lại"
+    },
+    {
+      "zh": "前世",
+      "vi": "kiếp trước",
+      "category": "concept",
+      "notes": ""
+    },
+    {
+      "zh": "今世",
+      "vi": "kiếp này",
+      "category": "concept",
+      "notes": ""
+    },
+    {
+      "zh": "上辈子",
+      "vi": "kiếp trước",
+      "category": "concept",
+      "notes": "Cách nói khẩu ngữ"
+    },
+    {
+      "zh": "报仇",
+      "vi": "báo thù",
+      "category": "concept",
+      "notes": ""
+    },
+    {
+      "zh": "渣男",
+      "vi": "thằng cặn bã",
+      "category": "concept",
+      "notes": "Chồng cũ / người yêu cũ phản bội — slang phổ biến"
+    },
+    {
+      "zh": "白莲花",
+      "vi": "kẻ giả ngây thơ",
+      "category": "concept",
+      "notes": "Slang chỉ nữ phụ giả vờ trong sáng để hại nữ chính"
+    },
+    {
+      "zh": "绿茶",
+      "vi": "kẻ giả tạo",
+      "category": "concept",
+      "notes": "Slang tương tự bạch liên hoa"
+    }
+  ],
+
+  "common_cliches": [
+    {
+      "zh": "这一世我不会再让你欺负我",
+      "vi": "Kiếp này tôi sẽ không để cô bắt nạt nữa",
+      "category": "cliche",
+      "notes": "Câu khai chiến của nữ chính trọng sinh"
+    },
+    {
+      "zh": "你以为你赢了吗",
+      "vi": "Cô tưởng cô thắng rồi à?",
+      "category": "cliche",
+      "notes": "Câu mỉa mai trước twist"
+    },
+    {
+      "zh": "前世你做的事我都记得",
+      "vi": "Mọi chuyện kiếp trước cô làm tôi đều nhớ rõ",
+      "category": "cliche",
+      "notes": "Reveal thân phận / hint trọng sinh"
+    },
+    {
+      "zh": "这次我不会再相信你",
+      "vi": "Lần này tôi sẽ không tin cô nữa",
+      "category": "cliche",
+      "notes": ""
+    },
+    {
+      "zh": "你的好日子到头了",
+      "vi": "Ngày vui của cô đến đây là hết",
+      "category": "cliche",
+      "notes": "Tuyên bố báo thù"
+    }
+  ],
+
+  "translation_examples": [
+    {
+      "zh": "苏念，我警告你最后一次",
+      "vi": "Tô Niệm, tôi cảnh cáo cô lần cuối",
+      "context": "Nữ chính trọng sinh đối đầu nữ phụ giả tạo",
+      "note": "'tôi-cô' lạnh nhưng KHÔNG xuống 'tao-mày' — vẫn giữ vẻ tự chủ"
+    },
+    {
+      "zh": "上辈子你害死了我，这辈子我让你十倍奉还",
+      "vi": "Kiếp trước cô hại chết tôi, kiếp này tôi sẽ bắt cô trả gấp mười",
+      "context": "Tuyên bố báo thù",
+      "note": "'十倍奉还' = 'trả gấp mười' — KHÔNG dịch 'phụng hoàn' (Hán Việt nặng)"
+    },
+    {
+      "zh": "呵呵",
+      "vi": "Hề hề.",
+      "context": "Mỉa mai ngầm — biết hết nhưng giả vờ không",
+      "note": "Cười mỉa — KHÔNG dịch 'haha'. 'Hề hề' giữ được tone lạnh + mỉa."
+    },
+    {
+      "zh": "你说什么我都听不见",
+      "vi": "Cô nói gì tôi cũng không thèm nghe",
+      "context": "Lạnh nhạt từ chối",
+      "note": "'听不见' = 'không thèm nghe' (KHÔNG 'không nghe được' — sai cảm xúc)"
+    },
+    {
+      "zh": "妈，对不起，这是我必须做的",
+      "vi": "Mẹ, con xin lỗi, đây là điều con phải làm",
+      "context": "Nữ chính nói với mẹ — chuyển sang xưng 'con'",
+      "note": "Khi nói với mẹ, ngay cả nhân vật lạnh cũng dùng 'mẹ-con'"
+    }
+  ],
+
+  "style_notes": "TONE TỔNG: Tự tin + lạnh + mỉa mai. Nhân vật trọng sinh nói ÍT NHƯNG ĐỦ — mỗi câu là 1 đòn. Tránh dịch dài dòng. Đại từ 'tôi-cô' chủ đạo. Khi nhân vật trọng sinh nhớ về kiếp trước → tone có thể buồn/đau ngắn 1-2 câu rồi cứng lại ngay."
+}
