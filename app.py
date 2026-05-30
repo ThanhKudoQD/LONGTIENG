@@ -356,15 +356,23 @@ async def lifespan(app: FastAPI):
     from dubeditor.database import init_db as dub_init_db
     dub_init_db()  # khởi tạo toàn bộ bảng (DubEditor + VoiceCast) trong 1 DB
     seed_admin()
-    import asyncio
-    from dubeditor.simple.jobs import set_main_loop
-    set_main_loop(asyncio.get_running_loop())
+
     # Khởi động TTS Queue worker
     from dubeditor.tts_queue import queue_manager
     from dubeditor.routers.ws import broadcast as dub_broadcast
     from dubeditor.routers.tts import do_generate as dub_do_generate
     queue_manager.setup(generate_fn=dub_do_generate, broadcast_fn=dub_broadcast)
     queue_manager.start_worker()
+
+    # v4.0 — Export Video worker
+    try:
+        from dubeditor.export.service import start_worker as export_start_worker, mark_stuck_jobs
+        import asyncio as _asyncio
+        mark_stuck_jobs()
+        export_start_worker(_asyncio.get_running_loop())
+        logger.info("[v4.0] Export Video worker started")
+    except Exception as _e:
+        logger.error(f"[v4.0] Export Video worker init failed: {_e}")
 
     # Đăng ký signal handler cho SIGTERM / SIGINT
     # (lifespan shutdown đôi khi không chạy nếu kill -9, nhưng SIGTERM/SIGINT thì chạy được)
@@ -506,6 +514,10 @@ app.mount("/dub/projects", StaticFiles(directory=str(_dub_projects)), name="dub-
 (_dub_videos := _dub_projects / "_videos")
 app.mount("/dub/videos", StaticFiles(directory=str(_dub_projects / "_videos")), name="dub-videos")
 app.mount("/dub/exports", StaticFiles(directory=str(_dub_projects / "_exports")), name="dub-exports")
+# v4.0 — Export Video uploads (BGM + watermark)
+_dub_export_uploads = _dub_projects / "_export_uploads"
+_dub_export_uploads.mkdir(parents=True, exist_ok=True)
+app.mount("/dub/export_uploads", StaticFiles(directory=str(_dub_export_uploads)), name="dub-export-uploads")
 _dub_fe = _Path(__file__).parent / "public" / "dubeditor"
 _dub_fe.mkdir(parents=True, exist_ok=True)
 app.mount("/app", StaticFiles(directory=str(_dub_fe), html=True), name="dubeditor-ui")

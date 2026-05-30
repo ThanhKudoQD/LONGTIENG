@@ -1,0 +1,215 @@
+/**
+ * SubtitleStyleTab — tùy chỉnh font/màu/viền/vị trí phụ đề.
+ */
+import React from 'react'
+import { SubtitleStyle, FONT_FAMILIES } from './types'
+
+interface Props {
+  style: SubtitleStyle
+  onChange: (style: SubtitleStyle) => void
+}
+
+export default function SubtitleStyleTab({ style, onChange }: Props) {
+  const patch = <K extends keyof SubtitleStyle>(key: K, value: SubtitleStyle[K]) => {
+    onChange({ ...style, [key]: value })
+  }
+
+  return (
+    <div className="max-w-3xl space-y-5">
+      {/* Bật/tắt */}
+      <div className="flex items-center gap-3 p-3 surface-card">
+        <input
+          type="checkbox"
+          checked={style.enabled}
+          onChange={e => patch('enabled', e.target.checked)}
+          id="sub-enable"
+          className="w-4 h-4"
+        />
+        <label htmlFor="sub-enable" className="flex-1 cursor-pointer">
+          <div className="text-[13px] font-medium">Khắc cứng phụ đề vào video (burned-in)</div>
+          <div className="text-[11px] text-zinc-500">Tắt = export không có sub (chỉ video + audio TTS)</div>
+        </label>
+      </div>
+
+      {style.enabled && (
+        <>
+          {/* Font */}
+          <Section title="Font chữ">
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="Font family">
+                <select
+                  value={style.font_family}
+                  onChange={e => patch('font_family', e.target.value)}
+                  className="input w-full text-[13px]"
+                >
+                  {FONT_FAMILIES.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+              </Field>
+              <Field label="Cỡ chữ">
+                <div className="flex items-center gap-2">
+                  <input type="range" min={12} max={72} value={style.font_size}
+                    onChange={e => patch('font_size', parseInt(e.target.value))}
+                    className="flex-1" />
+                  <input type="number" min={12} max={72} value={style.font_size}
+                    onChange={e => patch('font_size', parseInt(e.target.value) || 32)}
+                    className="input w-16 text-[13px] text-center" />
+                </div>
+              </Field>
+            </div>
+
+            <div className="flex gap-2 mt-3">
+              <ToggleBtn active={style.bold} onClick={() => patch('bold', !style.bold)}>
+                <b>B</b> Đậm
+              </ToggleBtn>
+              <ToggleBtn active={style.italic} onClick={() => patch('italic', !style.italic)}>
+                <i>I</i> Nghiêng
+              </ToggleBtn>
+            </div>
+          </Section>
+
+          {/* Màu */}
+          <Section title="Màu sắc">
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="Màu chữ">
+                <ColorInput value={style.color} onChange={v => patch('color', v)} />
+              </Field>
+              <div>
+                <label className="flex items-center gap-2 text-[13px] font-medium mb-2 cursor-pointer">
+                  <input type="checkbox" checked={style.outline_enabled}
+                    onChange={e => patch('outline_enabled', e.target.checked)} className="w-4 h-4" />
+                  Viền chữ
+                </label>
+                {style.outline_enabled && (
+                  <div className="space-y-2">
+                    <ColorInput value={style.outline_color} onChange={v => patch('outline_color', v)} />
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-zinc-500 w-12">Dày:</span>
+                      <input type="range" min={0} max={6} step={0.5} value={style.outline_width}
+                        onChange={e => patch('outline_width', parseFloat(e.target.value))}
+                        className="flex-1" />
+                      <span className="text-[11px] font-mono w-8 text-right">{style.outline_width}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </Section>
+
+          {/* Vị trí */}
+          <Section title="Vị trí">
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="Vị trí dọc">
+                <div className="flex gap-1">
+                  {(['top', 'middle', 'bottom'] as const).map(p => (
+                    <button
+                      key={p}
+                      onClick={() => patch('position', p)}
+                      className={`flex-1 px-3 py-1.5 text-[12px] rounded-md border ${
+                        style.position === p
+                          ? 'bg-blue-50 border-blue-400 text-blue-700 dark:bg-blue-900/30 dark:border-blue-700'
+                          : 'border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800'
+                      }`}
+                    >
+                      {p === 'top' ? '↑ Trên' : p === 'middle' ? '◉ Giữa' : '↓ Dưới'}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <Field label={`Y offset: ${style.y_offset}px (âm = lên · dương = xuống)`}>
+                <input type="range" min={-300} max={300} value={style.y_offset}
+                  onChange={e => patch('y_offset', parseInt(e.target.value))}
+                  className="w-full" />
+              </Field>
+            </div>
+          </Section>
+
+          {/* Nền chữ */}
+          <Section title="Nền chữ (background box)">
+            <label className="flex items-center gap-2 text-[13px] mb-2 cursor-pointer">
+              <input type="checkbox" checked={style.background_enabled}
+                onChange={e => patch('background_enabled', e.target.checked)} className="w-4 h-4" />
+              Hiện nền chữ
+            </label>
+            {style.background_enabled && (
+              <div className="grid grid-cols-2 gap-4">
+                <Field label="Màu nền">
+                  <ColorInput value={style.background_color} onChange={v => patch('background_color', v)} />
+                </Field>
+                <Field label={`Độ mờ: ${Math.round(style.background_opacity * 100)}%`}>
+                  <input type="range" min={0} max={1} step={0.05} value={style.background_opacity}
+                    onChange={e => patch('background_opacity', parseFloat(e.target.value))}
+                    className="w-full" />
+                </Field>
+              </div>
+            )}
+          </Section>
+
+          {/* Bóng */}
+          <Section title="Đổ bóng (shadow)">
+            <label className="flex items-center gap-2 text-[13px] mb-2 cursor-pointer">
+              <input type="checkbox" checked={style.shadow_enabled}
+                onChange={e => patch('shadow_enabled', e.target.checked)} className="w-4 h-4" />
+              Hiện shadow
+            </label>
+            {style.shadow_enabled && (
+              <div className="grid grid-cols-2 gap-4">
+                <Field label="Màu bóng">
+                  <ColorInput value={style.shadow_color} onChange={v => patch('shadow_color', v)} />
+                </Field>
+                <Field label={`Blur: ${style.shadow_blur}px`}>
+                  <input type="range" min={0} max={20} value={style.shadow_blur}
+                    onChange={e => patch('shadow_blur', parseInt(e.target.value))}
+                    className="w-full" />
+                </Field>
+              </div>
+            )}
+          </Section>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="surface-card p-4">
+      <h3 className="text-[13px] font-semibold mb-3 text-zinc-900 dark:text-zinc-100">{title}</h3>
+      {children}
+    </div>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[11px] text-zinc-500 mb-1.5 font-medium uppercase tracking-wider">{label}</label>
+      {children}
+    </div>
+  )
+}
+
+function ToggleBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button onClick={onClick}
+      className={`px-3 py-1.5 text-[12px] rounded-md border ${
+        active
+          ? 'bg-blue-50 border-blue-400 text-blue-700 dark:bg-blue-900/30 dark:border-blue-700'
+          : 'border-zinc-200 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800'
+      }`}>
+      {children}
+    </button>
+  )
+}
+
+function ColorInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <input type="color" value={value} onChange={e => onChange(e.target.value)}
+        className="w-10 h-9 rounded border border-zinc-200 dark:border-zinc-700 cursor-pointer" />
+      <input type="text" value={value} onChange={e => onChange(e.target.value)}
+        className="input flex-1 text-[12px] font-mono" placeholder="#FFFFFF" />
+    </div>
+  )
+}

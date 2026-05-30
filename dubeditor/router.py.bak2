@@ -1,6 +1,7 @@
 from fastapi import APIRouter
-from dubeditor.routers import projects, subtitles, characters, tts, export, ws
+from dubeditor.routers import projects, subtitles, characters, tts, export, ws, presets
 from dubeditor.routers import auto_assign, auto_fix, chapters
+from dubeditor.routers import translate
 from dubeditor.routers import license as license_router
 from dubeditor.routers import settings  # v3.12
 from dubeditor.routers import export_video  # v4.0 — module xuất video FFmpeg
@@ -17,6 +18,8 @@ router.include_router(export_video.router, prefix="/api/export_video", tags=["du
 router.include_router(auto_assign.router,  prefix="/api",            tags=["dub-auto-assign"])
 router.include_router(auto_fix.router,     prefix="/api",            tags=["dub-auto-fix"])
 router.include_router(chapters.router,     prefix="/api/chapters",   tags=["dub-chapters"])
+router.include_router(translate.router,    prefix="/api",            tags=["dub-translate"])
 router.include_router(ws.router,                                      tags=["dub-ws"])
+router.include_router(presets.router,      prefix="/api/presets",    tags=["dub-presets"])
 # v3.12: settings global (API keys + model presets)
 router.include_router(settings.router,     prefix="/api",            tags=["dub-settings"])

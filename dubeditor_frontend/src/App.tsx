@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import ProjectList from './components/ProjectList'
 import Editor from './components/Editor'
-import TranslatePage from './components/translate/simple'
+import TranslatePage from './components/TranslatePage'
+import ExportPage from './components/export/ExportPage'
 import LicenseGate, { LicenseStatus } from './components/LicenseGate'
 import api from './api'
 
@@ -9,6 +10,7 @@ type View =
   | { page: 'list' }
   | { page: 'editor';    projectId: number }
   | { page: 'translate'; projectId: number }
+  | { page: 'export';    projectId: number }
 
 export default function App() {
   const [view, setView] = useState<View>({ page: 'list' })
@@ -65,6 +67,7 @@ export default function App() {
         projectId={view.projectId}
         onBack={() => setView({ page: 'list' })}
         onTranslate={() => setView({ page: 'translate', projectId: view.projectId })}
+        onExport={() => setView({ page: 'export', projectId: view.projectId })}
       />
     )
   }
@@ -72,6 +75,15 @@ export default function App() {
   if (view.page === 'translate') {
     return (
       <TranslatePage
+        projectId={view.projectId}
+        onBack={() => setView({ page: 'editor', projectId: view.projectId })}
+      />
+    )
+  }
+
+  if (view.page === 'export') {
+    return (
+      <ExportPage
         projectId={view.projectId}
         onBack={() => setView({ page: 'editor', projectId: view.projectId })}
       />

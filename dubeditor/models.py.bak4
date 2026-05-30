@@ -7,7 +7,6 @@ from dubeditor.database import Base
 
 class Project(Base):
     __tablename__ = "projects"
-    last_export_config_json = Column(Text, nullable=True)   # v4.0 auto-save export config
     id                 = Column(Integer, primary_key=True, index=True)
     name               = Column(String, nullable=False)
     video_path         = Column(String, nullable=True)

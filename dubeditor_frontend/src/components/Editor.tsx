@@ -21,9 +21,9 @@ import ConfirmModal from './ConfirmModal'
 import { LicenseChip, LicenseStatus } from './LicenseGate'
 import UndoToast from './UndoToast'
 
-interface Props { projectId: number; onBack: () => void; onTranslate: () => void }
+interface Props { projectId: number; onBack: () => void; onTranslate: () => void; onExport: () => void }
 
-export default function Editor({ projectId, onBack, onTranslate }: Props) {
+export default function Editor({ projectId, onBack, onTranslate, onExport }: Props) {
   // PERF: selectors riêng — KHÔNG destructure
   const project = useStore(s => s.project)
   const subtitles = useStore(s => s.subtitles)
@@ -764,6 +764,13 @@ export default function Editor({ projectId, onBack, onTranslate }: Props) {
             <path d="M8 8h5M10 7v1M9 8c0 2 1.5 4 3.5 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
           </svg>
           🌐 Dịch
+        </button>
+
+        <button onClick={onExport}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-medium transition-colors flex-shrink-0"
+          style={{ borderColor: '#0891b2', background: 'linear-gradient(135deg,#0891b218,#06b6d418)', color: '#0891b2' }}
+          title="Xuất video final (audio TTS + phụ đề + tùy chỉnh)">
+          📤 Xuất video
         </button>
 
         {/* License chip — hiện số ngày còn lại */}

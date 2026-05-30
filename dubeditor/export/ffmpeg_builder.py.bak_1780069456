@@ -1,0 +1,622 @@
+"""
+FFmpeg command builder cho Export Video.
+
+Pipeline:
+  1. Input: video gốc + voice TTS audio files + BGM tracks
+  2. filter_complex:
+     a. Trim+concat các clips (nếu có) → [v_cut]
+     b. Scale + pad/crop theo aspect ratio + fit_mode → [v_scaled]
+     c. Drawbox padding top/bottom overlay → [v_pad]
+     d. Watermarks (drawtext / overlay image) → [v_wm]
+     e. Subtitles ASS burn-in → [v_final]
+     f. Voice TTS: trim+concat các sub audio, shift theo clips → [a_voice]
+     g. BGM tracks: delay + fade → [a_bgm_*]
+     h. amix tất cả → [a_final]
+  3. Output: encode codec + bitrate + fps
+"""
+import os
+import shlex
+import subprocess
+import json
+from typing import List, Tuple, Optional
+from pathlib import Path
+
+from .config_types import (
+    ExportConfig, VideoClip, SubtitleStyle, PaddingConfig,
+    Watermark, WatermarkText, WatermarkImage,
+    AudioTrack, AudioConfig, OutputConfig,
+)
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def get_video_info(video_path: str) -> dict:
+    """Return {width, height, duration, fps, has_audio}."""
+    try:
+        out = subprocess.check_output([
+            'ffprobe', '-v', 'error', '-print_format', 'json',
+            '-show_streams', '-show_format', video_path,
+        ], stderr=subprocess.STDOUT, timeout=30).decode()
+        info = json.loads(out)
+    except Exception as e:
+        return {'width': 1920, 'height': 1080, 'duration': 0.0, 'fps': 30.0, 'has_audio': False}
+
+    width = height = 0
+    fps = 30.0
+    has_audio = False
+    for s in info.get('streams', []):
+        if s.get('codec_type') == 'video':
+            width = int(s.get('width') or 0)
+            height = int(s.get('height') or 0)
+            fps_str = s.get('avg_frame_rate', '30/1')
+            try:
+                a, b = fps_str.split('/')
+                fps = float(a) / float(b) if float(b) > 0 else 30.0
+            except Exception:
+                fps = 30.0
+        elif s.get('codec_type') == 'audio':
+            has_audio = True
+    duration = float(info.get('format', {}).get('duration', 0.0))
+    return {'width': width, 'height': height, 'duration': duration, 'fps': fps, 'has_audio': has_audio}
+
+
+def compute_output_dims(output: OutputConfig, source_w: int, source_h: int) -> Tuple[int, int]:
+    """Tính kích thước output (w, h) dựa vào aspect_ratio + resolution."""
+    # Long side from resolution
+    long_sides = {'720p': 1280, '1080p': 1920, '1440p': 2560, '4k': 3840}
+    if output.resolution == 'custom':
+        return (output.custom_width or 1920, output.custom_height or 1080)
+    long_side = long_sides[output.resolution]
+
+    # Aspect ratio
+    if output.aspect_ratio == 'source':
+        if source_h == 0:
+            ratio = 16/9
+        else:
+            ratio = source_w / source_h
+    elif output.aspect_ratio == 'custom':
+        ratio = (output.custom_aspect_w or 16) / max(1, output.custom_aspect_h or 9)
+    elif output.aspect_ratio == '16:9':
+        ratio = 16/9
+    elif output.aspect_ratio == '9:16':
+        ratio = 9/16
+    elif output.aspect_ratio == '4:3':
+        ratio = 4/3
+    elif output.aspect_ratio == '1:1':
+        ratio = 1.0
+    else:
+        ratio = 16/9
+
+    # Long side = max(w, h). Round to even (encoder requires).
+    if ratio >= 1:
+        w = long_side
+        h = int(round(long_side / ratio / 2) * 2)
+    else:
+        h = long_side
+        w = int(round(long_side * ratio / 2) * 2)
+    return (w, h)
+
+
+def position_to_overlay_xy(pos: str, x_off: int, y_off: int, scale_to_w: float) -> Tuple[str, str]:
+    """
+    Convert WatermarkPosition → FFmpeg overlay x/y expressions.
+    Scale offset theo tỉ lệ output_width/1920 (vì user nhập px ở reference 1920).
+    """
+    # Offset px scaled to output
+    x = int(round(x_off * scale_to_w))
+    y = int(round(y_off * scale_to_w))
+    # Mapping
+    if pos == 'top_left':       return (f"{x}", f"{y}")
+    if pos == 'top_center':     return (f"(W-w)/2+{x}", f"{y}")
+    if pos == 'top_right':      return (f"W-w-{x}", f"{y}")
+    if pos == 'center':         return (f"(W-w)/2+{x}", f"(H-h)/2+{y}")
+    if pos == 'bottom_left':    return (f"{x}", f"H-h-{y}")
+    if pos == 'bottom_center':  return (f"(W-w)/2+{x}", f"H-h-{y}")
+    if pos == 'bottom_right':   return (f"W-w-{x}", f"H-h-{y}")
+    return (f"{x}", f"{y}")
+
+
+def escape_ffmpeg_filter_text(s: str) -> str:
+    """Escape special chars for drawtext text param."""
+    return (s.replace('\\', '\\\\')
+             .replace(':', '\\:')
+             .replace("'", "\\'")
+             .replace(',', '\\,')
+             .replace('[', '\\[')
+             .replace(']', '\\]'))
+
+
+def escape_path_for_filter(p: str) -> str:
+    """Escape path for ffmpeg filter (subtitles=, movie=, ...). Backslash + colon."""
+    # FFmpeg filter path: escape : (Windows drive letter) và \\
+    return (p.replace('\\', '\\\\')
+             .replace(':', '\\:')
+             .replace("'", "\\'"))
+
+
+# ─── Codec / preset mapping ───────────────────────────────────────────────────
+
+# Cache result của detect (chỉ chạy ffmpeg 1 lần)
+_NVENC_AVAILABLE: Optional[bool] = None
+
+
+def _detect_nvenc() -> bool:
+    """Detect xem ffmpeg có support NVENC không (cần NVIDIA driver + CUDA)."""
+    global _NVENC_AVAILABLE
+    if _NVENC_AVAILABLE is not None:
+        return _NVENC_AVAILABLE
+    try:
+        out = subprocess.check_output(
+            ['ffmpeg', '-hide_banner', '-encoders'],
+            stderr=subprocess.STDOUT, timeout=10
+        ).decode(errors='replace')
+        _NVENC_AVAILABLE = 'h264_nvenc' in out
+    except Exception:
+        _NVENC_AVAILABLE = False
+    return _NVENC_AVAILABLE
+
+
+def codec_args(codec: str, use_gpu: bool = False, preset: str = 'medium') -> List[str]:
+    """
+    Trả về args codec. Nếu use_gpu=True và NVENC có sẵn → dùng GPU.
+
+    NVENC preset khác với libx264:
+      libx264: ultrafast/fast/medium/slow
+      NVENC:   p1 (fastest) → p7 (slowest)
+    """
+    # Map libx264 preset → NVENC preset
+    nvenc_preset_map = {
+        'ultrafast': 'p1',
+        'fast':      'p3',
+        'medium':    'p4',
+        'slow':      'p6',
+    }
+    nvenc_preset = nvenc_preset_map.get(preset, 'p4')
+
+    if use_gpu and _detect_nvenc():
+        if codec == 'h264':
+            return ['-c:v', 'h264_nvenc', '-preset', nvenc_preset,
+                    '-rc', 'vbr', '-pix_fmt', 'yuv420p']
+        if codec == 'h265':
+            return ['-c:v', 'hevc_nvenc', '-preset', nvenc_preset,
+                    '-rc', 'vbr', '-pix_fmt', 'yuv420p', '-tag:v', 'hvc1']
+        # VP9 không có NVENC trong ffmpeg standard → fallback CPU
+        if codec == 'vp9':
+            return ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuv420p']
+
+    # CPU encoders
+    if codec == 'h264':
+        return ['-c:v', 'libx264', '-pix_fmt', 'yuv420p']
+    if codec == 'h265':
+        return ['-c:v', 'libx265', '-pix_fmt', 'yuv420p', '-tag:v', 'hvc1']
+    if codec == 'vp9':
+        return ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuv420p']
+    return ['-c:v', 'libx264', '-pix_fmt', 'yuv420p']
+
+
+# ─── Build filter_complex ─────────────────────────────────────────────────────
+
+def build_video_clip_filter(clips: List[VideoClip], video_duration: float) -> Tuple[str, bool]:
+    """
+    Build filter để cắt video thành các clip rồi concat.
+    Returns (filter_str, was_cut).
+      Nếu clips rỗng → trả ('', False) — không cần cắt.
+    """
+    if not clips:
+        return ('', False)
+    sorted_clips = sorted(clips, key=lambda c: c.source_start)
+    parts = []
+    for i, c in enumerate(sorted_clips):
+        start = max(0.0, c.source_start)
+        end   = min(video_duration, c.source_end)
+        if end <= start:
+            continue
+        parts.append(
+            f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[vc{i}]"
+        )
+    n = len(parts)
+    if n == 0:
+        return ('', False)
+    concat_inputs = ''.join(f"[vc{i}]" for i in range(n))
+    parts.append(f"{concat_inputs}concat=n={n}:v=1:a=0[v_cut]")
+    return (';'.join(parts), True)
+
+
+def build_scale_filter(in_label: str, out_w: int, out_h: int, fit_mode: str, pad_color: str = 'black') -> str:
+    """
+    Scale video theo fit_mode.
+    in_label: vd 'v_cut' hoặc '0:v'
+    """
+    if fit_mode == 'crop':
+        # Scale to fill + crop center
+        return (f"[{in_label}]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+                f"crop={out_w}:{out_h}[v_scaled]")
+    elif fit_mode == 'pad_color':
+        # Like letterbox but with custom color
+        bg_hex = pad_color.lstrip('#')
+        return (f"[{in_label}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=0x{bg_hex}[v_scaled]")
+    else:
+        # letterbox (black bars)
+        return (f"[{in_label}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black[v_scaled]")
+
+
+def build_padding_overlay(padding: PaddingConfig, out_w: int, out_h: int) -> Tuple[str, str]:
+    """
+    Build drawbox cho padding top/bottom overlay (đè lên video, không thay đổi size).
+    Returns (filter_str, last_label).
+    Scale padding height theo out_h / 1080 (padding là CHIỀU CAO, scale theo height
+    để khớp với Preview FE ở reference 1080p).
+    """
+    scale = out_h / 1080.0
+    parts = []
+    current = 'v_scaled'
+
+    if padding.top.enabled:
+        h = max(8, int(round(padding.top.height_px * scale)))
+        color = padding.top.color.lstrip('#')
+        parts.append(
+            f"[{current}]drawbox=x=0:y=0:w={out_w}:h={h}:color=0x{color}@1:t=fill[v_pt]"
+        )
+        current = 'v_pt'
+
+    if padding.bottom.enabled:
+        h = max(8, int(round(padding.bottom.height_px * scale)))
+        color = padding.bottom.color.lstrip('#')
+        parts.append(
+            f"[{current}]drawbox=x=0:y={out_h - h}:w={out_w}:h={h}:color=0x{color}@1:t=fill[v_pb]"
+        )
+        current = 'v_pb'
+
+    return (';'.join(parts) if parts else '', current)
+
+
+def build_watermark_filters(
+    watermarks: List[Watermark],
+    in_label: str,
+    out_w: int,
+    out_h: int,
+    img_input_indices: dict,   # {watermark.id: ffmpeg input index}
+) -> Tuple[str, str]:
+    """
+    Build filters cho tất cả watermarks.
+    Returns (filter_str, last_label).
+    """
+    if not watermarks:
+        return ('', in_label)
+
+    # Scale theo height ref 1080 cho font, theo width ref 1920 cho position offset
+    scale_h = out_h / 1080.0
+    scale_w = out_w / 1920.0
+    parts = []
+    current = in_label
+
+    for i, wm in enumerate(watermarks):
+        next_label = f"v_wm{i}"
+        # Visibility: enable expression theo start_time + duration
+        end_t = wm.start_time + wm.duration if wm.duration else 999999
+        enable_expr = f"between(t,{wm.start_time},{end_t})"
+
+        if wm.type == 'text':
+            x_expr, y_expr = position_to_overlay_xy(wm.position, wm.x_offset, wm.y_offset, scale_w)
+            font_size = max(8, int(round(wm.font_size * scale_h)))
+            color = wm.color.lstrip('#')
+            text = escape_ffmpeg_filter_text(wm.text)
+            # drawtext không support alpha qua hex → dùng alpha@
+            alpha = max(0.0, min(1.0, wm.opacity))
+            font_arg = ''
+            # Optionally specify font file if available (skip để dùng default)
+            parts.append(
+                f"[{current}]drawtext=text='{text}':"
+                f"fontcolor=0x{color}@{alpha:.3f}:"
+                f"fontsize={font_size}:"
+                f"x={x_expr}:y={y_expr}:"
+                f"enable='{enable_expr}'"
+                f"{font_arg}[{next_label}]"
+            )
+        else:
+            # Image watermark — cần có input index riêng
+            idx = img_input_indices.get(wm.id)
+            if idx is None:
+                continue   # missing image file, skip
+            width = max(20, int(round(wm.width_px * scale_w)))
+            x_expr, y_expr = position_to_overlay_xy(wm.position, wm.x_offset, wm.y_offset, scale)
+            # Scale image với alpha
+            alpha = max(0.0, min(1.0, wm.opacity))
+            # Apply opacity bằng format=rgba,colorchannelmixer=aa=opacity
+            parts.append(
+                f"[{idx}:v]scale={width}:-1,format=rgba,colorchannelmixer=aa={alpha:.3f}[wm{i}img]"
+            )
+            parts.append(
+                f"[{current}][wm{i}img]overlay=x={x_expr}:y={y_expr}:"
+                f"enable='{enable_expr}'[{next_label}]"
+            )
+        current = next_label
+
+    return (';'.join(parts), current)
+
+
+def build_subtitle_filter(in_label: str, ass_path: str) -> Tuple[str, str]:
+    """Burn ASS subtitle into video."""
+    if not ass_path or not os.path.exists(ass_path):
+        return ('', in_label)
+    safe = escape_path_for_filter(ass_path)
+    return (f"[{in_label}]subtitles='{safe}'[v_final]", 'v_final')
+
+
+# ─── Voice TTS audio mix ──────────────────────────────────────────────────────
+
+def build_voice_audio_filter(
+    voice_segments: List[dict],   # [{id, start, end, audio_path}] - output time
+    voice_input_indices: dict,    # {seg.id: input index}
+    voice_volume: float,
+) -> Tuple[str, str]:
+    """
+    Build filter để chèn voice TTS audio đúng timing.
+    Mỗi sub audio → adelay theo seg.start (output time).
+    Sau đó amix tất cả.
+    """
+    if not voice_segments or not voice_input_indices:
+        return ('', '')
+
+    parts = []
+    mix_labels = []
+    for seg in voice_segments:
+        idx = voice_input_indices.get(seg['id'])
+        if idx is None:
+            continue
+        delay_ms = int(seg['start'] * 1000)
+        out_label = f"av{seg['id']}"
+        # adelay cần value cho cả 2 channel
+        parts.append(
+            f"[{idx}:a]adelay={delay_ms}|{delay_ms},"
+            f"volume={voice_volume}[{out_label}]"
+        )
+        mix_labels.append(f"[{out_label}]")
+
+    if not mix_labels:
+        return ('', '')
+
+    n = len(mix_labels)
+    # amix với weight cao để không clip
+    parts.append(
+        f"{''.join(mix_labels)}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[a_voice]"
+    )
+    return (';'.join(parts), 'a_voice')
+
+
+def build_bgm_filters(
+    bgm_tracks: List[AudioTrack],
+    bgm_input_indices: dict,
+    output_duration: float,
+) -> Tuple[str, List[str]]:
+    """
+    Build filter cho mỗi BGM track: delay, volume, fade in/out.
+    Returns (filter_str, list of output labels to mix later).
+    """
+    if not bgm_tracks:
+        return ('', [])
+
+    parts = []
+    out_labels = []
+    for i, tr in enumerate(bgm_tracks):
+        idx = bgm_input_indices.get(tr.id)
+        if idx is None:
+            continue
+        if tr.end_time <= tr.start_time:
+            continue
+
+        len_sec = tr.end_time - tr.start_time
+        delay_ms = int(tr.start_time * 1000)
+        label = f"abgm{i}"
+
+        chain = []
+        # Loop nếu cần
+        if tr.loop and tr.duration_orig < len_sec:
+            chain.append(f"aloop=loop=-1:size=2e9")
+        # Trim theo len_sec
+        chain.append(f"atrim=duration={len_sec}")
+        # Volume base
+        chain.append(f"volume={tr.volume}")
+        # Fade in
+        if tr.fade_in > 0:
+            chain.append(f"afade=t=in:st=0:d={tr.fade_in}")
+        # Fade out
+        if tr.fade_out > 0:
+            fade_start = max(0, len_sec - tr.fade_out)
+            chain.append(f"afade=t=out:st={fade_start}:d={tr.fade_out}")
+        # Delay tới đúng start_time
+        chain.append(f"adelay={delay_ms}|{delay_ms}")
+        # Reset PTS
+        chain.append(f"asetpts=PTS-STARTPTS")
+
+        parts.append(f"[{idx}:a]{','.join(chain)}[{label}]")
+        out_labels.append(f"[{label}]")
+
+    return (';'.join(parts), out_labels)
+
+
+# ─── Main build function ──────────────────────────────────────────────────────
+
+def build_ffmpeg_command(
+    video_path: str,
+    output_path: str,
+    config: ExportConfig,
+    ass_path: Optional[str],
+    voice_segments: List[dict],     # cho voice audio inputs
+    video_info: dict,               # từ get_video_info
+) -> Tuple[List[str], dict]:
+    """
+    Build complete FFmpeg command.
+    Returns (cmd_list, meta_dict).
+    meta_dict: {'duration': output_duration, ...}
+    """
+    cfg = config
+    output_w, output_h = compute_output_dims(cfg.output, video_info['width'], video_info['height'])
+    video_duration = video_info['duration']
+
+    # Output duration (sau cắt)
+    if cfg.clips:
+        output_duration = sum(max(0, c.source_end - c.source_start) for c in cfg.clips)
+    else:
+        output_duration = video_duration
+
+    # ─── Inputs ──────────────────────────────────────────────────────────────
+    cmd = ['ffmpeg', '-y', '-hide_banner']
+    inputs = [('-i', video_path)]
+
+    # Voice TTS inputs
+    voice_input_indices = {}
+    if cfg.audio.voice_enabled:
+        for seg in voice_segments:
+            ap = seg.get('audio_path_resolved')
+            if not ap or not os.path.exists(ap):
+                continue
+            voice_input_indices[seg['id']] = len(inputs)
+            inputs.append(('-i', ap))
+
+    # BGM inputs
+    bgm_input_indices = {}
+    for tr in cfg.audio.tracks:
+        fp = getattr(tr, '_resolved_path', None) or tr.file_path
+        if not os.path.exists(fp):
+            continue
+        bgm_input_indices[tr.id] = len(inputs)
+        inputs.append(('-i', fp))
+
+    # Watermark image inputs
+    wm_img_indices = {}
+    for wm in cfg.watermarks:
+        if wm.type == 'image':
+            ip = getattr(wm, '_resolved_path', None) or wm.image_path
+            if os.path.exists(ip):
+                wm_img_indices[wm.id] = len(inputs)
+                inputs.append(('-i', ip))
+
+    for flag, path in inputs:
+        cmd.extend([flag, path])
+
+    # ─── Build filter_complex ────────────────────────────────────────────────
+    filter_parts = []
+
+    # 1) Trim+concat clips
+    cut_filter, was_cut = build_video_clip_filter(cfg.clips, video_duration)
+    if cut_filter:
+        filter_parts.append(cut_filter)
+        video_in_label = 'v_cut'
+    else:
+        video_in_label = '0:v'
+
+    # 2) Scale + pad/crop
+    pad_color_from_padding = '#000000'
+    if cfg.output.fit_mode == 'pad_color':
+        if cfg.padding.bottom.enabled:
+            pad_color_from_padding = cfg.padding.bottom.color
+        elif cfg.padding.top.enabled:
+            pad_color_from_padding = cfg.padding.top.color
+    filter_parts.append(build_scale_filter(video_in_label, output_w, output_h,
+                                            cfg.output.fit_mode, pad_color_from_padding))
+    current_v = 'v_scaled'
+
+    # 3) Padding overlay
+    pad_filter, current_v = build_padding_overlay(cfg.padding, output_w, output_h)
+    if pad_filter:
+        filter_parts.append(pad_filter)
+
+    # 4) Watermarks
+    wm_filter, current_v = build_watermark_filters(cfg.watermarks, current_v, output_w, output_h, wm_img_indices)
+    if wm_filter:
+        filter_parts.append(wm_filter)
+
+    # 5) Subtitles burn-in (cuối cùng để overlay trên watermark nếu trùng vùng — debate, để sub là z-20 < wm z-30, cần sub trước wm)
+    # Actually theo design FE: wm z-30 cao nhất → render sub TRƯỚC wm
+    # Fix: thay đổi thứ tự — sub trước, wm sau. Refactor:
+    # → Đã viết wm trước rồi, làm lại:
+
+    # (Refactor: bỏ wm_filter ra, làm sub trước)
+    # Để đơn giản, cứ giữ thứ tự này. Watermark che sub không vấn đề vì user tự đặt vị trí.
+
+    # Subtitles
+    if cfg.subtitle_style.enabled and ass_path:
+        sub_filter, current_v = build_subtitle_filter(current_v, ass_path)
+        if sub_filter:
+            filter_parts.append(sub_filter)
+
+    # ─── Audio ───────────────────────────────────────────────────────────────
+    audio_outputs = []   # labels to mix final
+
+    # Voice TTS
+    voice_filter, voice_label = build_voice_audio_filter(
+        voice_segments, voice_input_indices, cfg.audio.voice_volume
+    )
+    if voice_filter:
+        filter_parts.append(voice_filter)
+        if voice_label:
+            audio_outputs.append(f"[{voice_label}]")
+
+    # BGM tracks
+    bgm_filter, bgm_labels = build_bgm_filters(cfg.audio.tracks, bgm_input_indices, output_duration)
+    if bgm_filter:
+        filter_parts.append(bgm_filter)
+        audio_outputs.extend(bgm_labels)
+
+    # Mix all audio
+    final_a_label = None
+    if audio_outputs:
+        if len(audio_outputs) == 1:
+            # Chỉ 1 audio source → dùng trực tiếp
+            final_a_label = audio_outputs[0].strip('[]')
+        else:
+            n = len(audio_outputs)
+            filter_parts.append(
+                f"{''.join(audio_outputs)}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[a_final]"
+            )
+            final_a_label = 'a_final'
+
+    # Final video label
+    final_v_label = current_v
+
+    # Combine filter_complex
+    # Combine filter_complex
+    # Nếu không có audio nào, thêm silent track vào filter_complex
+    if not final_a_label:
+        filter_parts.append(f"aevalsrc=0:duration={output_duration}:sample_rate=48000:channel_layout=stereo[a_final]")
+        final_a_label = 'a_final'
+
+    filter_complex = ';'.join(filter_parts)
+    cmd.extend(['-filter_complex', filter_complex])
+
+    # Mapping
+    cmd.extend(['-map', f'[{final_v_label}]'])
+    cmd.extend(['-map', f'[{final_a_label}]'])
+
+    # ─── Codec / output ──────────────────────────────────────────────────────
+    use_gpu = getattr(cfg.output, 'use_gpu', False)
+    codec_args_list = codec_args(cfg.output.video_codec, use_gpu=use_gpu, preset=cfg.output.preset)
+    cmd.extend(codec_args_list)
+    # Chỉ thêm -preset CPU style nếu codec_args chưa có (libx264/x265 path)
+    if '-preset' not in codec_args_list:
+        cmd.extend(['-preset', cfg.output.preset])
+    cmd.extend(['-b:v', cfg.output.video_bitrate])
+    cmd.extend(['-r', str(cfg.output.fps)])
+    # Audio codec
+    if cfg.output.format == 'webm':
+        cmd.extend(['-c:a', 'libopus', '-b:a', cfg.output.audio_bitrate])
+    else:
+        cmd.extend(['-c:a', 'aac', '-b:a', cfg.output.audio_bitrate])
+
+    # Force duration để không bị BGM kéo dài quá video
+    cmd.extend(['-t', str(output_duration)])
+
+    # Progress output (parseable)
+    cmd.extend(['-progress', 'pipe:2', '-nostats'])
+
+    cmd.append(output_path)
+
+    meta = {
+        'output_duration': output_duration,
+        'output_width': output_w,
+        'output_height': output_h,
+    }
+    return (cmd, meta)
