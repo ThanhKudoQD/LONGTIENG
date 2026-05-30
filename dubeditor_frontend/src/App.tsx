@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import ProjectList from './components/ProjectList'
 import Editor from './components/Editor'
-import TranslatePage from './components/TranslatePage'
+import TranslatePageSimple from './components/translate/simple/TranslatePageSimple'
 import ExportPage from './components/export/ExportPage'
 import LicenseGate, { LicenseStatus } from './components/LicenseGate'
 import LoginPage from './components/auth/LoginPage'
@@ -134,7 +134,7 @@ export default function App() {
 
   if (view.page === 'translate') {
     return (
-      <TranslatePage
+      <TranslatePageSimple
         projectId={view.projectId}
         onBack={() => setView({ page: 'editor', projectId: view.projectId })}
       />

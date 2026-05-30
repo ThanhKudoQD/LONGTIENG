@@ -144,6 +144,10 @@ class Subtitle(Base):
     __table_args__ = (
         Index('ix_subtitles_project_index', 'project_id', 'index'),
     )
+    # ── Simple Translator v6 (pipeline mới) ──────────────────────────────────
+    simple_speaker_zh    = Column(String, nullable=True)
+    simple_text_vi       = Column(Text, nullable=True)
+    simple_status        = Column(String, default='pending')   # pending|translated|has_error|fixed
 
 class Chapter(Base):
     __tablename__ = "chapters"
