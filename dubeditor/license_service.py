@@ -45,13 +45,13 @@ MACHINE_ID_FALLBACK_FILE = BASE_DIR / "data" / ".machine_id"
 #   openssl genrsa -out private_key.pem 2048
 #   openssl rsa -in private_key.pem -pubout -out public_key.pem
 PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz0yJR1I/pPfykCaEWFNg
-DVK8yEDptnmMCQLPfCH2hrtwiNXSQESjmb6NCijRuVGWMmYju3Qlfsi2XyixdsYF
-7AZESQA0ds3ladqLc56oq2kWwksUBenXLxmIEYD+Sy6yEc9Ewu6cQ+ccclPGu0Uc
-m5am8TOsIThrK6fIQ5a1O+TRDciFGktFiSKbgsOzaW0XxdJ4Nr9B62ioA2tyobMB
-cUrQ/jOXWyeWjzAqBUmP1ejFcqtQin8/cgVAUw9PEiCigPrHZ5COYXmFMdo9979r
-kgBUHzrickBne9REmT8dU7dv9jdSJqpmKeamFv6JbO0aPBpj/Zr7cW/jW7tf27XX
-OQIDAQAB
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo7v43JbaeC/tLrhZX5ic
+QwTM1mBCNiFnf+/BoN2ZDR0H9yZYOpvEzVg3jjr3av1mzJMgoGWk/YJeKghV23s/
+y00AEEgvJsdKj1bjB+bskfGLuWeuPlBuN/LxPIzvyazXlGtbsNUT2icrOvp1+tyZ
+p33MdxrQXFA3FYrcKo6+WkLu1SluA3ptFnTOCmOkKLClkKzDcBxGDW911I5DT3tw
+6o8s/Kfdu6wiEBbb9l8TBGcF0oKzIAGwdugh3d1N00oHYUrForIhl9UaK+j5am7V
+IRtxX7UM6pLyaU0Qg1fyT8tTgjtrvEchtzRexSvek7ntMSzZNEpSHcMlKAiLuMt/
+2wIDAQAB
 -----END PUBLIC KEY-----"""
 
 # ─────────────────────────────────────────────────────────────
