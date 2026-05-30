@@ -409,7 +409,6 @@ export default function ExportPage({ projectId, onBack }: Props) {
                 audio={config.audio}
                 projectId={projectId}
                 onChange={audio => updateConfig('audio', audio)}
-                videoDuration={videoDuration}
               />
             )}
             {activeTab === 'output' && (

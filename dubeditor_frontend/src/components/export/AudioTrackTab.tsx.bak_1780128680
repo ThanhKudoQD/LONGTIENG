@@ -1,15 +1,14 @@
 /**
  * AudioTrackTab — voice TTS + nhiều BGM track.
  */
-import React from 'react'
+import React, { useState } from 'react'
 import { AudioConfig, AudioTrack } from './types'
-import StemSeparatorPanel from './StemSeparatorPanel'
+import { uploadAsset } from './exportApi'
 
 interface Props {
   audio: AudioConfig
-  onChange: (audio: AudioConfig) => void
   projectId: number
-  videoDuration: number     // dùng để set end_time cho stem (full video)
+  onChange: (audio: AudioConfig) => void
 }
 
 function genId() { return Math.random().toString(36).slice(2, 10) }
@@ -20,47 +19,39 @@ function fmtTime(s: number): string {
   return `${m}:${String(sec).padStart(2, '0')}`
 }
 
-export default function AudioTrackTab({ audio, onChange, projectId, videoDuration }: Props) {
+export default function AudioTrackTab({ audio, projectId, onChange }: Props) {
+  const [uploading, setUploading] = useState(false)
+
   const patch = <K extends keyof AudioConfig>(key: K, value: AudioConfig[K]) => {
     onChange({ ...audio, [key]: value })
   }
 
-  // v5.1: Thêm stem tracks vào BGM list — không fade, volume 30%
-  const handleAddStems = (stems: { name: string; url: string; volume: number }[]) => {
-    const dur = videoDuration > 0 ? videoDuration : 600   // fallback 10 phút
-    const newTracks: AudioTrack[] = stems.map(s => ({
-      id: genId(),
-      name: s.name,
-      file_path: s.url,
-      file_url: s.url,
-      start_time: 0,
-      end_time: dur,
-      duration_orig: dur,
-      volume: s.volume,
-      fade_in: 0,
-      fade_out: 0,
-      loop: false,
-    }))
-    onChange({ ...audio, tracks: [...audio.tracks, ...newTracks] })
-  }
-
-  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0]
     if (!f) return
-    const url = URL.createObjectURL(f)
-    // TODO: BE upload trả về duration thật. Hiện stub duration = 60s.
-    const tr: AudioTrack = {
-      id: genId(),
-      name: f.name.replace(/\.[^.]+$/, ''),
-      file_path: f.name, file_url: url,
-      start_time: 0, end_time: 60,
-      duration_orig: 60,
-      volume: 0.3,
-      fade_in: 1, fade_out: 2,
-      loop: false,
-    }
-    onChange({ ...audio, tracks: [...audio.tracks, tr] })
     e.target.value = ''
+    setUploading(true)
+    try {
+      const r = await uploadAsset(projectId, f, 'audio')
+      const dur = r.duration || 60
+      const tr: AudioTrack = {
+        id: genId(),
+        name: r.name.replace(/\.[^.]+$/, ''),
+        file_path: r.url,         // url BE
+        file_url: r.url,          // dùng cho <audio> preview
+        start_time: 0,
+        end_time: dur,
+        duration_orig: dur,
+        volume: 0.3,
+        fade_in: 1, fade_out: 2,
+        loop: false,
+      }
+      onChange({ ...audio, tracks: [...audio.tracks, tr] })
+    } catch (err: any) {
+      alert('Upload thất bại: ' + (err?.response?.data?.detail || err?.message || ''))
+    } finally {
+      setUploading(false)
+    }
   }
 
   const updateTrack = (id: string, p: Partial<AudioTrack>) => {
@@ -118,9 +109,6 @@ export default function AudioTrackTab({ audio, onChange, projectId, videoDuratio
         )}
       </div>
 
-      {/* v5.1 — Stem Separator (Demucs) */}
-      <StemSeparatorPanel projectId={projectId} onAddStemsToBgm={handleAddStems} />
-
       {/* BGM tracks */}
       <div>
         <div className="flex items-center justify-between mb-3">
@@ -128,9 +116,9 @@ export default function AudioTrackTab({ audio, onChange, projectId, videoDuratio
             <h3 className="text-[14px] font-semibold">BGM / Sound Effect</h3>
             <p className="text-[12px] text-zinc-500">Thêm nhiều track nhạc nền/hiệu ứng. Mix tự động với voice.</p>
           </div>
-          <label className="btn text-[12px] cursor-pointer">
-            📁 Upload audio
-            <input type="file" accept="audio/*" onChange={handleUpload} className="hidden" />
+          <label className={`btn text-[12px] cursor-pointer ${uploading ? 'opacity-60 pointer-events-none' : ''}`}>
+            {uploading ? '⏳ Đang upload...' : '📁 Upload audio'}
+            <input type="file" accept="audio/*" onChange={handleUpload} disabled={uploading} className="hidden" />
           </label>
         </div>
 

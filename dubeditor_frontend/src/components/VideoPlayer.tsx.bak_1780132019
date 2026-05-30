@@ -1,6 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
 import useStore, { usePlayTimeStore } from '../store'
-import api from '../api'
 
 // wav_duration lấy từ subtitle.wav_duration (backend)
 
@@ -95,90 +94,6 @@ class TTSEngine {
 const ttsEngine = new TTSEngine()
 export { ttsEngine }
 
-
-// ─── Stem Engine (Bass/Drums/Vocals từ Demucs) ──────────────────────────────
-// 3 audio track FULL độ dài video, sync với video.currentTime / play / pause / seek.
-type StemKey = 'bass' | 'drums' | 'vocals'
-
-class StemEngine {
-  private elements: Map<StemKey, HTMLAudioElement> = new Map()
-  private urls: Partial<Record<StemKey, string>> = {}
-  private volumes: Record<StemKey, number> = { bass: 0.3, drums: 0.3, vocals: 0.3 }
-  private enabled: Record<StemKey, boolean> = { bass: false, drums: false, vocals: false }
-  private playing = false
-
-  /** Set URL cho 1 stem. Truyền null/empty để xóa. */
-  setUrl(key: StemKey, url: string | null | undefined) {
-    if (this.urls[key] === url) return
-    this.urls[key] = url || undefined
-    // Hủy element cũ
-    const oldEl = this.elements.get(key)
-    if (oldEl) { try { oldEl.pause() } catch {} ; this.elements.delete(key) }
-    if (!url) return
-    // Tạo element mới
-    const el = new Audio(url)
-    el.preload = 'auto'
-    el.volume = this.volumes[key]
-    el.crossOrigin = 'anonymous'
-    el.muted = !this.enabled[key]
-    this.elements.set(key, el)
-  }
-
-  setVolume(key: StemKey, v: number) {
-    this.volumes[key] = v
-    const el = this.elements.get(key)
-    if (el) el.volume = v
-  }
-
-  setEnabled(key: StemKey, on: boolean) {
-    this.enabled[key] = on
-    const el = this.elements.get(key)
-    if (!el) return
-    el.muted = !on
-    if (!on) {
-      try { el.pause() } catch {}
-    } else if (this.playing) {
-      el.play().catch(() => {})
-    }
-  }
-
-  setPlaying(p: boolean) {
-    this.playing = p
-    this.elements.forEach((el, key) => {
-      if (!p) {
-        try { el.pause() } catch {}
-      } else if (this.enabled[key]) {
-        el.play().catch(() => {})
-      }
-    })
-  }
-
-  seek(t: number) {
-    this.elements.forEach(el => {
-      try { el.currentTime = Math.max(0, t) } catch {}
-    })
-  }
-
-  /** Sync nếu lệch quá threshold so với video.currentTime */
-  sync(videoTime: number, threshold = 0.25) {
-    this.elements.forEach((el, key) => {
-      if (!this.enabled[key]) return
-      const drift = Math.abs(el.currentTime - videoTime)
-      if (drift > threshold) {
-        try { el.currentTime = videoTime } catch {}
-      }
-    })
-  }
-
-  hasAny(): boolean {
-    return Object.values(this.urls).some(Boolean)
-  }
-}
-
-const stemEngine = new StemEngine()
-export { stemEngine }
-
-
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function VideoPlayer() {
   const videoRef    = useRef<HTMLVideoElement>(null)
@@ -194,15 +109,6 @@ export default function VideoPlayer() {
   const [ttsVol, setTtsVol]           = useState(1)
   const [ttsEnabled, setTtsEnabled]   = useState(true)
   const [draggingUI, setDraggingUI]   = useState(false)
-
-  // ─── Stem state (v5.1) ────────────────────────────────────────────────
-  const [stemUrls, setStemUrls] = useState<Partial<Record<'bass'|'drums'|'vocals', string>>>({})
-  const [bassVol, setBassVol]         = useState(0.3)
-  const [drumsVol, setDrumsVol]       = useState(0.3)
-  const [vocalsVol, setVocalsVol]     = useState(0.3)
-  const [bassOn, setBassOn]           = useState(false)
-  const [drumsOn, setDrumsOn]         = useState(false)
-  const [vocalsOn, setVocalsOn]       = useState(false)
 
   // PERF: selectors riêng — KHÔNG destructure useStore()
   const project = useStore(s => s.project)
@@ -221,54 +127,6 @@ export default function VideoPlayer() {
   useEffect(() => { ttsEngine.setVolume(ttsVol) }, [ttsVol])
   useEffect(() => { ttsEngine.setEnabled(ttsEnabled) }, [ttsEnabled])
 
-  // ─── Stem effects ─────────────────────────────────────────────────────
-  // Load stem URLs khi project mở — call API stem-cache
-  useEffect(() => {
-    if (!project?.id) return
-    let cancelled = false
-    api.get(`/export_video/stem-cache/${project.id}`)
-      .then(r => {
-        if (cancelled) return
-        const data = r.data
-        console.log('[StemEngine] stem-cache response:', data)
-        if (data?.cached && data.stems) {
-          setStemUrls(data.stems)
-        } else {
-          setStemUrls({})
-        }
-      })
-      .catch(e => {
-        console.warn('[StemEngine] stem-cache failed:', e?.message)
-      })
-    return () => { cancelled = true }
-  }, [project?.id])
-
-  // Sync URLs với StemEngine
-  useEffect(() => {
-    stemEngine.setUrl('bass', stemUrls.bass)
-    stemEngine.setUrl('drums', stemUrls.drums)
-    stemEngine.setUrl('vocals', stemUrls.vocals)
-  }, [stemUrls])
-
-  // Sync volume + enabled
-  useEffect(() => { stemEngine.setVolume('bass', bassVol) }, [bassVol])
-  useEffect(() => { stemEngine.setVolume('drums', drumsVol) }, [drumsVol])
-  useEffect(() => { stemEngine.setVolume('vocals', vocalsVol) }, [vocalsVol])
-  useEffect(() => { stemEngine.setEnabled('bass', bassOn) }, [bassOn])
-  useEffect(() => { stemEngine.setEnabled('drums', drumsOn) }, [drumsOn])
-  useEffect(() => { stemEngine.setEnabled('vocals', vocalsOn) }, [vocalsOn])
-
-  // Sync drift mỗi 2s khi đang play (tránh stem lệch sau khi loop/buffer)
-  useEffect(() => {
-    const id = setInterval(() => {
-      const v = videoRef.current
-      if (v && !v.paused && isPlayingRef.current) {
-        stemEngine.sync(v.currentTime, 0.3)
-      }
-    }, 2000)
-    return () => clearInterval(id)
-  }, [])
-
   // TTS tick — setInterval hoạt động khi tab ẩn
   useEffect(() => {
     const id = setInterval(() => {
@@ -285,9 +143,9 @@ export default function VideoPlayer() {
     if (!v || !project?.video_path) return
     const syncDur = () => { if (v.duration && isFinite(v.duration)) { durationRef.current = v.duration; setDuration(v.duration) } }
     const onTime  = () => { if (!draggingRef.current) { setCurrentTime(v.currentTime); usePlayTimeStore.getState().setPlayTime(v.currentTime) } }
-    const onPlay  = () => { setPlaying(true);  isPlayingRef.current = true;  ttsEngine.setPlaying(true);  stemEngine.setPlaying(true) }
-    const onPause = () => { setPlaying(false); isPlayingRef.current = false; ttsEngine.setPlaying(false); stemEngine.setPlaying(false) }
-    const onEnded = () => { setPlaying(false); isPlayingRef.current = false; ttsEngine.setPlaying(false); stemEngine.setPlaying(false) }
+    const onPlay  = () => { setPlaying(true);  isPlayingRef.current = true;  ttsEngine.setPlaying(true) }
+    const onPause = () => { setPlaying(false); isPlayingRef.current = false; ttsEngine.setPlaying(false) }
+    const onEnded = () => { setPlaying(false); isPlayingRef.current = false; ttsEngine.setPlaying(false) }
     v.addEventListener('timeupdate', onTime)
     v.addEventListener('play', onPlay)
     v.addEventListener('pause', onPause)
@@ -313,7 +171,6 @@ export default function VideoPlayer() {
     v.currentTime = seekRequest.time
     setCurrentTime(seekRequest.time)
     ttsEngine.stopAll()
-    stemEngine.seek(seekRequest.time)
     clearSeekRequest()
   }, [seekRequest?.id])
 
@@ -328,7 +185,6 @@ export default function VideoPlayer() {
     const t = Math.max(0, Math.min(durationRef.current, v.currentTime + s))
     v.currentTime = t
     ttsEngine.stopAll()
-    stemEngine.seek(t)
   }, [])
 
   const onSeekDown = (e: React.MouseEvent) => {
@@ -343,7 +199,7 @@ export default function VideoPlayer() {
     const onMove = (ev: MouseEvent) => setCurrentTime(calc(ev.clientX))
     const onUp = (ev: MouseEvent) => {
       const t = calc(ev.clientX)
-      if (v) { v.currentTime = t; ttsEngine.stopAll(); stemEngine.seek(t) }
+      if (v) { v.currentTime = t; ttsEngine.stopAll() }
       setCurrentTime(t)
       draggingRef.current = false; setDraggingUI(false)
       document.removeEventListener('mousemove', onMove)
@@ -434,56 +290,6 @@ export default function VideoPlayer() {
           </button>
         </div>
       </div>
-
-      {/* v5.1 — Stem volume (chỉ hiển thị nếu đã có stem) */}
-      {(stemUrls.bass || stemUrls.drums || stemUrls.vocals) && (
-        <div className="flex items-center gap-3 px-3 pb-2 bg-zinc-900 flex-shrink-0 border-t border-zinc-800/50 pt-1.5">
-          {/* Bass */}
-          <div className="flex items-center gap-1.5 flex-1">
-            <span className="text-[12px] flex-shrink-0">🎸</span>
-            <span className="text-[9px] text-zinc-500 flex-shrink-0 w-9">BASS</span>
-            <input type="range" min={0} max={1} step={0.05} value={bassVol}
-              disabled={!stemUrls.bass}
-              onChange={e => setBassVol(parseFloat(e.target.value))}
-              className="flex-1 accent-purple-500 cursor-pointer disabled:opacity-40" style={{ height: 4 }} />
-            <span className="text-[9px] text-zinc-500 w-5 text-right tabular-nums">{Math.round(bassVol*100)}</span>
-            <button onClick={() => setBassOn(v => !v)} disabled={!stemUrls.bass}
-              className={`w-8 h-5 rounded text-[9px] font-bold flex-shrink-0 disabled:opacity-40 ${bassOn ? 'bg-purple-600 text-white' : 'bg-zinc-700 text-zinc-400'}`}>
-              {bassOn ? 'ON' : 'OFF'}
-            </button>
-          </div>
-          <div className="w-px h-4 bg-zinc-700 flex-shrink-0" />
-          {/* Drums */}
-          <div className="flex items-center gap-1.5 flex-1">
-            <span className="text-[12px] flex-shrink-0">🥁</span>
-            <span className="text-[9px] text-zinc-500 flex-shrink-0 w-9">DRUMS</span>
-            <input type="range" min={0} max={1} step={0.05} value={drumsVol}
-              disabled={!stemUrls.drums}
-              onChange={e => setDrumsVol(parseFloat(e.target.value))}
-              className="flex-1 accent-amber-500 cursor-pointer disabled:opacity-40" style={{ height: 4 }} />
-            <span className="text-[9px] text-zinc-500 w-5 text-right tabular-nums">{Math.round(drumsVol*100)}</span>
-            <button onClick={() => setDrumsOn(v => !v)} disabled={!stemUrls.drums}
-              className={`w-8 h-5 rounded text-[9px] font-bold flex-shrink-0 disabled:opacity-40 ${drumsOn ? 'bg-amber-600 text-white' : 'bg-zinc-700 text-zinc-400'}`}>
-              {drumsOn ? 'ON' : 'OFF'}
-            </button>
-          </div>
-          <div className="w-px h-4 bg-zinc-700 flex-shrink-0" />
-          {/* Vocals */}
-          <div className="flex items-center gap-1.5 flex-1">
-            <span className="text-[12px] flex-shrink-0">🎤</span>
-            <span className="text-[9px] text-zinc-500 flex-shrink-0 w-9">VOCALS</span>
-            <input type="range" min={0} max={1} step={0.05} value={vocalsVol}
-              disabled={!stemUrls.vocals}
-              onChange={e => setVocalsVol(parseFloat(e.target.value))}
-              className="flex-1 accent-pink-500 cursor-pointer disabled:opacity-40" style={{ height: 4 }} />
-            <span className="text-[9px] text-zinc-500 w-5 text-right tabular-nums">{Math.round(vocalsVol*100)}</span>
-            <button onClick={() => setVocalsOn(v => !v)} disabled={!stemUrls.vocals}
-              className={`w-8 h-5 rounded text-[9px] font-bold flex-shrink-0 disabled:opacity-40 ${vocalsOn ? 'bg-pink-600 text-white' : 'bg-zinc-700 text-zinc-400'}`}>
-              {vocalsOn ? 'ON' : 'OFF'}
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

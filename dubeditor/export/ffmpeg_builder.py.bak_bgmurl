@@ -480,36 +480,7 @@ def build_ffmpeg_command(
     bgm_input_indices = {}
     for tr in cfg.audio.tracks:
         fp = getattr(tr, '_resolved_path', None) or tr.file_path
-        # v5.1: nếu file_path là URL như "/dub/exports/<name>" hoặc
-        # "/dub/projects/<pid>/audio/<name>", convert sang path filesystem.
-        if fp and isinstance(fp, str):
-            if fp.startswith('/dub/exports/'):
-                fname = fp.replace('/dub/exports/', '', 1)
-                # EXPORTS_DIR = STORAGE / "_exports" (xem service.py)
-                from dubeditor.export.service import EXPORTS_DIR
-                candidate = str(EXPORTS_DIR / fname)
-                if os.path.exists(candidate):
-                    fp = candidate
-            elif fp.startswith('/dub/projects/'):
-                # /dub/projects/{pid}/audio/{sub_id}.wav hoặc upload paths
-                from dubeditor.routers.projects import STORAGE
-                rel = fp.replace('/dub/projects/', '', 1)
-                candidate = str(STORAGE / rel)
-                if os.path.exists(candidate):
-                    fp = candidate
-            elif fp.startswith('/dub/export_uploads/'):
-                # BGM upload từ user qua upload-asset
-                fname = fp.replace('/dub/export_uploads/', '', 1)
-                from dubeditor.routers.projects import STORAGE
-                candidate = str(STORAGE / '_export_uploads' / fname)
-                if os.path.exists(candidate):
-                    fp = candidate
-
-        if not fp or not os.path.exists(fp):
-            import logging
-            logging.getLogger(__name__).warning(
-                f"[BGM] Skip track {tr.id} ({tr.name}): file không tồn tại — {tr.file_path!r}"
-            )
+        if not os.path.exists(fp):
             continue
         bgm_input_indices[tr.id] = len(inputs)
         inputs.append(('-i', fp))

@@ -397,20 +397,14 @@ def separate_stems(project_id: int, db: Session = Depends(get_db)):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(404, "Project không tồn tại")
-    if not project.video_path and not project.video_name:
+    if not project.video_name:
         raise HTTPException(400, "Project chưa có video")
 
-    # Resolve video file qua video_path (chứa UUID filename), fallback video_name
+    # Resolve video path
     from dubeditor.routers.projects import VIDEO_DIR
-    video_filename = None
-    if project.video_path:
-        video_filename = Path(project.video_path).name
-    if not video_filename and project.video_name:
-        video_filename = project.video_name
-
-    video_path = VIDEO_DIR / video_filename
+    video_path = VIDEO_DIR / project.video_name
     if not video_path.exists():
-        raise HTTPException(404, f"Video file không tồn tại: {video_filename}")
+        raise HTTPException(404, f"Video file không tồn tại: {project.video_name}")
 
     # Check duplicate job
     with _stem_jobs_lock:
