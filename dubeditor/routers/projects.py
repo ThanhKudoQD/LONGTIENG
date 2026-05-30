@@ -5,8 +5,9 @@ from pathlib import Path
 import json, shutil, uuid
 
 from dubeditor.database import get_db
-from dubeditor.models import Project, Subtitle, Bible, Scene
+from dubeditor.models import Project, Subtitle, Bible, Scene, User
 from dubeditor.schemas import ProjectCreate, ProjectOut
+from dubeditor.auth_deps import get_current_user, check_project_access
 
 router = APIRouter()
 
@@ -73,29 +74,40 @@ def _enrich_project_out(p: Project, db: Session) -> ProjectOut:
 
 
 @router.get("/", response_model=list[ProjectOut])
-def list_projects(db: Session = Depends(get_db)):
-    projects = db.query(Project).order_by(Project.updated_at.desc()).all()
+def list_projects(db: Session = Depends(get_db),
+                   user: User = Depends(get_current_user)):
+    """List project. Admin thấy tất cả, user thường chỉ thấy của mình."""
+    q = db.query(Project)
+    if not user.is_admin:
+        q = q.filter(Project.owner_id == user.id)
+    projects = q.order_by(Project.updated_at.desc()).all()
     return [_enrich_project_out(p, db) for p in projects]
 
 
 @router.post("/", response_model=ProjectOut)
-def create_project(data: ProjectCreate, db: Session = Depends(get_db)):
-    p = Project(name=data.name, project_type=data.project_type or 'short_drama')
+def create_project(data: ProjectCreate, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    p = Project(name=data.name,
+                project_type=data.project_type or 'short_drama',
+                owner_id=user.id)
     db.add(p); db.commit(); db.refresh(p)
     (STORAGE / str(p.id) / "audio").mkdir(parents=True, exist_ok=True)
     return _enrich_project_out(p, db)
 
 
 @router.get("/{project_id}", response_model=ProjectOut)
-def get_project(project_id: int, db: Session = Depends(get_db)):
+def get_project(project_id: int, db: Session = Depends(get_db),
+                 user: User = Depends(get_current_user)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
+    check_project_access(p, user)
     return _enrich_project_out(p, db)
 
 
 @router.patch("/{project_id}")
-def update_project(project_id: int, body: dict, db: Session = Depends(get_db)):
+def update_project(project_id: int, body: dict, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
     """Update các field cấu hình của project. Hiện tại hỗ trợ:
       - use_emotion_voice (bool): bật/tắt multi-mode voice cho TTS
       - tts_voice_mode (str|null): override mode global
@@ -106,6 +118,7 @@ def update_project(project_id: int, body: dict, db: Session = Depends(get_db)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
+    check_project_access(p, user)
 
     # Whitelist các field được phép update
     if "use_emotion_voice" in body:
@@ -115,7 +128,12 @@ def update_project(project_id: int, body: dict, db: Session = Depends(get_db)):
         v = body["tts_voice_mode"]
         p.tts_voice_mode = v if (v and str(v).strip()) else None
     if "name" in body:
-        p.name = str(body["name"])
+        new_name = str(body["name"]).strip()
+        if not new_name:
+            raise HTTPException(400, "Tên project không được rỗng")
+        if len(new_name) > 200:
+            raise HTTPException(400, "Tên project tối đa 200 ký tự")
+        p.name = new_name
     # v3.9: Editor resume state
     if "last_filter_chapter_ids" in body:
         v = body["last_filter_chapter_ids"]
@@ -155,10 +173,12 @@ def update_project(project_id: int, body: dict, db: Session = Depends(get_db)):
 
 
 @router.delete("/{project_id}")
-def delete_project(project_id: int, db: Session = Depends(get_db)):
+def delete_project(project_id: int, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
+    check_project_access(p, user)
 
     # v3.14: Xóa file vật lý kèm project (TTS audio + video + exports).
     # Trước đây chỉ xóa row DB → orphan files trên disk.
@@ -222,46 +242,29 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
         except Exception as e:
             _logger.warning(f"[Delete] Failed to remove video: {e}")
 
-    # ── 4) Export files: data/projects/_exports/{pid}_* + export_{pid}_* ──
-    # v4.0: Export Video module tạo file pattern "export_{pid}_{job_id}.mp4"
-    # và "sub_{pid}_{job_id}.ass" → cần glob cả 2 pattern.
+    # ── 4) Export files: data/projects/_exports/{pid}_* ──
     try:
-        patterns = [
-            f"{project_id}_*",            # legacy
-            f"export_{project_id}_*",     # v4.0 video output
-            f"sub_{project_id}_*",        # v4.0 ASS subtitle
-        ]
-        for pat in patterns:
-            for f in EXPORTS_DIR.glob(pat):
-                try:
-                    f.unlink()
-                    _logger.info(f"[Delete] Removed export file: {f}")
-                except Exception as e:
-                    _logger.warning(f"[Delete] Failed to remove {f}: {e}")
+        for f in EXPORTS_DIR.glob(f"{project_id}_*"):
+            try:
+                f.unlink()
+                _logger.info(f"[Delete] Removed export file: {f}")
+            except Exception as e:
+                _logger.warning(f"[Delete] Failed to remove {f}: {e}")
     except Exception as e:
         _logger.warning(f"[Delete] Failed to scan exports: {e}")
-
-    # ── 5) Export job rows (v4.0) ──
-    # ExportJob có FK đến projects nhưng KHÔNG có relationship cascade ở model.
-    # Phải xóa explicit để tránh orphan rows + lỗi FK.
-    try:
-        n_jobs = db.execute(
-            sql_text("DELETE FROM export_jobs WHERE project_id = :pid"),
-            {"pid": project_id}
-        ).rowcount
-        _logger.info(f"[Delete] Removed {n_jobs} export_jobs rows for pid={project_id}")
-    except Exception as e:
-        _logger.warning(f"[Delete] Failed to clear export_jobs: {e}")
 
     db.delete(p); db.commit()
     return {"ok": True}
 
 
 @router.post("/{project_id}/upload-video")
-async def upload_video(project_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_video(project_id: int, file: UploadFile = File(...),
+                        db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
+    check_project_access(p, user)
 
     import subprocess, logging
     from dubeditor.routers.ws import broadcast
@@ -334,6 +337,7 @@ async def import_srt(
     force: bool = False,                 # giữ lại để backward-compatible
     lang_override: str | None = None,    # 'vi' = user xác nhận import như SRT Việt
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Import SRT vào project.
 
@@ -347,6 +351,7 @@ async def import_srt(
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
+    check_project_access(p, user)
 
     raw = await file.read()
     # Thử nhiều encoding — SRT có thể là utf-8, utf-8-sig (BOM), gbk, gb18030
@@ -508,7 +513,8 @@ def _srt_to_sec(t: str) -> float:
 
 
 @router.post("/{project_id}/backfill-original-text")
-def backfill_original_text(project_id: int, db: Session = Depends(get_db)):
+def backfill_original_text(project_id: int, db: Session = Depends(get_db),
+                            user: User = Depends(get_current_user)):
     """Backfill original_text từ text cho subtitles cũ chưa có gốc.
 
     Dùng khi project đã import SRT trước khi fix bug original_text.
@@ -517,6 +523,7 @@ def backfill_original_text(project_id: int, db: Session = Depends(get_db)):
     p = db.query(Project).filter(Project.id == project_id).first()
     if not p:
         raise HTTPException(404, "Project not found")
+    check_project_access(p, user)
 
     updated = 0
     subs = db.query(Subtitle).filter(
